@@ -22,7 +22,7 @@ jobs:
     name: Format, lint, and C ABI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: rustfmt, clippy
@@ -44,7 +44,7 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
       - uses: Swatinem/rust-cache@v2
       - name: Install CPython development files
@@ -65,7 +65,7 @@ jobs:
         jit: ['0', '1']
         gc: [default, stress]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
       - uses: Swatinem/rust-cache@v2
       - name: Build Tonic CLI

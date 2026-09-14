@@ -41,7 +41,6 @@ extern "C" {
     pub fn PyGILState_Release(state: PyGilState);
     pub fn Py_DecRef(object: *mut PyObject);
     pub fn Py_IncRef(object: *mut PyObject);
-    pub fn Py_REFCNT(object: *mut PyObject) -> PySsizeT;
     pub fn PyErr_Occurred() -> *mut PyObject;
     pub fn PyErr_Clear();
     pub fn PyErr_SetString(exception: *mut PyObject, message: *const c_char);

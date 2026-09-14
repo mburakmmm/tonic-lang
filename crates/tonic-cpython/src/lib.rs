@@ -721,6 +721,44 @@ unsafe extern "C-unwind" fn destroy_pyobject(payload: *mut c_void) {
     }
 }
 
+unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
+    // Py_REFCNT is a C macro/static inline on supported CPython releases and is
+    // therefore not a portable linkable ABI symbol. Going through the public
+    // sys.getrefcount callable keeps CPython's object layout out of Rust. The
+    // PyObject_CallOneArg passes this already-owned object through vectorcall's
+    // borrowed argument array, so this bridge call adds no owned reference.
+    let module = unsafe { ffi::PyImport_ImportModule(c"sys".as_ptr()) };
+    if module.is_null() {
+        unsafe { ffi::PyErr_Clear() };
+        return None;
+    }
+    let function = unsafe { ffi::PyObject_GetAttrString(module, c"getrefcount".as_ptr()) };
+    if function.is_null() {
+        unsafe {
+            ffi::Py_DecRef(module);
+            ffi::PyErr_Clear();
+        }
+        return None;
+    }
+    let result = unsafe { ffi::PyObject_CallOneArg(function, object) };
+    unsafe {
+        ffi::Py_DecRef(function);
+        ffi::Py_DecRef(module);
+    }
+    if result.is_null() {
+        unsafe { ffi::PyErr_Clear() };
+        return None;
+    }
+    let mut overflow = 0;
+    let count = unsafe { ffi::PyLong_AsLongLongAndOverflow(result, &mut overflow) };
+    unsafe { ffi::Py_DecRef(result) };
+    if overflow != 0 || unsafe { !ffi::PyErr_Occurred().is_null() } {
+        unsafe { ffi::PyErr_Clear() };
+        return None;
+    }
+    isize::try_from(count).ok()
+}
+
 unsafe extern "C-unwind" fn trace_proxy(
     object: *mut c_void,
     visitor: *mut tonic_runtime::TonicTraceVisitor,
@@ -745,7 +783,9 @@ unsafe extern "C-unwind" fn trace_proxy(
     if status != TonicStatus::OK {
         return status;
     }
-    let reference_count = unsafe { ffi::Py_REFCNT(object) };
+    let Some(reference_count) = (unsafe { python_reference_count(object) }) else {
+        return TonicStatus::INVALID_ARGUMENT;
+    };
     if payload.strong
         && payload.tonic_wrappers != 0
         && reference_count <= payload.tonic_wrappers as isize
