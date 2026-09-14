@@ -2239,11 +2239,7 @@ impl Vm {
             if let Some(slot) = (usize::from(signature.posonly)..named)
                 .find(|slot| metadata.locals[*slot] == keyword)
             {
-                if slot < positional_bound
-                    || site.keywords[..index]
-                        .iter()
-                        .any(|previous| *previous == keyword)
-                {
+                if slot < positional_bound || site.keywords[..index].contains(&keyword) {
                     return None;
                 }
             } else if !materialize_variadics || signature.kwarg.is_none() {

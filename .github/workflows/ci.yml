@@ -23,8 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.86.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install CPython development files
@@ -45,7 +46,9 @@ jobs:
         profile: [debug, release]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.86.0
       - uses: Swatinem/rust-cache@v2
       - name: Install CPython development files
         run: sudo apt-get update && sudo apt-get install --yes python3-dev
@@ -66,7 +69,9 @@ jobs:
         gc: [default, stress]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.86.0
       - uses: Swatinem/rust-cache@v2
       - name: Build Tonic CLI
         run: cargo build --locked -p tonic-cli
