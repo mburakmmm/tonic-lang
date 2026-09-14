@@ -1,0 +1,32 @@
+{
+  "scope": "five-process intermediate Tonic-vs-CPython comparison; not final language benchmark",
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "rustc": "rustc 1.86.0 (05f9846f8 2025-03-31)",
+  "tonic_binary": "target/release/tonic",
+  "tonic_sha256": "6f41b08963611a395cb91e90cb535916d0cfaa4ffa06011af5fa971fc357d14f",
+  "warm_binary": "target/release/deps/python_compare-7b873ca3aa1d38ea",
+  "warm_binary_sha256": "8940f9f1e846ec114f2a675db5af3e2a282fda379fc7fcd20de2d7d8fa58485d",
+  "cargo_lock_sha256": "998a5a3376cb55b72d80c28333d37a9d5d6b0dc347154a2d17deb6da57faff51",
+  "case_source_sha256": "0e923d75e9fd095b44a026499fc92c75fbc07a6d5f0ebcc35360dbc5d1b16c7e",
+  "case_count": 13,
+  "warmup_per_warm_case": 5,
+  "samples_per_warm_case": 30,
+  "warmup_per_cold_case": 3,
+  "samples_per_cold_case": 15,
+  "limitations": [
+    "uncontrolled desktop load and CPU frequency",
+    "no CPU affinity or hardware performance counters",
+    "no per-workload RSS or host allocator counters",
+    "Tonic has no adaptive tier or JIT yet",
+    "warm Tonic uses a fresh VM outside the timer; both engines execute into a fresh module namespace",
+    "results apply only to the listed shared syntax subset"
+  ],
+  "independent_runs": 5,
+  "warm_samples_per_engine_case": 150,
+  "cold_samples_per_engine_case": 75,
+  "cpython_jit_available": false,
+  "cpython_jit_enabled": false,
+  "raw_samples_sha256": "4d1a5ba600508ff3f44db01eaeca92e216f785251359d03936f99bbacd7961db"
+}

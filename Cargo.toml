@@ -1,0 +1,30 @@
+[workspace]
+members = ["crates/tonic-core", "crates/tonic-compiler", "crates/tonic-jit", "crates/tonic-runtime", "crates/tonic-cli", "crates/tonic-cpython"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+publish = false
+
+[workspace.dependencies]
+tonic-core = { path = "crates/tonic-core" }
+tonic-compiler = { path = "crates/tonic-compiler" }
+tonic-runtime = { path = "crates/tonic-runtime" }
+tonic-jit = { path = "crates/tonic-jit" }
+tonic-cpython = { path = "crates/tonic-cpython" }
+rustpython-parser = { version = "=0.4.0", default-features = false, features = ["num-bigint"] }
+num-bigint = "=0.4.6"
+num-traits = "=0.2.19"
+cranelift-codegen = "=0.119.0"
+cranelift-frontend = "=0.119.0"
+cranelift-jit = "=0.119.0"
+cranelift-module = "=0.119.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

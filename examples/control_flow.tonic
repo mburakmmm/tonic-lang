@@ -1,0 +1,11 @@
+def sum_to(n):
+    total = 0
+    for i in range(n):
+        if i % 2 == 0:
+            continue
+        total += i
+    return total
+
+print(sum_to(10))
+print(-7 // 3, -7 % 3)
+print(0 < 1 < 2, False and missing_name)

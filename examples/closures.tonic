@@ -1,0 +1,18 @@
+def make_counter(start=0):
+    def increment(amount=1, *, scale=1):
+        nonlocal start
+        start += amount * scale
+        return start
+    return increment
+
+counter = make_counter(10)
+print(counter(), counter(amount=2, scale=3))
+
+def describe(label, /, *values, **metadata):
+    print(label, values, metadata)
+
+describe('counter', *[counter()], **{'kind': 'closure'})
+
+record = {'count': counter()}
+record['count'] += 1
+print(record)

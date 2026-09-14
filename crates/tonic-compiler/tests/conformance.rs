@@ -1,0 +1,205 @@
+use tonic_compiler::{compile, parse};
+use tonic_core::{
+    ast::{ExprKind, StmtKind},
+    bytecode::Op,
+};
+#[test]
+fn spans_unicode_and_precedence() {
+    let src = "x = 1 + 2 * 3\nprint('é')\n";
+    let ast = parse(src, "x").unwrap();
+    let StmtKind::Assign(_, expr) = &ast.body[0].kind else {
+        panic!("assignment")
+    };
+    assert_eq!(
+        &src[expr.span.start as usize..expr.span.end as usize],
+        "1 + 2 * 3"
+    );
+    let ExprKind::Binary(_, _, right) = &expr.kind else {
+        panic!("binary")
+    };
+    assert!(matches!(right.kind, ExprKind::Binary(..)));
+    assert_eq!(ast.body[1].span.start, 14);
+}
+#[test]
+fn valid_python_forms() {
+    for src in [
+        "if True:\n\tprint(1)\n",
+        "x=(1+\n 2)\n",
+        "x=0xff + 1_000\n",
+        "x='''multi\nline'''\n",
+        "x=1; y=2\n",
+        "def f(a, /, b):\n    return a+b\nprint(f(1,2))",
+        "f=lambda a,/,b=2,*args,c=3,**kw:(a,b,args,c,kw)",
+        "print(-1*2+3, not 1==2)",
+        "print([0,1,2,3][1:3], 'abc'[::-1])",
+        "del object.attr",
+    ] {
+        compile(src, "x").unwrap();
+    }
+}
+#[test]
+fn invalid_python_forms() {
+    for src in [
+        "if True\n    pass",
+        "if True:\npass",
+        "def f(a,a):\n    pass",
+        "a + = 1",
+        "  x=1\n y=2",
+        "(1+2",
+        "break",
+        "continue",
+        "return 1",
+        "1 = 2",
+    ] {
+        assert!(compile(src, "x").is_err(), "accepted {src:?}");
+    }
+}
+#[test]
+fn unsupported_syntax_is_explicit() {
+    for src in [
+        "class X(metaclass=type):\n    pass",
+        "async def f():\n    pass",
+        "x=[i for i in range(3)]",
+        "print(f'{1}')",
+        "match x:\n    case 1:\n        pass",
+        "x=[1,2]\nx[:]=[3]",
+        "del x",
+        "del x[0]",
+    ] {
+        let e = compile(src, "x").unwrap_err();
+        assert_eq!(e.kind, "UnsupportedSyntax", "{src}");
+        assert!(e.span.is_some());
+    }
+}
+
+#[test]
+fn slice_ast_and_bytecode_are_tonic_owned() {
+    let source = "x = values[1:4:2]\n";
+    let ast = parse(source, "slice").unwrap();
+    let StmtKind::Assign(_, value) = &ast.body[0].kind else {
+        panic!("assignment")
+    };
+    let ExprKind::Subscript(_, item) = &value.kind else {
+        panic!("subscript")
+    };
+    assert!(matches!(item.kind, ExprKind::Slice { .. }));
+    assert_eq!(
+        &source[item.span.start as usize..item.span.end as usize],
+        "1:4:2"
+    );
+    let program = compile(source, "slice").unwrap();
+    assert!(program.program().code[0]
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::Slice as u16));
+}
+#[test]
+fn temporary_registers_reused() {
+    let source = "x = 1+2\n".repeat(1000);
+    let p = compile(&source, "x").unwrap();
+    assert!(p.program().code[0].registers < 10);
+}
+#[test]
+fn bytecode_pipeline_has_local_and_global_operations() {
+    let p = compile("x=1\ndef f(a):\n    return a+x\nprint(f(2))", "x").unwrap();
+    assert_eq!(p.program().code.len(), 2);
+    let f = &p.program().code[1];
+    assert_eq!(f.params, 1);
+    assert!(f
+        .instructions
+        .iter()
+        .any(|i| i.opcode == Op::LoadGlobal as u16));
+    assert!(f.instructions.iter().any(|i| i.opcode == Op::Move as u16));
+}
+#[test]
+fn resource_limits_reject_deep_ast_before_parsing() {
+    let s = format!("x={}1{}", "(".repeat(300), ")".repeat(300));
+    assert_eq!(compile(&s, "x").unwrap_err().kind, "ResourceError");
+    let s = format!("x={}", vec!["1"; 300].join("+"));
+    assert_eq!(compile(&s, "x").unwrap_err().kind, "ResourceError");
+}
+#[test]
+fn class_scopes_and_target_spans() {
+    let source = "class Café:\n    def f(self):\n        self.x=1\n";
+    let ast = parse(source, "class").unwrap();
+    let StmtKind::Class { body, .. } = &ast.body[0].kind else {
+        panic!("class")
+    };
+    let StmtKind::Function { body, .. } = &body[0].kind else {
+        panic!("method")
+    };
+    let span = body[0].span;
+    assert_eq!(&source[span.start as usize..span.end as usize], "self.x=1");
+    let p = compile(source, "class").unwrap();
+    assert!(p.program().code[1].class_body);
+    assert!(!p.program().code[2].class_body);
+    for bad in [
+        "class C:\n    return 1",
+        "def f():\n    class C:\n        return 1",
+        "while True:\n    class C:\n        break",
+        "class C:\n    nonlocal x",
+    ] {
+        assert_eq!(
+            compile(bad, "bad").unwrap_err().kind,
+            "SyntaxError",
+            "{bad}"
+        );
+    }
+    let p = compile(
+        "class C:\n    def f(self):\n        return __class__",
+        "class-cell",
+    )
+    .unwrap();
+    assert_eq!(p.program().code[1].cell_locals.len(), 1);
+    assert_eq!(p.program().code[2].free_vars.len(), 1);
+}
+
+#[test]
+fn decorator_ast_and_bytecode_preserve_application_order() {
+    let source = "@outer\n@factory(1)\ndef f(x=default()):\n    return x\n";
+    let ast = parse(source, "decorators").unwrap();
+    let StmtKind::Function { decorators, .. } = &ast.body[0].kind else {
+        panic!("decorated function")
+    };
+    assert_eq!(decorators.len(), 2);
+    assert_eq!(
+        &source[decorators[0].span.start as usize..decorators[0].span.end as usize],
+        "outer"
+    );
+    let program = compile(source, "decorators").unwrap();
+    let module = &program.program().code[0];
+    assert_eq!(
+        module
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == Op::Call as u16)
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn lambda_has_own_scope_span_and_function_bytecode() {
+    let source = "x=2\nf=lambda a=1: lambda b:a+b+x\n";
+    let ast = parse(source, "lambda").unwrap();
+    let StmtKind::Assign(_, expression) = &ast.body[1].kind else {
+        panic!("lambda assignment")
+    };
+    let ExprKind::Lambda { body, .. } = &expression.kind else {
+        panic!("outer lambda")
+    };
+    assert_eq!(
+        &source[expression.span.start as usize..expression.span.end as usize],
+        "lambda a=1: lambda b:a+b+x"
+    );
+    assert!(matches!(body.kind, ExprKind::Lambda { .. }));
+    let program = compile(source, "lambda").unwrap();
+    assert_eq!(program.program().code.len(), 3);
+    assert!(program.program().code[0]
+        .instructions
+        .iter()
+        .any(|i| i.opcode == Op::Function as u16));
+    let class_lambda = compile("class C:\n    f=lambda: __class__", "class-cell").unwrap();
+    assert_eq!(class_lambda.program().code[1].cell_locals.len(), 1);
+    assert_eq!(class_lambda.program().code[2].free_vars.len(), 1);
+}

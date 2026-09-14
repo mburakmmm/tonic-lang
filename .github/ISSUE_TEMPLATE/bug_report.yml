@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible compiler, VM, GC, JIT, or tooling defect.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a Tonic defect. For security-sensitive issues, use the private process in SECURITY.md.
+  - type: input
+    id: revision
+    attributes:
+      label: Tonic revision
+      description: Commit SHA or branch revision where the issue occurs.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Rust version, and CPython version if the bridge is involved.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include source code and the exact command used.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked the roadmap and existing issues.
+          required: true
+        - label: This report does not contain a security vulnerability.
+          required: true

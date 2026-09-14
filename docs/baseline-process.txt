@@ -1,0 +1,3 @@
+native_scope_create_resolve_drop_100000: 2.390 ms; active_handles=0
+        0.13 real         0.12 user         0.00 sys
+time: sysctl kern.clockrate: Operation not permitted

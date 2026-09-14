@@ -1,0 +1,28 @@
+{
+  "scope": "intermediate regression measurement; not final language benchmark",
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "rustc": "rustc 1.86.0 (05f9846f8 2025-03-31)",
+  "binary": "target/release/deps/interpreter-801d62d5258758f1",
+  "binary_sha256": "a81847cb026375c71496a727d2fab5e21101ffd1dcb76ab634dd768872fd6eb1",
+  "cargo_lock_sha256": "998a5a3376cb55b72d80c28333d37a9d5d6b0dc347154a2d17deb6da57faff51",
+  "exit_code": 0,
+  "process_wall_s": 1.4339503750088625,
+  "process_user_s": 1.125102,
+  "process_system_s": 0.010024,
+  "process_peak_rss_bytes": 13991936,
+  "rss_scope": "one benchmark process, all workloads including parser, VM setup and teardown; not per-workload RSS",
+  "samples_per_case": 15,
+  "warmup_per_case": 2,
+  "gc_modes": [
+    "default (1024 allocation interval)",
+    "disabled"
+  ],
+  "limitations": [
+    "uncontrolled desktop load",
+    "fixed workload order",
+    "no host allocator counters",
+    "no CPU affinity/frequency control",
+    "no JIT or CPython speed comparison"
+  ]
+}

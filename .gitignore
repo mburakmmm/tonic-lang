@@ -1,0 +1,14 @@
+/target/
+.DS_Store
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+*.swp
+*.swo
+.env
+.env.*
+!.env.example
+coverage/
+*.profraw
+*.profdata

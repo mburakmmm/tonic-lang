@@ -1,0 +1,22 @@
+class Counter:
+    "A counter with per-instance state."
+    category = 'counter'
+
+    def __init__(self, start=0):
+        self.value = start
+
+    def increment(self, amount=1, *, scale=1):
+        self.value += amount * scale
+        return self.value
+
+
+class NamedCounter(Counter):
+    category = 'named counter'
+
+
+counter = NamedCounter(10)
+saved_method = counter.increment
+print(counter.category, saved_method(), saved_method(2, scale=3))
+print(isinstance(counter, Counter), issubclass(NamedCounter, Counter))
+setattr(counter, 'label', 'demo')
+print(getattr(counter, 'label'), Counter.__doc__)

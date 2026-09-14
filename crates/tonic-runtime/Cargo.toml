@@ -1,0 +1,60 @@
+[package]
+name = "tonic-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tonic-core.workspace = true
+tonic-jit.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+
+[dev-dependencies]
+tonic-compiler.workspace = true
+
+[[bench]]
+name = "interpreter"
+harness = false
+
+[[bench]]
+name = "python_compare"
+harness = false
+
+[[bench]]
+name = "jit"
+harness = false
+
+[[bench]]
+name = "adaptive_pic"
+harness = false
+
+[[bench]]
+name = "generational_gc"
+harness = false
+
+[[bench]]
+name = "jit_direct_call"
+harness = false
+
+[[bench]]
+name = "native_c_abi"
+harness = false
+
+[[bench]]
+name = "buffer"
+harness = false
+
+[[bench]]
+name = "callback"
+harness = false
+
+[[bench]]
+name = "foreign_lifecycle"
+harness = false
+
+# The public C boundary is isolated in `c_api.rs`. The crate root denies unsafe
+# again and grants a local exception only to that module.
+[lints.rust]
+unsafe_code = "allow"

@@ -1,0 +1,3 @@
+import fastmath
+
+print(fastmath.add(20, 22))

@@ -1,0 +1,13 @@
+[package]
+name = "tonic-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tonic-core.workspace = true
+rustpython-parser.workspace = true
+
+[lints]
+workspace = true

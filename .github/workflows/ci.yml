@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: Format, lint, and C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install CPython development files
+        run: sudo apt-get update && sudo apt-get install --yes python3-dev
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Validate public C header
+        run: cc -std=c11 -Wall -Wextra -Werror -Iinclude -fsyntax-only tests/c_header_smoke.c
+
+  tests:
+    name: Tests (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install CPython development files
+        run: sudo apt-get update && sudo apt-get install --yes python3-dev
+      - name: Run debug tests
+        if: matrix.profile == 'debug'
+        run: cargo test --workspace --locked
+      - name: Run release tests
+        if: matrix.profile == 'release'
+        run: cargo test --release --workspace --locked
+
+  differential:
+    name: Differential (JIT=${{ matrix.jit }}, GC=${{ matrix.gc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jit: ['0', '1']
+        gc: [default, stress]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Tonic CLI
+        run: cargo build --locked -p tonic-cli
+      - name: Compare with Python (default GC)
+        if: matrix.gc == 'default'
+        env:
+          TONIC_JIT: ${{ matrix.jit }}
+        run: python3 tests/differential/run.py target/debug/tonic
+      - name: Compare with Python (stress GC)
+        if: matrix.gc == 'stress'
+        env:
+          TONIC_JIT: ${{ matrix.jit }}
+          TONIC_GC_EVERY: '1'
+        run: python3 tests/differential/run.py target/debug/tonic

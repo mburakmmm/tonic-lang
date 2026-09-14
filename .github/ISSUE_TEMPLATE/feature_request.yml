@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a language, runtime, JIT, interop, or tooling improvement.
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete user or implementation problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable semantics and any compatibility expectation.
+    validations:
+      required: true
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Runtime and performance impact
+      description: Note expected allocations, guards, fallbacks, GC/JIT implications, and useful benchmarks.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked ROADMAP.md and existing issues.
+          required: true

@@ -1,0 +1,1 @@
+native_scope_create_resolve_drop_100000: median 2.456 ms, min 2.450, max 2.549; active_handles=0

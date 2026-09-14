@@ -1,0 +1,21 @@
+[package]
+name = "tonic-cpython"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+tonic-core.workspace = true
+tonic-runtime.workspace = true
+
+[dev-dependencies]
+tonic-compiler.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+
+[[bench]]
+name = "bridge"
+harness = false

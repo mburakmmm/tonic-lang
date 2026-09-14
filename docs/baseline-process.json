@@ -1,0 +1,10 @@
+{
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "exit_code": 0,
+  "peak_rss_bytes": 3817472,
+  "user_seconds": 0.141782,
+  "system_seconds": 0.0014119999999999998,
+  "native_scope": "native_scope_create_resolve_drop_100000: 2.668 ms; active_handles=0",
+  "notes": "Fresh Python harness; single benchmark child. ru_maxrss is bytes on macOS. Includes parser/VM setup and all samples, excludes Cargo/rustc."
+}

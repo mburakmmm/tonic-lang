@@ -1,0 +1,19 @@
+[package]
+name = "tonic-jit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tonic-core.workspace = true
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
+
+[dev-dependencies]
+tonic-compiler.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
