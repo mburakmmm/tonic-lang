@@ -30,6 +30,7 @@ static PROXY_TYPE: OnceLock<usize> = OnceLock::new();
 static PROXY_CACHE: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 static FOREIGN_ROOTS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 static GETREFCOUNT: OnceLock<usize> = OnceLock::new();
+static GETREFCOUNT_CALL_OVERHEAD: OnceLock<isize> = OnceLock::new();
 const PROXY_TYPE_NAME: &[u8] = b"tonic.PyTonicProxy\0";
 const GRAPH_NODE_LIMIT: usize = 4_096;
 const GRAPH_EDGE_LIMIT: usize = 16_384;
@@ -944,9 +945,9 @@ unsafe fn scan_python_graph(roots: &[usize]) -> PythonGraph {
 unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
     // Py_REFCNT is a C macro/static inline on supported CPython releases and is
     // therefore not a portable linkable ABI symbol. Going through the public
-    // sys.getrefcount callable keeps CPython's object layout out of Rust. The
-    // PyObject_CallOneArg passes the existing object through vectorcall's
-    // borrowed argument array, so this C-level call adds no owned reference.
+    // sys.getrefcount callable keeps CPython's object layout out of Rust. Public
+    // call-path temporary ownership differs across supported CPython versions,
+    // so the exact C call is calibrated below rather than assuming a constant.
     let function = if let Some(function) = GETREFCOUNT.get().copied() {
         function as *mut ffi::PyObject
     } else {
@@ -967,6 +968,37 @@ unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
         }
         *stored as *mut ffi::PyObject
     };
+    let call_overhead = if let Some(overhead) = GETREFCOUNT_CALL_OVERHEAD.get().copied() {
+        overhead
+    } else {
+        // PyObject_CallOneArg used a borrowed vectorcall argument on CPython 3.14
+        // in the validated local lane, while CPython 3.12's public call path
+        // exposed one temporary reference. Calibrate through the exact same C
+        // entry point using an object whose only owned reference is this probe.
+        let probe = unsafe { ffi::PyList_New(0) };
+        if probe.is_null() {
+            unsafe { ffi::PyErr_Clear() };
+            return None;
+        }
+        let measured = unsafe { ffi::PyObject_CallOneArg(function, probe) };
+        unsafe { ffi::Py_DecRef(probe) };
+        if measured.is_null() {
+            unsafe { ffi::PyErr_Clear() };
+            return None;
+        }
+        let mut overflow = 0;
+        let count = unsafe { ffi::PyLong_AsLongLongAndOverflow(measured, &mut overflow) };
+        unsafe { ffi::Py_DecRef(measured) };
+        if overflow != 0 || count < 1 || unsafe { !ffi::PyErr_Occurred().is_null() } {
+            unsafe { ffi::PyErr_Clear() };
+            return None;
+        }
+        let overhead = isize::try_from(count).ok()?.checked_sub(1)?;
+        if !(0..=4).contains(&overhead) {
+            return None;
+        }
+        *GETREFCOUNT_CALL_OVERHEAD.get_or_init(|| overhead)
+    };
     let result = unsafe { ffi::PyObject_CallOneArg(function, object) };
     if result.is_null() {
         unsafe { ffi::PyErr_Clear() };
@@ -979,7 +1011,7 @@ unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
         unsafe { ffi::PyErr_Clear() };
         return None;
     }
-    isize::try_from(count).ok()
+    isize::try_from(count).ok()?.checked_sub(call_overhead)
 }
 
 unsafe fn graph_has_external_root(

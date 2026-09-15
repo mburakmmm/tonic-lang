@@ -26,7 +26,9 @@ ait `PyTonicProxy` nesnelerinin non-rooting foreign-reference token'ları
 
 Tarayıcı trial-deletion benzeri bir dış-kök testi uygular. Her düğümün CPython
 reference count'undan taranan iç kenarlar, Tonic'in sahip olduğu foreign root
-referansları ve doğrudan proxy wrapper referansları çıkarılır. Artık referans
+referansları ve doğrudan proxy wrapper referansları çıkarılır. Public
+`sys.getrefcount` C çağrısının geçici referans maliyeti ilk kullanımda tek sahipli
+yeni bir listeyle kalibre edilir; CPython sürümüne bağlı sabit kullanılmaz. Artık referans
 kalmazsa proxy persistent kökü deferred olarak düşürülür. Dış CPython referansı
 bulunursa `TonicTraceVisitor.promote` non-rooting token'dan yeni persistent handle
 üretir. Böylece daha önce zayıflatılmış bir proxy Python koduyla dışarı taşındığında
