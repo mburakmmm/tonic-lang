@@ -38,6 +38,7 @@ pub type PyVisitProc = unsafe extern "C" fn(*mut PyObject, *mut c_void) -> c_int
 pub type PyTraverseProc = unsafe extern "C" fn(*mut PyObject, PyVisitProc, *mut c_void) -> c_int;
 
 extern "C" {
+    pub fn tonic_cpython_refcount(object: *mut PyObject) -> PySsizeT;
     pub fn Py_IsInitialized() -> c_int;
     pub fn Py_Initialize();
     pub fn PyEval_SaveThread() -> *mut PyThreadState;
