@@ -58,8 +58,9 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | M4 interpreter | integer aritmetik quickening; monomorphic ve iki girişli basit function-call ile class/shape/slot/dependency-version guard'lı instance attribute cache'leri |
 | M4–M7 | expanded sequence/mapping, observed variadic, exact-float direct ve loop-carried F64 yolları; PC-indexli deopt map ve tam register rekonstrüksiyonu |
 | Geniş dil | comprehension, exception handlers, generator, async, match vb. henüz yok |
-| CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve doğrudan proxy-wrapper cycle demotion |
-| Diğer interop | arbitrary `ForeignPyObject` grafikleri için genel iki-collector cycle taraması ve shared-library loader henüz yok |
+| CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve bounded iki-collector graph/cycle taraması |
+| HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
+| Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
 
 Aritmetik: `+ - * / // %` ve bunların desteklenen tiplerde augmented assignment
 biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
@@ -107,6 +108,7 @@ cargo bench -p tonic-runtime --bench buffer --locked
 cargo bench -p tonic-runtime --bench callback --locked
 cargo bench -p tonic-runtime --bench foreign_lifecycle --locked
 cargo bench -p tonic-cpython --bench bridge --locked
+cargo bench -p tonic-cpython --bench cross_runtime_gc --locked
 cc -std=c11 -Wall -Wextra -Werror -Iinclude -fsyntax-only tests/c_header_smoke.c
 ```
 
@@ -123,8 +125,13 @@ zero-copy buffer ölçümü [BUFFER_BASELINE.md](docs/BUFFER_BASELINE.md),
 callback/reentry ölçümü [CALLBACK_BASELINE.md](docs/CALLBACK_BASELINE.md),
 foreign wrapper/finalization ölçümü [FOREIGN_LIFECYCLE_BASELINE.md](docs/FOREIGN_LIFECYCLE_BASELINE.md),
 CPython bridge sınır maliyeti [CPYTHON_BRIDGE_BASELINE.md](docs/CPYTHON_BRIDGE_BASELINE.md),
+cross-collector GC maliyeti [CROSS_COLLECTOR_BASELINE.md](docs/CROSS_COLLECTOR_BASELINE.md),
 generational GC ölçümü [GENERATIONAL_GC_BASELINE.md](docs/GENERATIONAL_GC_BASELINE.md)
 dosyasındadır. Bunlar tamamlanma sonrası alınacak nihai benchmark değildir.
+
+HPy Universal host ve aHPy geliştirme sırası, kabul kapıları ve dürüst paket
+uyumluluğu sınırları [HPY_AHPY_STRATEGY.md](docs/HPY_AHPY_STRATEGY.md) içinde
+tanımlanmıştır. Bu bir uygulama planıdır; mevcut sürüm `.hpy0` yüklemez.
 
 ## Mimari ve sınırlar
 

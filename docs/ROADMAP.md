@@ -6,7 +6,9 @@ kalan işleri ayırır; kutular yalnızca doğrulanmış uçtan uca iş için i�
 Tamamlanma hedefi bu listedeki bütün açık kutuların kapanması ve JIT'in yalnızca
 bir demo yolu değil, tier seçimi, çalışma zamanı yardımcıları, GC safepoint'leri,
 guard/deopt, hata yayılımı ve ölçüm kapılarıyla kullanılmaya hazır olmasıdır.
-Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan sonra alınır.
+Yeni HPy/aHPy native ekosistem kapsamının aşağıdaki kabul kapıları da bu hedefe
+dahildir. Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan
+sonra alınır.
 
 - [x] Workspace, Rust stable, CLI, tanı, benchmark harness.
 - [x] Parser adapter → Tonic AST → whole-function local resolution → register bytecode.
@@ -86,13 +88,35 @@ Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan so
     ve arbitrary `ForeignPyObject` sonuç/girdi dönüşümü; positional proxy forwarding.
   - [x] Bigint/container/keyword conversion; alias/cycle-aware materialization ve
     gerçek CPython heap type üzerinde proxy call/attribute/set/repr protokolleri.
-- [ ] Bridge cycles/finalizers ve identity.
+- [x] Bridge cycles/finalizers ve identity.
   - [x] Persistent proxy anchor, doğru-runtime deferred release, idempotent explicit
     `close_proxy`, closed/inactive diagnostic ve cycle kırma testi.
   - [x] GIL-serialized non-owning weak proxy identity cache; doğrudan proxy wrapper
     için trace edge/root demotion, dış CPython referansı promotion'ı ve otomatik cycle testi.
-  - [ ] Arbitrary `ForeignPyObject` nesne grafiklerinde proxy kenarlarını bulan genel
-    iki-collector cycle detection ve finalizer sırası.
+  - [x] Arbitrary `ForeignPyObject` nesne grafiklerinde proxy kenarlarını bulan bounded
+    iki-collector cycle detection, conservative fallback ve finalizer sırası.
+- [ ] Tonic HPy Universal host ve aHPy uyumluluk hattı.
+  - [ ] Exact HPy sürüm/ABI/context envanteri, fail-closed capability manifesti ve
+    izole `tonic-hpy` crate sınırı.
+  - [ ] Platform/ABI/init-symbol doğrulamalı `.hpy0` shared-library loader; libpython
+    bağımlılığı olmadan constant module ve scalar Fibonacci.
+  - [ ] Local `HPy`, `HPy_Dup`/`HPy_Close`, sayı/Unicode, module init ve exception
+    state; stale/cross-runtime/failure cleanup testleri.
+  - [ ] List/tuple/dict builders, attr/item/call yüzeyi ve keyword binder eşlemesi.
+  - [ ] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
+    moving-GC altında field/global cycle testi.
+  - [ ] Pure `HPyType_Spec`, native payload, methods/slots/inheritance, trace,
+    finalizer ve shutdown sözleşmeleri.
+  - [ ] Public HPy buffer ve execution-state yüzeyi; owner/pin/thread/callback
+    lifetime testleri, unavailable API için versioned tanı.
+  - [ ] Normal/Trace/Debug context, leak/use-after-close/fault injection, symbol
+    audit, sanitizer ve Linux/macOS/Windows CI.
+  - [ ] Handwritten ve aHPy-generated ortak corpus; constant/scalar/container/
+    exception/type/`HPyField` sırası ve exact aHPy+HPy revision kaydı.
+  - [ ] aHPy cypack, murmurhash scalar adapter ve frozenlist supported-subset
+    pilotları; NumPy/typed-memoryview blocked durumunu yanlış destek saymama.
+  - [ ] Tonic-native ABI, handwritten HPy, aHPy HPy, CPython bridge ve CPython HPy
+    oracle için aynı semantik A/B benchmarkı.
 - [ ] REPL, bytecode caching/version validation, standard library kapsamı.
 - [ ] Coverage-guided fuzzing ve gerekiyorsa unsafe/JIT için Miri/sanitizers.
 - [x] Ara benchmark: 14 interpreter iş yükü, GC açık/kapalı, compile zamanı, ham örnekler, process RSS.
@@ -102,11 +126,13 @@ Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan so
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek iş: arbitrary `ForeignPyObject` grafikleri için genel
-iki-collector cycle/finalizer politikasını kurmak; ardından kalan özel
-protokoller/metaclass kapsamını genişletmek. M5'in
+Sıradaki çekirdek işler iki paralel hattır: kalan özel protokoller ile
+metaclass/class namespace customization kapsamını genişletmek ve HPy H0 sürüm/ABI
+envanterini kurmak. HPy/aHPy kararının ayrıntıları
+[HPY_AHPY_STRATEGY.md](HPY_AHPY_STRATEGY.md) ve
+[ADR 0049](adr/0049-hpy-universal-host.md) içindedir. M5'in
 generational kabul koşulu nursery, remembered set, write barrier, minor/major
 zamanlama, stress doğruluğu ve önce/sonra benchmarkıyla kapanmıştır.
-Foreign object vtable/lifecycle ve ana CPython bridge sözleşmeleri tamamlanmıştır;
-advanced bridge identity/cycle optimizasyonu ayrı açık maddedir.
+Foreign object vtable/lifecycle, ana CPython bridge sözleşmeleri ve bounded
+cross-collector identity/cycle politikası tamamlanmıştır.
 Nihai benchmark için kabul matrisi: [FINAL_BENCHMARK_PLAN.md](FINAL_BENCHMARK_PLAN.md).

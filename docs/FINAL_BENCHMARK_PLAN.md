@@ -24,6 +24,7 @@ ve karşılaştırmanın kapsamı raporda görünmelidir.
 | Deopt | guard failure, interpreter state reconstruction, tekrar specialization |
 | GC | normal nursery, farklı heap budgetları, stress doğruluğu, allocation-heavy ve retained-live graph |
 | Native | doğrudan Rust baseline, Tonic function, Context/Handle sınırı, typed zero-copy buffer |
+| HPy | handwritten ve aHPy-generated Universal; import/init, scalar/bulk call, field/global/type/buffer ve Debug/Trace overhead |
 | Bridge | primitive convert, proxy/cache, callback, büyük buffer, ownership/cleanup maliyeti |
 | Python referansı | eş semantiğe sahip CPython ve kuruluysa PyPy; sürüm ve seçenekler sabitlenir |
 
@@ -50,7 +51,9 @@ sayısal tight loop ile genel Python hızı diye genellememek gerekir.
 - JIT compile latency, generated code bytes, hotness eşiği, cache hit/miss,
   guard/deopt sayısı ve yeniden derleme sayısı.
 - Interop copy bytes, materialized arguments, handles/scopes, buffer pin duration,
-  callback maliyeti ve shutdown sonunda canlı kaynak sayısı.
+  callback maliyeti ve shutdown sonunda canlı kaynak sayısı. Tonic-native ABI,
+  handwritten HPy Universal, aHPy-generated Universal ve CPython bridge ayrı
+  konfigürasyonlar olarak raporlanır.
 
 Her konfigürasyonda en az 5 bağımsız process tekrarı ve 30 ölçüm örneği;
 warmup ayrıca kaydedilir. İş yükü/konfigürasyon sırası dengelenir. Median,

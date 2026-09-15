@@ -18,8 +18,9 @@ Depo başlangıçta yalnızca bu belgeleri içeriyordu.
    Bunlar doğruluk ve ölçüm temeli kurulmadan uygulanmış sayılmaz.
 6. Sözdizimi desteği olmayan yapı sessizce atlanmaz; konumlu tanı üretir.
    Parser'ın bir yapıyı tanıması onun çalıştırılabildiği anlamına gelmez.
-7. Interop önce Rust-native handle API, sonra C ABI, buffer, callback, foreign
-   wrapper, en son CPython proxy/adapter sırasıyla genişler.
+7. Interop önce Rust-native handle API, sonra C ABI, buffer, callback ve foreign
+   wrapper olarak genişler. CPython proxy/adapter compatibility kaçış yoludur;
+   HPy Universal host ile aHPy hattı bağımsız portable-native katmandır.
 
 ## Karara bağlanması gereken alanlar
 
@@ -34,6 +35,8 @@ Depo başlangıçta yalnızca bu belgeleri içeriyordu.
 - CPython proxy kimliği, interpreter sahipliği ve yürütme kilidi.
 - Çapraz runtime döngülerinin toplanması, finalizer sırası, shutdown ve callback.
 - Native uzantı güven sınırı: opaque handle kötü niyetli native kodu sandbox yapmaz.
+- HPy Universal sürüm/context sözleşmesi, `.hpy0` loader, `HPyGlobal`/`HPyField`
+  runtime izolasyonu ve aHPy cross-runtime destek matrisi.
 
 ## İlk teslimatın sınırı
 
@@ -239,9 +242,12 @@ korunur. GIL altında tutulan non-owning proxy cache canlı identity'yi yeniden
 kullanır ve `tp_dealloc` girdiyi kesin siler. Doğrudan Tonic proxy wrapper için
 CPython refcount dış sahipliği ayırır: yalnız wrapper referansı kaldığında persistent
 kök non-rooting foreign edge'e düşürülür, dış Python referansı oluştuğunda tekrar
-güçlendirilir. Arbitrary `ForeignPyObject` iç nesne grafiklerinin transitif proxy
-kenarlarını bulan genel iki-collector taraması advanced bridge maddesi olarak açık
-kalır.
+güçlendirilir. Arbitrary `ForeignPyObject` içindeki transitif proxy kenarları public
+`Py_tp_traverse` ile bounded olarak taranır. Borrowed visitor edge'leri token
+sahipliğini proxy'de bırakır; trial-deletion dış-kök testi persistent handle'ı
+demote veya promote eder. Type/module/function altyapısı, başka runtime proxy'si,
+4.096 düğüm veya 16.384 kenar sınırı conservative retention'a gider. Ayrıntı
+[ADR 0048](adr/0048-cpython-cross-collector-graph-tracing.md) içindedir.
 
 ## Uygulama sırası ve kabul kapıları
 
@@ -256,6 +262,7 @@ kalır.
 | Native C ABI | version/capability, init/exception protokolü, panic sınırı, trusted-code belgesi |
 | Buffer/callback/foreign | zero-copy owner ömrü, thread attach, shutdown, tam bir kez destructor |
 | CPython bridge | proxy/wrapper, primitive conversions, identity cache, cycle/finalization politikası |
+| HPy Universal/aHPy | `.hpy0` loader, context/handle API, field/global moving-GC, pure types, Debug/Trace ve pinned aHPy pilotları |
 
 ## Belge kapsam haritası
 

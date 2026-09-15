@@ -36,8 +36,14 @@ The current implementation includes:
 - precise generational tracing GC, compaction, write barriers and remembered sets;
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps;
 - a versioned opaque C ABI, persistent handles, callbacks, typed zero-copy buffers and foreign-object tracing;
-- an isolated CPython bridge with primitive/container conversion and `PyTonicProxy` protocol forwarding;
+- an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.
+
+The accepted native ecosystem roadmap adds an isolated HPy Universal host and
+an aHPy compatibility lane. The target is to load `.hpy0` extensions without
+libpython while preserving Tonic's object layout and moving GC. This is planned
+work, not a current compatibility claim; see the
+[HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
 The unsupported surface is reported explicitly. Comprehensions, exception
 handlers, generators, async execution, structural matching, general filesystem
@@ -133,7 +139,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 237 Rust tests and a differential corpus of
+The repository currently contains 239 Rust tests and a differential corpus of
 269 output cases plus 75 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution.
 
@@ -163,6 +169,7 @@ cargo bench -p tonic-runtime --bench interpreter --locked
 cargo bench -p tonic-runtime --bench jit --locked
 cargo bench -p tonic-runtime --bench generational_gc --locked
 cargo bench -p tonic-cpython --bench bridge --locked
+cargo bench -p tonic-cpython --bench cross_runtime_gc --locked
 ```
 
 Recorded results and methodology are indexed in
@@ -178,6 +185,8 @@ and production hardening are incomplete. In particular:
 
 - syntax compatibility is broader than executable semantics;
 - CPython ABI compatibility is intentionally outside the core runtime;
+- HPy Universal loading and aHPy-generated extension execution are planned and
+  not implemented yet;
 - GC pauses are not yet bounded and user-language finalizer semantics are open;
 - JIT coverage is focused on profiled numeric loops and guarded call paths;
 - the native C ABI remains versioned but pre-stable;
