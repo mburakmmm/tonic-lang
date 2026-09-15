@@ -5,7 +5,7 @@ mod ffi;
 
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{c_void, CString},
     mem, ptr,
     sync::{Mutex, OnceLock},
@@ -13,8 +13,8 @@ use std::{
 use tonic_core::diagnostic::{Diagnostic, Result};
 use tonic_runtime::{
     c_api::{
-        negotiate_api, CAP_CONTAINER_ACCESS_V1, CAP_FOREIGN_OBJECT_V1, CAP_PERSISTENT_HANDLES_V1,
-        CAP_PROTOCOL_ACCESS_V1,
+        negotiate_api, CAP_CONTAINER_ACCESS_V1, CAP_CROSS_COLLECTOR_V1, CAP_FOREIGN_OBJECT_V1,
+        CAP_PERSISTENT_HANDLES_V1, CAP_PROTOCOL_ACCESS_V1,
     },
     TonicContext, TonicExceptionKind, TonicForeignVTable, TonicHandle, TonicPersistentHandle,
     TonicRuntimeOwner, TonicStatus, TonicValueKind, Vm, FOREIGN_OWNED, TONIC_ABI_VERSION,
@@ -28,7 +28,11 @@ static INITIALIZE: Mutex<()> = Mutex::new(());
 static API: OnceLock<&'static tonic_runtime::TonicApi> = OnceLock::new();
 static PROXY_TYPE: OnceLock<usize> = OnceLock::new();
 static PROXY_CACHE: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+static FOREIGN_ROOTS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+static GETREFCOUNT: OnceLock<usize> = OnceLock::new();
 const PROXY_TYPE_NAME: &[u8] = b"tonic.PyTonicProxy\0";
+const GRAPH_NODE_LIMIT: usize = 4_096;
+const GRAPH_EDGE_LIMIT: usize = 16_384;
 
 thread_local! {
     static ACTIVE_CONTEXT: Cell<*mut TonicContext> = const { Cell::new(ptr::null_mut()) };
@@ -39,9 +43,15 @@ struct ProxyPayload {
     foreign_reference: Option<TonicHandle>,
     owner: *mut TonicRuntimeOwner,
     execution_id: u64,
+    runtime_id: u64,
     strong: bool,
     tonic_wrappers: usize,
     closed: bool,
+}
+
+struct ForeignPyPayload {
+    object: *mut ffi::PyObject,
+    runtime_id: u64,
 }
 
 struct ActiveContextGuard(*mut TonicContext);
@@ -163,7 +173,23 @@ unsafe fn release_proxy_payload(payload: *mut ProxyPayload) {
     if payload.strong {
         let _ = unsafe { (api().persistent_release_deferred)(payload.owner, payload.handle) };
     }
+    if let Some(reference) = payload.foreign_reference {
+        let _ = unsafe { (api().foreign_reference_release_deferred)(payload.owner, reference) };
+    }
     let _ = unsafe { (api().runtime_owner_release)(payload.owner) };
+}
+
+fn foreign_roots() -> &'static Mutex<Vec<usize>> {
+    FOREIGN_ROOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+unsafe fn foreign_pyobject(payload: *mut c_void) -> *mut ffi::PyObject {
+    if payload.is_null() {
+        ptr::null_mut()
+    } else {
+        // SAFETY: CPYTHON_ADAPTER_ID payloads are always ForeignPyPayload boxes.
+        unsafe { (*payload.cast::<ForeignPyPayload>()).object }
+    }
 }
 
 fn proxy_cache() -> &'static Mutex<Vec<usize>> {
@@ -666,9 +692,17 @@ unsafe fn create_proxy(
     if status != TonicStatus::OK {
         return Err(status);
     }
+    let mut foreign_reference = TonicHandle::default();
+    let status =
+        unsafe { (api().foreign_reference_create)(context, value, &mut foreign_reference) };
+    if status != TonicStatus::OK {
+        let _ = unsafe { (api().persistent_release)(context, persistent) };
+        return Err(status);
+    }
     let mut owner = ptr::null_mut();
     let status = unsafe { (api().runtime_owner_acquire)(context, &mut owner) };
     if status != TonicStatus::OK {
+        let _ = unsafe { (api().foreign_reference_release)(context, foreign_reference) };
         let _ = unsafe { (api().persistent_release)(context, persistent) };
         return Err(status);
     }
@@ -676,14 +710,24 @@ unsafe fn create_proxy(
     let status = unsafe { (api().runtime_execution_id)(context, &mut execution_id) };
     if status != TonicStatus::OK {
         let _ = unsafe { (api().runtime_owner_release)(owner) };
+        let _ = unsafe { (api().foreign_reference_release)(context, foreign_reference) };
+        let _ = unsafe { (api().persistent_release)(context, persistent) };
+        return Err(status);
+    }
+    let mut runtime_id = 0;
+    let status = unsafe { (api().runtime_identity)(context, &mut runtime_id) };
+    if status != TonicStatus::OK {
+        let _ = unsafe { (api().runtime_owner_release)(owner) };
+        let _ = unsafe { (api().foreign_reference_release)(context, foreign_reference) };
         let _ = unsafe { (api().persistent_release)(context, persistent) };
         return Err(status);
     }
     let payload = Box::into_raw(Box::new(ProxyPayload {
         handle: persistent,
-        foreign_reference: None,
+        foreign_reference: Some(foreign_reference),
         owner,
         execution_id,
+        runtime_id,
         strong: true,
         tonic_wrappers: 0,
         closed: false,
@@ -715,36 +759,215 @@ unsafe fn create_proxy(
 
 unsafe extern "C-unwind" fn destroy_pyobject(payload: *mut c_void) {
     let _gil = enter_python();
-    if !payload.is_null() {
-        // SAFETY: successful wrapper creation transfers one owned PyObject ref.
-        unsafe { ffi::Py_DecRef(payload.cast()) }
+    if payload.is_null() {
+        return;
     }
+    // SAFETY: successful wrapper creation transfers exactly one payload box.
+    let payload = unsafe { Box::from_raw(payload.cast::<ForeignPyPayload>()) };
+    foreign_roots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|candidate| *candidate != ptr::from_ref(&*payload) as usize);
+    // The CPython reference is released only after the registry no longer exposes
+    // this payload to concurrent bridge scans.
+    unsafe { ffi::Py_DecRef(payload.object) };
+}
+
+unsafe fn create_foreign_pyobject(
+    context: *mut TonicContext,
+    object: *mut ffi::PyObject,
+    output: *mut TonicHandle,
+) -> TonicStatus {
+    let mut runtime_id = 0;
+    let status = unsafe { (api().runtime_identity)(context, &mut runtime_id) };
+    if status != TonicStatus::OK {
+        return status;
+    }
+    let payload = Box::into_raw(Box::new(ForeignPyPayload { object, runtime_id }));
+    foreign_roots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(payload as usize);
+    let status = unsafe {
+        (api().foreign_create)(context, payload.cast(), &FOREIGN_PYOBJECT_VTABLE, output)
+    };
+    if status != TonicStatus::OK {
+        foreign_roots()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|candidate| *candidate != payload as usize);
+        // Ownership of the PyObject remains with the caller on failure.
+        drop(unsafe { Box::from_raw(payload) });
+    }
+    status
+}
+
+unsafe extern "C" fn collect_referent(object: *mut ffi::PyObject, state: *mut c_void) -> i32 {
+    if object.is_null() || state.is_null() {
+        return 0;
+    }
+    // SAFETY: direct_referents passes a live Vec for the synchronous traversal.
+    unsafe { &mut *state.cast::<Vec<usize>>() }.push(object as usize);
+    0
+}
+
+unsafe fn direct_referents(object: *mut ffi::PyObject) -> Option<Vec<usize>> {
+    if unsafe { ffi::PyObject_GC_IsTracked(object) } == 0 {
+        return Some(Vec::new());
+    }
+    let object_type = unsafe { ffi::PyObject_Type(object) };
+    if object_type.is_null() {
+        unsafe { ffi::PyErr_Clear() };
+        return None;
+    }
+    let slot = unsafe { ffi::PyType_GetSlot(object_type, ffi::PY_TP_TRAVERSE) };
+    if slot.is_null() {
+        unsafe { ffi::Py_DecRef(object_type) };
+        return Some(Vec::new());
+    }
+    // SAFETY: Py_tp_traverse is documented with the PyTraverseProc signature;
+    // object_type remains owned until the call returns.
+    let traverse: ffi::PyTraverseProc = unsafe { mem::transmute(slot) };
+    let mut referents = Vec::new();
+    let status = unsafe {
+        traverse(
+            object,
+            collect_referent,
+            ptr::from_mut(&mut referents).cast(),
+        )
+    };
+    unsafe { ffi::Py_DecRef(object_type) };
+    if status != 0 {
+        unsafe { ffi::PyErr_Clear() };
+        None
+    } else {
+        Some(referents)
+    }
+}
+
+unsafe fn is_instance_of(object: *mut ffi::PyObject, class: *mut ffi::PyObject) -> bool {
+    let result = unsafe { ffi::PyObject_IsInstance(object, class) };
+    if result < 0 {
+        unsafe { ffi::PyErr_Clear() };
+        false
+    } else {
+        result != 0
+    }
+}
+
+unsafe fn is_graph_boundary(object: *mut ffi::PyObject) -> bool {
+    unsafe {
+        is_instance_of(object, ptr::addr_of_mut!(ffi::PyType_Type))
+            || is_instance_of(object, ptr::addr_of_mut!(ffi::PyModule_Type))
+            || is_instance_of(object, ptr::addr_of_mut!(ffi::PyFunction_Type))
+    }
+}
+
+unsafe fn graph_proxy_payload(object: *mut ffi::PyObject) -> Option<*mut ProxyPayload> {
+    let proxy_type = PROXY_TYPE.get().copied()? as *mut ffi::PyObject;
+    let object_type = unsafe { ffi::PyObject_Type(object) };
+    if object_type.is_null() {
+        unsafe { ffi::PyErr_Clear() };
+        return None;
+    }
+    let exact_proxy = object_type == proxy_type;
+    unsafe { ffi::Py_DecRef(object_type) };
+    if !exact_proxy {
+        return None;
+    }
+    let payload = unsafe { proxy_payload(object) };
+    (!payload.is_null()).then_some(payload)
+}
+
+#[derive(Default)]
+struct PythonGraph {
+    nodes: Vec<usize>,
+    incoming: HashMap<usize, usize>,
+    proxies: Vec<usize>,
+    complete: bool,
+}
+
+unsafe fn scan_python_graph(roots: &[usize]) -> PythonGraph {
+    let mut graph = PythonGraph {
+        complete: true,
+        ..PythonGraph::default()
+    };
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut edge_count = 0usize;
+    for root in roots.iter().copied() {
+        if seen.insert(root) {
+            queue.push_back(root);
+        }
+    }
+    while let Some(raw) = queue.pop_front() {
+        if graph.nodes.len() >= GRAPH_NODE_LIMIT {
+            graph.complete = false;
+            break;
+        }
+        graph.nodes.push(raw);
+        let object = raw as *mut ffi::PyObject;
+        if unsafe { graph_proxy_payload(object) }.is_some() {
+            graph.proxies.push(raw);
+            continue;
+        }
+        let Some(referents) = (unsafe { direct_referents(object) }) else {
+            graph.complete = false;
+            break;
+        };
+        for referent in referents {
+            if edge_count >= GRAPH_EDGE_LIMIT {
+                graph.complete = false;
+                break;
+            }
+            edge_count += 1;
+            let object = referent as *mut ffi::PyObject;
+            let proxy = unsafe { graph_proxy_payload(object) }.is_some();
+            if !proxy
+                && (unsafe { ffi::PyObject_GC_IsTracked(object) } == 0
+                    || unsafe { is_graph_boundary(object) })
+            {
+                continue;
+            }
+            *graph.incoming.entry(referent).or_default() += 1;
+            if seen.insert(referent) {
+                queue.push_back(referent);
+            }
+        }
+        if !graph.complete {
+            break;
+        }
+    }
+    graph
 }
 
 unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
     // Py_REFCNT is a C macro/static inline on supported CPython releases and is
     // therefore not a portable linkable ABI symbol. Going through the public
     // sys.getrefcount callable keeps CPython's object layout out of Rust. The
-    // PyObject_CallOneArg passes this already-owned object through vectorcall's
-    // borrowed argument array, so this bridge call adds no owned reference.
-    let module = unsafe { ffi::PyImport_ImportModule(c"sys".as_ptr()) };
-    if module.is_null() {
-        unsafe { ffi::PyErr_Clear() };
-        return None;
-    }
-    let function = unsafe { ffi::PyObject_GetAttrString(module, c"getrefcount".as_ptr()) };
-    if function.is_null() {
-        unsafe {
-            ffi::Py_DecRef(module);
-            ffi::PyErr_Clear();
+    // PyObject_CallOneArg passes the existing object through vectorcall's
+    // borrowed argument array, so this C-level call adds no owned reference.
+    let function = if let Some(function) = GETREFCOUNT.get().copied() {
+        function as *mut ffi::PyObject
+    } else {
+        let module = unsafe { ffi::PyImport_ImportModule(c"sys".as_ptr()) };
+        if module.is_null() {
+            unsafe { ffi::PyErr_Clear() };
+            return None;
         }
-        return None;
-    }
+        let function = unsafe { ffi::PyObject_GetAttrString(module, c"getrefcount".as_ptr()) };
+        unsafe { ffi::Py_DecRef(module) };
+        if function.is_null() {
+            unsafe { ffi::PyErr_Clear() };
+            return None;
+        }
+        let stored = GETREFCOUNT.get_or_init(|| function as usize);
+        if *stored != function as usize {
+            unsafe { ffi::Py_DecRef(function) };
+        }
+        *stored as *mut ffi::PyObject
+    };
     let result = unsafe { ffi::PyObject_CallOneArg(function, object) };
-    unsafe {
-        ffi::Py_DecRef(function);
-        ffi::Py_DecRef(module);
-    }
     if result.is_null() {
         unsafe { ffi::PyErr_Clear() };
         return None;
@@ -757,6 +980,157 @@ unsafe fn python_reference_count(object: *mut ffi::PyObject) -> Option<isize> {
         return None;
     }
     isize::try_from(count).ok()
+}
+
+unsafe fn graph_has_external_root(
+    graph: &PythonGraph,
+    root_counts: &HashMap<usize, usize>,
+    runtime_id: u64,
+) -> bool {
+    if !graph.complete {
+        return true;
+    }
+    for raw in &graph.nodes {
+        let object = *raw as *mut ffi::PyObject;
+        let mut expected = graph.incoming.get(raw).copied().unwrap_or(0)
+            + root_counts.get(raw).copied().unwrap_or(0);
+        if let Some(payload) = unsafe { graph_proxy_payload(object) } {
+            // A proxy from another runtime cannot be represented in this trace
+            // visitor. Keep every involved persistent root conservatively.
+            if unsafe { (*payload).runtime_id } != runtime_id {
+                return true;
+            }
+            expected += unsafe { (*payload).tonic_wrappers };
+        }
+        let Some(reference_count) = (unsafe { python_reference_count(object) }) else {
+            return true;
+        };
+        if reference_count > expected as isize {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn set_proxy_rooted(
+    visitor: *mut tonic_runtime::TonicTraceVisitor,
+    payload: &mut ProxyPayload,
+    rooted: bool,
+) -> TonicStatus {
+    if payload.closed || payload.strong == rooted {
+        return TonicStatus::OK;
+    }
+    let Some(reference) = payload.foreign_reference else {
+        return TonicStatus::INVALID_ARGUMENT;
+    };
+    if rooted {
+        let mut persistent = TonicPersistentHandle::default();
+        let status = unsafe { ((*visitor).promote)(visitor, reference, &mut persistent) };
+        if status == TonicStatus::OK {
+            payload.handle = persistent;
+            payload.strong = true;
+        }
+        status
+    } else {
+        let status = unsafe { (api().persistent_release_deferred)(payload.owner, payload.handle) };
+        if status == TonicStatus::OK {
+            payload.strong = false;
+        }
+        status
+    }
+}
+
+unsafe extern "C-unwind" fn trace_pyobject_graph(
+    payload: *mut c_void,
+    visitor: *mut tonic_runtime::TonicTraceVisitor,
+) -> TonicStatus {
+    let _gil = enter_python();
+    if payload.is_null() || visitor.is_null() {
+        return TonicStatus::INVALID_ARGUMENT;
+    }
+    // SAFETY: CPYTHON_ADAPTER_ID stores this exact owned payload type.
+    let current = unsafe { &*payload.cast::<ForeignPyPayload>() };
+    let registered = foreign_roots()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let mut roots = Vec::new();
+    let mut root_counts = HashMap::new();
+    for raw in registered {
+        // SAFETY: the registry is pruned under the GIL before payload destruction.
+        let root = unsafe { &*(raw as *const ForeignPyPayload) };
+        if root.runtime_id == current.runtime_id {
+            roots.push(root.object as usize);
+            *root_counts.entry(root.object as usize).or_default() += 1;
+        }
+    }
+    let mut graph_proxies = HashMap::<usize, bool>::new();
+    for root in roots {
+        let object = root as *mut ffi::PyObject;
+        if unsafe { is_graph_boundary(object) } {
+            continue;
+        }
+        let graph = unsafe { scan_python_graph(&[root]) };
+        let externally_rooted =
+            unsafe { graph_has_external_root(&graph, &root_counts, current.runtime_id) };
+        for proxy in graph.proxies {
+            graph_proxies
+                .entry(proxy)
+                .and_modify(|external| *external |= externally_rooted)
+                .or_insert(externally_rooted);
+        }
+    }
+    for (raw, externally_rooted) in &graph_proxies {
+        let Some(proxy) = (unsafe { graph_proxy_payload(*raw as *mut ffi::PyObject) }) else {
+            continue;
+        };
+        // SAFETY: graph traversal and proxy destruction are serialized by GIL.
+        let proxy = unsafe { &mut *proxy };
+        if proxy.runtime_id != current.runtime_id || proxy.closed {
+            continue;
+        }
+        let Some(reference) = proxy.foreign_reference else {
+            return TonicStatus::INVALID_ARGUMENT;
+        };
+        let status = unsafe { ((*visitor).visit_borrowed)(visitor, reference) };
+        if status != TonicStatus::OK {
+            return status;
+        }
+        let status = unsafe { set_proxy_rooted(visitor, proxy, *externally_rooted) };
+        if status != TonicStatus::OK {
+            return status;
+        }
+    }
+
+    // A proxy can be moved out of a Tonic-owned graph by opaque Python code.
+    // Reconcile cached proxies absent from the current union so such a move
+    // promotes its target before this wrapper can be swept.
+    let proxies = proxy_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    for raw in proxies {
+        if graph_proxies.contains_key(&raw) {
+            continue;
+        }
+        let Some(proxy) = (unsafe { graph_proxy_payload(raw as *mut ffi::PyObject) }) else {
+            continue;
+        };
+        let proxy = unsafe { &mut *proxy };
+        if proxy.runtime_id != current.runtime_id || proxy.closed || proxy.strong {
+            continue;
+        }
+        let isolated = unsafe { scan_python_graph(&[raw]) };
+        let external =
+            unsafe { graph_has_external_root(&isolated, &HashMap::new(), current.runtime_id) };
+        if external {
+            let status = unsafe { set_proxy_rooted(visitor, proxy, true) };
+            if status != TonicStatus::OK {
+                return status;
+            }
+        }
+    }
+    TonicStatus::OK
 }
 
 unsafe extern "C-unwind" fn trace_proxy(
@@ -779,22 +1153,23 @@ unsafe extern "C-unwind" fn trace_proxy(
     if visitor.is_null() {
         return TonicStatus::INVALID_ARGUMENT;
     }
-    let status = unsafe { ((*visitor).visit)(visitor, reference) };
+    let status = unsafe { ((*visitor).visit_borrowed)(visitor, reference) };
     if status != TonicStatus::OK {
         return status;
+    }
+    // foreign_create invokes trace before python.proxy has transferred the
+    // CPython object into its managed wrapper. Do not demote that construction
+    // root until the wrapper count records the transfer.
+    if payload.tonic_wrappers == 0 {
+        return TonicStatus::OK;
     }
     let Some(reference_count) = (unsafe { python_reference_count(object) }) else {
         return TonicStatus::INVALID_ARGUMENT;
     };
-    if payload.strong
-        && payload.tonic_wrappers != 0
-        && reference_count <= payload.tonic_wrappers as isize
-    {
-        let status = unsafe { (api().persistent_release_deferred)(payload.owner, payload.handle) };
-        if status != TonicStatus::OK {
-            return status;
-        }
-        payload.strong = false;
+    let external = reference_count > payload.tonic_wrappers as isize;
+    let status = unsafe { set_proxy_rooted(visitor, payload, external) };
+    if status != TonicStatus::OK {
+        return status;
     }
     TonicStatus::OK
 }
@@ -815,7 +1190,7 @@ static FOREIGN_PYOBJECT_VTABLE: TonicForeignVTable = TonicForeignVTable {
     abi_version: TONIC_ABI_VERSION,
     adapter_id: CPYTHON_ADAPTER_ID,
     flags: FOREIGN_OWNED,
-    trace: None,
+    trace: Some(trace_pyobject_graph),
     destroy: Some(destroy_pyobject),
 };
 
@@ -837,6 +1212,7 @@ fn api() -> &'static tonic_runtime::TonicApi {
                 | CAP_PERSISTENT_HANDLES_V1
                 | CAP_CONTAINER_ACCESS_V1
                 | CAP_PROTOCOL_ACCESS_V1
+                | CAP_CROSS_COLLECTOR_V1
                 | tonic_runtime::c_api::CAP_RUNTIME_OWNER_V1,
         )
         .expect("runtime and bridge ABI versions are built together")
@@ -996,7 +1372,14 @@ unsafe fn tonic_to_python_inner(
             if status != TonicStatus::OK {
                 return Err(status);
             }
-            let object = payload.cast();
+            let object = if proxy {
+                payload.cast()
+            } else {
+                unsafe { foreign_pyobject(payload) }
+            };
+            if object.is_null() {
+                return Err(TonicStatus::INVALID_ARGUMENT);
+            }
             if proxy {
                 let proxy_payload = unsafe { proxy_payload(object) };
                 if proxy_payload.is_null() {
@@ -1392,14 +1775,7 @@ unsafe fn python_to_tonic_inner(
             return Ok(dict);
         }
         let mut output = TonicHandle::default();
-        let status = unsafe {
-            (api().foreign_create)(
-                context,
-                object.cast(),
-                &FOREIGN_PYOBJECT_VTABLE,
-                &mut output,
-            )
-        };
+        let status = unsafe { create_foreign_pyobject(context, object, &mut output) };
         if status == TonicStatus::OK {
             state.memo.insert(object as usize, output);
             state.transferred.insert(object as usize);
@@ -1523,8 +1899,7 @@ unsafe extern "C-unwind" fn python_make_list(
     // PyList_Append increments rather than steals the item reference.
     unsafe { ffi::Py_DecRef(item) };
     // SAFETY: on success the foreign wrapper owns the list reference.
-    let status =
-        unsafe { (api().foreign_create)(context, list.cast(), &FOREIGN_PYOBJECT_VTABLE, output) };
+    let status = unsafe { create_foreign_pyobject(context, list, output) };
     if status != TonicStatus::OK {
         // SAFETY: failed creation leaves ownership with this bridge call.
         unsafe { ffi::Py_DecRef(list) };
@@ -1628,7 +2003,11 @@ unsafe extern "C-unwind" fn python_length(
     }
     let _gil = enter_python();
     // SAFETY: wrapper owns the PyObject and native scopes prohibit GC/finalize.
-    let length = unsafe { ffi::PyObject_Length(payload.cast()) };
+    let object = unsafe { foreign_pyobject(payload) };
+    if object.is_null() {
+        return TonicStatus::INVALID_ARGUMENT;
+    }
+    let length = unsafe { ffi::PyObject_Length(object) };
     if length < 0 {
         return unsafe { raise_python_error(context, "PyObject_Length") };
     }
@@ -1713,22 +2092,10 @@ unsafe extern "C-unwind" fn python_proxy(
             )
         };
     }
-    let mut reference = TonicHandle::default();
-    let status =
-        unsafe { (api().foreign_reference_create)(context, arguments.read(), &mut reference) };
-    if status != TonicStatus::OK {
-        unsafe { ffi::Py_DecRef(proxy) };
-        return status;
-    }
-    unsafe { (*payload).foreign_reference = Some(reference) };
     let status =
         unsafe { (api().foreign_create)(context, proxy.cast(), &TONIC_PROXY_VTABLE, output) };
     if status != TonicStatus::OK {
-        unsafe {
-            (*payload).foreign_reference = None;
-            let _ = (api().foreign_reference_release)(context, reference);
-            ffi::Py_DecRef(proxy);
-        }
+        unsafe { ffi::Py_DecRef(proxy) };
         return status;
     }
     unsafe { (*payload).tonic_wrappers += 1 };
@@ -2185,6 +2552,7 @@ unsafe extern "C-unwind" fn python_invoke(
     output: *mut TonicHandle,
 ) -> TonicStatus {
     let mut callable = ptr::null_mut();
+    let mut callable_is_proxy = true;
     let mut status = unsafe {
         (api().foreign_borrow_payload)(
             context,
@@ -2194,6 +2562,7 @@ unsafe extern "C-unwind" fn python_invoke(
         )
     };
     if status != TonicStatus::OK {
+        callable_is_proxy = false;
         status = unsafe {
             (api().foreign_borrow_payload)(
                 context,
@@ -2205,6 +2574,12 @@ unsafe extern "C-unwind" fn python_invoke(
     }
     if status != TonicStatus::OK {
         return status;
+    }
+    if !callable_is_proxy {
+        callable = unsafe { foreign_pyobject(callable) }.cast();
+        if callable.is_null() {
+            return TonicStatus::INVALID_ARGUMENT;
+        }
     }
     let positional = unsafe { arguments.add(1).read() };
     let keywords = unsafe { arguments.add(2).read() };
@@ -2334,6 +2709,7 @@ pub fn register(vm: &mut Vm) -> Result<()> {
                 | CAP_PERSISTENT_HANDLES_V1
                 | CAP_CONTAINER_ACCESS_V1
                 | CAP_PROTOCOL_ACCESS_V1
+                | CAP_CROSS_COLLECTOR_V1
                 | tonic_runtime::c_api::CAP_RUNTIME_OWNER_V1,
         )?;
     }
@@ -2520,6 +2896,70 @@ mod tests {
     }
 
     #[test]
+    fn foreign_pyobject_graph_cycle_is_collected_without_explicit_close() {
+        let source = "import python\ntypes=python.call1('builtins','__import__','types')\nnamespace_type=python.call('builtins','getattr',[types,'SimpleNamespace'],{})\nholder=python.invoke(namespace_type,[],{})\nclass Box:\n    pass\nbox=Box()\npython.call('builtins','setattr',[holder,'proxy',box],{})\nbox.holder=holder";
+        let mut vm = Vm::new().unwrap();
+        vm.gc_interval = None;
+        register(&mut vm).unwrap();
+        vm.run(
+            &tonic_compiler::compile(source, "foreign-pyobject-cycle").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            vm.active_handles(),
+            2,
+            "proxy starts with one strong root and one non-rooting trace token"
+        );
+
+        vm.run(
+            &tonic_compiler::compile("pass", "foreign-pyobject-unroot").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        vm.collect_garbage().unwrap();
+        assert_eq!(vm.active_handles(), 0);
+    }
+
+    #[test]
+    fn external_reference_to_foreign_graph_promotes_then_releases_proxy_target() {
+        let source = "import python\ntypes=python.call1('builtins','__import__','types')\nnamespace_type=python.call('builtins','getattr',[types,'SimpleNamespace'],{})\nholder=python.invoke(namespace_type,[],{})\nclass Box:\n    pass\nbox=Box()\npython.call('builtins','setattr',[holder,'proxy',box],{})\nbox.holder=holder\nsysmod=python.call1('builtins','__import__','sys')\npython.call('builtins','setattr',[sysmod,'_tonic_graph_holder',holder],{})";
+        let mut vm = Vm::new().unwrap();
+        vm.gc_interval = None;
+        register(&mut vm).unwrap();
+        vm.run(
+            &tonic_compiler::compile(source, "foreign-graph-external").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        vm.run(
+            &tonic_compiler::compile("pass", "foreign-graph-drop-tonic-roots").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        vm.collect_garbage().unwrap();
+        assert_eq!(
+            vm.active_handles(),
+            2,
+            "external CPython graph keeps strong and trace handles"
+        );
+
+        let release = "import python\nsysmod=python.call1('builtins','__import__','sys')\npython.call('builtins','delattr',[sysmod,'_tonic_graph_holder'],{})";
+        vm.run(
+            &tonic_compiler::compile(release, "foreign-graph-release-external").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        vm.run(
+            &tonic_compiler::compile("pass", "foreign-graph-release-globals").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        vm.collect_garbage().unwrap();
+        assert_eq!(vm.active_handles(), 0);
+    }
+
+    #[test]
     fn external_python_reference_keeps_proxy_target_until_release() {
         let source = "import python\nclass Box:\n    pass\nbox=Box()\nproxy=python.proxy(box)\nsysmod=python.call1('builtins','__import__','sys')\npython.call('builtins','setattr',[sysmod,'_tonic_test_proxy',proxy],{})";
         let mut vm = Vm::new().unwrap();
@@ -2535,7 +2975,11 @@ mod tests {
         )
         .unwrap();
         vm.collect_garbage().unwrap();
-        assert_eq!(vm.active_handles(), 1);
+        assert_eq!(
+            vm.active_handles(),
+            2,
+            "external proxy keeps one strong root and one trace token"
+        );
 
         let release = "import python\nsysmod=python.call1('builtins','__import__','sys')\npython.call('builtins','delattr',[sysmod,'_tonic_test_proxy'],{})";
         vm.run(

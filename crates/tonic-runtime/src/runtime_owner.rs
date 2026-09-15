@@ -12,6 +12,7 @@ pub(crate) struct RuntimeOwner {
     id: u64,
     alive: AtomicBool,
     deferred_persistent_releases: Mutex<Vec<u64>>,
+    deferred_foreign_reference_releases: Mutex<Vec<u64>>,
 }
 
 impl RuntimeOwner {
@@ -23,6 +24,7 @@ impl RuntimeOwner {
             id,
             alive: AtomicBool::new(true),
             deferred_persistent_releases: Mutex::new(Vec::new()),
+            deferred_foreign_reference_releases: Mutex::new(Vec::new()),
         })
     }
 
@@ -45,6 +47,26 @@ impl RuntimeOwner {
         std::mem::take(
             &mut *self
                 .deferred_persistent_releases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    pub(crate) fn queue_foreign_reference_release(&self, handle: u64) -> bool {
+        if !self.alive.load(Ordering::Acquire) {
+            return false;
+        }
+        self.deferred_foreign_reference_releases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
+        true
+    }
+
+    pub(crate) fn take_foreign_reference_releases(&self) -> Vec<u64> {
+        std::mem::take(
+            &mut *self
+                .deferred_foreign_reference_releases
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         )

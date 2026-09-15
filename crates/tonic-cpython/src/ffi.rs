@@ -32,6 +32,10 @@ pub const PY_TP_GETATTRO: c_int = 58;
 pub const PY_TP_REPR: c_int = 66;
 pub const PY_TP_SETATTRO: c_int = 69;
 pub const PY_TP_FREE: c_int = 74;
+pub const PY_TP_TRAVERSE: c_int = 71;
+
+pub type PyVisitProc = unsafe extern "C" fn(*mut PyObject, *mut c_void) -> c_int;
+pub type PyTraverseProc = unsafe extern "C" fn(*mut PyObject, PyVisitProc, *mut c_void) -> c_int;
 
 extern "C" {
     pub fn Py_IsInitialized() -> c_int;
@@ -58,6 +62,9 @@ extern "C" {
     pub static mut PyList_Type: PyObject;
     pub static mut PyTuple_Type: PyObject;
     pub static mut PyDict_Type: PyObject;
+    pub static mut PyType_Type: PyObject;
+    pub static mut PyModule_Type: PyObject;
+    pub static mut PyFunction_Type: PyObject;
     pub fn PyErr_GetRaisedException() -> *mut PyObject;
     pub fn PyObject_Str(object: *mut PyObject) -> *mut PyObject;
     pub fn PyUnicode_Join(separator: *mut PyObject, sequence: *mut PyObject) -> *mut PyObject;
@@ -94,6 +101,8 @@ extern "C" {
     ) -> c_int;
     pub fn PyObject_Length(object: *mut PyObject) -> PySsizeT;
     pub fn PyObject_IsInstance(object: *mut PyObject, class: *mut PyObject) -> c_int;
+    pub fn PyObject_Type(object: *mut PyObject) -> *mut PyObject;
+    pub fn PyObject_GC_IsTracked(object: *mut PyObject) -> c_int;
     pub fn PyImport_ImportModule(name: *const std::ffi::c_char) -> *mut PyObject;
     pub fn PyObject_GetAttrString(
         object: *mut PyObject,

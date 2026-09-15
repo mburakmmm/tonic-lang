@@ -26,6 +26,11 @@ pub type ForeignTraceFn = unsafe extern "C-unwind" fn(
 pub type ForeignDestroyFn = unsafe extern "C-unwind" fn(payload: *mut c_void);
 pub type TraceVisitFn =
     unsafe extern "C" fn(visitor: *mut TonicTraceVisitor, reference: TonicHandle) -> TonicStatus;
+pub type TracePromoteFn = unsafe extern "C" fn(
+    visitor: *mut TonicTraceVisitor,
+    reference: TonicHandle,
+    output: *mut crate::c_api::TonicPersistentHandle,
+) -> TonicStatus;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +50,26 @@ pub struct TonicTraceVisitor {
     pub reserved: u32,
     pub state: *mut c_void,
     pub visit: TraceVisitFn,
+    /// Reports a reference owned by the foreign payload rather than by this
+    /// managed wrapper. The runtime resolves it for this trace but never
+    /// releases it when the wrapper dies or stops reporting the edge.
+    pub visit_borrowed: TraceVisitFn,
+    /// Creates a persistent root from a borrowed foreign reference. This is
+    /// used when another collector discovers an external root after previously
+    /// demoting a bridge edge.
+    pub promote: TracePromoteFn,
+}
+
+struct TraceState {
+    owned: Vec<Handle>,
+    borrowed: Vec<Handle>,
+    handles: *mut crate::native::HandleTable,
+}
+
+#[derive(Default)]
+pub(crate) struct TracedHandles {
+    pub owned: Vec<Handle>,
+    pub borrowed: Vec<Handle>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,24 +138,90 @@ unsafe extern "C" fn visit_reference(
         {
             return TonicStatus::INVALID_ARGUMENT;
         }
-        // SAFETY: state points at the Vec created by `trace_handles` below.
-        let handles = unsafe { &mut *visitor.state.cast::<Vec<Handle>>() };
-        handles.push(reference.into_internal());
+        // SAFETY: state points at the TraceState created by `trace_handles` below.
+        let state = unsafe { &mut *visitor.state.cast::<TraceState>() };
+        state.owned.push(reference.into_internal());
         TonicStatus::OK
     }));
     result.unwrap_or(TonicStatus::PANIC)
 }
 
-pub(crate) fn trace_handles(spec: ForeignSpec, payload: usize) -> Result<Vec<Handle>> {
+unsafe extern "C" fn visit_borrowed_reference(
+    visitor: *mut TonicTraceVisitor,
+    reference: TonicHandle,
+) -> TonicStatus {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if visitor.is_null() {
+            return TonicStatus::INVALID_ARGUMENT;
+        }
+        // SAFETY: the runtime constructs the visitor for one synchronous trace.
+        let visitor = unsafe { &mut *visitor };
+        if visitor.struct_size < mem::size_of::<TonicTraceVisitor>() as u32
+            || visitor.state.is_null()
+        {
+            return TonicStatus::INVALID_ARGUMENT;
+        }
+        // SAFETY: state points at the TraceState created by `trace_handles` below.
+        let state = unsafe { &mut *visitor.state.cast::<TraceState>() };
+        state.borrowed.push(reference.into_internal());
+        TonicStatus::OK
+    }));
+    result.unwrap_or(TonicStatus::PANIC)
+}
+
+unsafe extern "C" fn promote_reference(
+    visitor: *mut TonicTraceVisitor,
+    reference: TonicHandle,
+    output: *mut crate::c_api::TonicPersistentHandle,
+) -> TonicStatus {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if visitor.is_null() || output.is_null() {
+            return TonicStatus::INVALID_ARGUMENT;
+        }
+        // SAFETY: the runtime constructs the visitor for one synchronous trace.
+        let visitor = unsafe { &mut *visitor };
+        if visitor.struct_size < mem::size_of::<TonicTraceVisitor>() as u32
+            || visitor.state.is_null()
+        {
+            return TonicStatus::INVALID_ARGUMENT;
+        }
+        // SAFETY: state and its handle table pointer remain live for the callback.
+        let state = unsafe { &mut *visitor.state.cast::<TraceState>() };
+        let Some(handles) = (unsafe { state.handles.as_mut() }) else {
+            return TonicStatus::INVALID_ARGUMENT;
+        };
+        match handles.promote_foreign_reference(reference.into_internal()) {
+            Ok(handle) => {
+                // SAFETY: output was validated non-null above.
+                unsafe { output.write(crate::c_api::TonicPersistentHandle::from_internal(handle)) };
+                TonicStatus::OK
+            }
+            Err(_) => TonicStatus::INVALID_ARGUMENT,
+        }
+    }));
+    result.unwrap_or(TonicStatus::PANIC)
+}
+
+pub(crate) fn trace_handles(
+    spec: ForeignSpec,
+    payload: usize,
+    handles: &mut crate::native::HandleTable,
+) -> Result<TracedHandles> {
     let Some(trace) = spec.trace else {
-        return Ok(Vec::new());
+        return Ok(TracedHandles::default());
     };
-    let mut handles: Vec<Handle> = Vec::new();
+    let mut state = TraceState {
+        owned: Vec::new(),
+        borrowed: Vec::new(),
+        handles,
+    };
     let mut visitor = TonicTraceVisitor {
         struct_size: mem::size_of::<TonicTraceVisitor>() as u32,
         reserved: 0,
-        state: ptr::from_mut(&mut handles).cast(),
+        state: ptr::from_mut(&mut state).cast(),
         visit: visit_reference,
+        visit_borrowed: visit_borrowed_reference,
+        promote: promote_reference,
     };
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the extension supplied the callback and payload. The visitor
@@ -149,17 +240,32 @@ pub(crate) fn trace_handles(spec: ForeignSpec, payload: usize) -> Result<Vec<Han
             format!("foreign trace callback failed with status {status:?}"),
         ));
     }
-    handles.sort_unstable_by_key(|handle| handle.raw());
-    if handles
+    state.owned.sort_unstable_by_key(|handle| handle.raw());
+    state.borrowed.sort_unstable_by_key(|handle| handle.raw());
+    let duplicate_owned = state
+        .owned
         .windows(2)
-        .any(|pair| pair[0].raw() == pair[1].raw())
-    {
+        .any(|pair| pair[0].raw() == pair[1].raw());
+    let duplicate_borrowed = state
+        .borrowed
+        .windows(2)
+        .any(|pair| pair[0].raw() == pair[1].raw());
+    let mixed = state.owned.iter().any(|owned| {
+        state
+            .borrowed
+            .binary_search_by_key(&owned.raw(), |h| h.raw())
+            .is_ok()
+    });
+    if duplicate_owned || duplicate_borrowed || mixed {
         return Err(Diagnostic::new(
             "ForeignError",
             "foreign trace callback reported a reference more than once",
         ));
     }
-    Ok(handles)
+    Ok(TracedHandles {
+        owned: state.owned,
+        borrowed: state.borrowed,
+    })
 }
 
 #[derive(Debug)]
@@ -169,6 +275,7 @@ pub(crate) struct ForeignObject {
     spec: ForeignSpec,
     references: Vec<Value>,
     reference_handles: Vec<Handle>,
+    borrowed_handles: Vec<Handle>,
     active: bool,
 }
 
@@ -177,6 +284,7 @@ impl ForeignObject {
         payload: usize,
         spec: ForeignSpec,
         reference_handles: Vec<Handle>,
+        borrowed_handles: Vec<Handle>,
         references: Vec<Value>,
     ) -> Self {
         Self {
@@ -185,6 +293,7 @@ impl ForeignObject {
             spec,
             references,
             reference_handles,
+            borrowed_handles,
             active: true,
         }
     }
@@ -195,25 +304,29 @@ impl ForeignObject {
 
     pub(crate) fn refresh(
         &mut self,
-        resolve: impl Fn(Handle) -> Result<Value>,
+        handles: &mut crate::native::HandleTable,
     ) -> Result<Vec<Handle>> {
-        let handles = trace_handles(self.spec, self.payload)?;
-        let references = handles
+        let traced = trace_handles(self.spec, self.payload, handles)?;
+        let references = traced
+            .owned
             .iter()
+            .chain(&traced.borrowed)
             .copied()
-            .map(resolve)
+            .map(|handle| handles.resolve_foreign_reference(handle))
             .collect::<Result<Vec<_>>>()?;
         let removed = self
             .reference_handles
             .iter()
             .copied()
             .filter(|old| {
-                handles
+                traced
+                    .owned
                     .binary_search_by_key(&old.raw(), |handle| handle.raw())
                     .is_err()
             })
             .collect();
-        self.reference_handles = handles;
+        self.reference_handles = traced.owned;
+        self.borrowed_handles = traced.borrowed;
         self.references = references;
         Ok(removed)
     }
@@ -233,6 +346,7 @@ impl ForeignObject {
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.references.capacity() * mem::size_of::<Value>()
             + self.reference_handles.capacity() * mem::size_of::<Handle>()
+            + self.borrowed_handles.capacity() * mem::size_of::<Handle>()
     }
 
     pub(crate) fn take_finalizer(&mut self) -> PendingForeign {
@@ -259,7 +373,7 @@ impl PendingForeign {
     }
     /// Returns true if a foreign panic was contained. The payload is consumed
     /// before invocation, so a panic can never cause a second destructor call.
-    pub(crate) fn run(mut self) -> bool {
+    pub(crate) fn run(&mut self) -> bool {
         let payload = mem::take(&mut self.payload);
         if !self.owned {
             return false;

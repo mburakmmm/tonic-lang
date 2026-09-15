@@ -62,7 +62,8 @@ enum {
     TONIC_CAPABILITY_PERSISTENT_HANDLES_V1 = 7,
     TONIC_CAPABILITY_RUNTIME_OWNER_V1 = 8,
     TONIC_CAPABILITY_CONTAINER_ACCESS_V1 = 9,
-    TONIC_CAPABILITY_PROTOCOL_ACCESS_V1 = 10
+    TONIC_CAPABILITY_PROTOCOL_ACCESS_V1 = 10,
+    TONIC_CAPABILITY_CROSS_COLLECTOR_V1 = 11
 };
 
 #define TONIC_CAP_CORE (UINT64_C(1) << 0)
@@ -75,17 +76,22 @@ enum {
 #define TONIC_CAP_RUNTIME_OWNER_V1 (UINT64_C(1) << 7)
 #define TONIC_CAP_CONTAINER_ACCESS_V1 (UINT64_C(1) << 8)
 #define TONIC_CAP_PROTOCOL_ACCESS_V1 (UINT64_C(1) << 9)
+#define TONIC_CAP_CROSS_COLLECTOR_V1 (UINT64_C(1) << 10)
 
 #define TONIC_FOREIGN_OWNED (UINT64_C(1) << 0)
 
 typedef TonicStatus (*TonicForeignTraceFn)(void *, TonicTraceVisitor *);
 typedef void (*TonicForeignDestroyFn)(void *);
+typedef TonicStatus (*TonicTracePromoteFn)(TonicTraceVisitor *, TonicHandle,
+                                           TonicPersistentHandle *);
 
 struct TonicTraceVisitor {
     uint32_t struct_size;
     uint32_t reserved;
     void *state;
     TonicStatus (*visit)(TonicTraceVisitor *, TonicHandle);
+    TonicStatus (*visit_borrowed)(TonicTraceVisitor *, TonicHandle);
+    TonicTracePromoteFn promote;
 };
 
 typedef struct TonicForeignVTable {
@@ -208,6 +214,9 @@ typedef struct TonicApi {
     TonicStatus (*repr_value)(TonicContext *, TonicHandle, TonicHandle *);
     TonicStatus (*foreign_reference_borrow)(TonicContext *, TonicHandle,
                                              TonicHandle *);
+    TonicStatus (*runtime_identity)(TonicContext *, uint64_t *);
+    TonicStatus (*foreign_reference_release_deferred)(
+        const TonicRuntimeOwner *, TonicHandle);
 } TonicApi;
 
 typedef TonicStatus (*TonicNativeFn)(TonicContext *, const TonicHandle *,

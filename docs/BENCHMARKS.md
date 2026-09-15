@@ -9,6 +9,8 @@ karşılaştırmasını içerir. Güncel descriptor ara baseline'ı
 [STAGE4_BENCHMARKS.md](STAGE4_BENCHMARKS.md), önceki class/shape/method
 ölçümü [STAGE3_BENCHMARKS.md](STAGE3_BENCHMARKS.md), closure/call/dict/GC ölçümü
 [STAGE2_BENCHMARKS.md](STAGE2_BENCHMARKS.md),
+CPython iki-collector graph tarama maliyeti
+[CROSS_COLLECTOR_BASELINE.md](CROSS_COLLECTOR_BASELINE.md),
 nihai benchmark kabul planı [FINAL_BENCHMARK_PLAN.md](FINAL_BENCHMARK_PLAN.md)
 içindedir. Aşağıdaki arena/GC-yok durumu güncel runtime'ı anlatmaz.
 

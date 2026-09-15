@@ -184,7 +184,7 @@ impl Heap {
             let called = u64::from(foreign.has_trace());
             self.foreign_trace_calls += called;
             trace_calls += called;
-            let removed = foreign.refresh(|handle| handles.resolve_foreign_reference(handle))?;
+            let removed = foreign.refresh(handles)?;
             for handle in removed {
                 handles.release_foreign_reference(handle)?;
             }
@@ -215,10 +215,7 @@ impl Heap {
     ) -> (u64, u64) {
         let mut destructor_calls = 0;
         let mut destructor_panics = 0;
-        for pending in self.pending_foreign.drain(..) {
-            for handle in &pending.reference_handles {
-                let _ = handles.release_foreign_reference(*handle);
-            }
+        for mut pending in self.pending_foreign.drain(..) {
             if pending.will_destroy() {
                 self.foreign_destructor_calls += 1;
                 destructor_calls += 1;
@@ -226,6 +223,12 @@ impl Heap {
             if pending.run() {
                 self.foreign_destructor_panics += 1;
                 destructor_panics += 1;
+            }
+            // Trace edges are finalization roots: foreign code sees its complete
+            // managed graph until destruction returns. Reclamation remains a
+            // separate step after the logical finalizer has run.
+            for handle in &pending.reference_handles {
+                let _ = handles.release_foreign_reference(*handle);
             }
         }
         (destructor_calls, destructor_panics)
@@ -615,7 +618,7 @@ impl Drop for Heap {
                 self.pending_foreign.push(foreign.take_finalizer());
             }
         }
-        for pending in self.pending_foreign.drain(..) {
+        for mut pending in self.pending_foreign.drain(..) {
             let _ = pending.run();
         }
     }

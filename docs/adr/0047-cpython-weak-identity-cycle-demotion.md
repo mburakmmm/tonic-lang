@@ -2,7 +2,7 @@
 
 ## Durum
 
-Kabul edildi — 14 Eylül 2026; genel `ForeignPyObject` grafik taraması açık.
+Kabul edildi — 14 Eylül 2026; genel `ForeignPyObject` grafik taraması ADR 0048 ile tamamlandı.
 
 ## Karar
 
@@ -45,8 +45,8 @@ allocation sınırını korur.
 
 ## Sınır
 
-Bu protokol doğrudan `PyTonicProxy` foreign wrapper'ını kapsar. Arbitrary
-`ForeignPyObject` payload'ının transitif CPython nesne grafiğinde saklanan proxy
-kenarları henüz Tonic foreign trace sistemine aktarılmaz. Bu daha genel iki-collector
-tarama ve finalizer sırası roadmap'te açık kalır; bridge transparent cyclic
-interoperability iddiasında bulunmaz.
+Bu ADR doğrudan `PyTonicProxy` foreign wrapper'ını kapsar. Arbitrary
+`ForeignPyObject` payload'ının transitif CPython nesne grafiği, borrowed trace edge,
+promotion ve finalizer sırası [ADR 0048](0048-cpython-cross-collector-graph-tracing.md)
+ile eklenmiştir. Bounded traversal sınırını aşan veya global interpreter altyapısına
+giren graph'lar conservative retention kullanır.

@@ -38,6 +38,12 @@ impl TonicHandle {
 #[repr(transparent)]
 pub struct TonicPersistentHandle(u64);
 
+impl TonicPersistentHandle {
+    pub(crate) fn from_internal(handle: crate::native::PersistentHandle) -> Self {
+        Self(handle.raw())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct TonicValueKind(u32);
@@ -109,6 +115,7 @@ impl TonicCapability {
     pub const RUNTIME_OWNER_V1: Self = Self(8);
     pub const CONTAINER_ACCESS_V1: Self = Self(9);
     pub const PROTOCOL_ACCESS_V1: Self = Self(10);
+    pub const CROSS_COLLECTOR_V1: Self = Self(11);
 }
 
 pub const CAP_CORE: u64 = 1 << 0;
@@ -121,6 +128,7 @@ pub const CAP_PERSISTENT_HANDLES_V1: u64 = 1 << 6;
 pub const CAP_RUNTIME_OWNER_V1: u64 = 1 << 7;
 pub const CAP_CONTAINER_ACCESS_V1: u64 = 1 << 8;
 pub const CAP_PROTOCOL_ACCESS_V1: u64 = 1 << 9;
+pub const CAP_CROSS_COLLECTOR_V1: u64 = 1 << 10;
 pub const TONIC_CAPABILITIES: u64 = CAP_CORE
     | CAP_EXPLICIT_EXCEPTION_STATUS
     | CAP_SCOPED_LOCAL_HANDLES
@@ -130,7 +138,8 @@ pub const TONIC_CAPABILITIES: u64 = CAP_CORE
     | CAP_PERSISTENT_HANDLES_V1
     | CAP_RUNTIME_OWNER_V1
     | CAP_CONTAINER_ACCESS_V1
-    | CAP_PROTOCOL_ACCESS_V1;
+    | CAP_PROTOCOL_ACCESS_V1
+    | CAP_CROSS_COLLECTOR_V1;
 
 pub type CNativeFn = unsafe extern "C-unwind" fn(
     *mut TonicContext,
@@ -260,6 +269,9 @@ type RuntimeOwnerMatchesFn =
 type RuntimeExecutionIdFn = unsafe extern "C" fn(*mut TonicContext, *mut u64) -> TonicStatus;
 type PersistentReleaseDeferredFn =
     unsafe extern "C" fn(*const TonicRuntimeOwner, TonicPersistentHandle) -> TonicStatus;
+type ForeignReferenceReleaseDeferredFn =
+    unsafe extern "C" fn(*const TonicRuntimeOwner, TonicHandle) -> TonicStatus;
+type RuntimeIdentityFn = unsafe extern "C" fn(*mut TonicContext, *mut u64) -> TonicStatus;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -349,6 +361,8 @@ pub struct TonicApi {
     pub set_attr: AttrSetFn,
     pub repr_value: ReprFn,
     pub foreign_reference_borrow: ForeignReferenceBorrowFn,
+    pub runtime_identity: RuntimeIdentityFn,
+    pub foreign_reference_release_deferred: ForeignReferenceReleaseDeferredFn,
 }
 
 struct CallContext<'context, 'heap> {
@@ -544,7 +558,7 @@ unsafe extern "C" fn query_capability(
         boundary(context, true, |_| {
             require_out(version)?;
             let supported = match capability.0 {
-                1..=10 => 1,
+                1..=11 => 1,
                 _ => return Err(BoundaryError::Unsupported("capability is not supported")),
             };
             if minimum_version > supported {
@@ -1386,6 +1400,37 @@ unsafe extern "C" fn persistent_release_deferred(
     }
 }
 
+unsafe extern "C" fn runtime_identity(context: *mut TonicContext, output: *mut u64) -> TonicStatus {
+    // SAFETY: boundary validates the live context and output before writing.
+    unsafe {
+        boundary(context, true, |state| {
+            require_out(output)?;
+            output.write(state.context.runtime_owner().id());
+            Ok(())
+        })
+    }
+}
+
+unsafe extern "C" fn foreign_reference_release_deferred(
+    owner_pointer: *const TonicRuntimeOwner,
+    reference: TonicHandle,
+) -> TonicStatus {
+    match catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: pointer lifetime is governed by runtime_owner_acquire/release.
+        let Some(owner) = (unsafe { owner(owner_pointer) }) else {
+            return TonicStatus::INVALID_ARGUMENT;
+        };
+        if owner.queue_foreign_reference_release(reference.0) {
+            TonicStatus::OK
+        } else {
+            TonicStatus::UNSUPPORTED
+        }
+    })) {
+        Ok(status) => status,
+        Err(_) => TonicStatus::PANIC,
+    }
+}
+
 static API: TonicApi = TonicApi {
     struct_size: mem::size_of::<TonicApi>() as u32,
     abi_version: TONIC_ABI_VERSION,
@@ -1438,6 +1483,8 @@ static API: TonicApi = TonicApi {
     set_attr,
     repr_value,
     foreign_reference_borrow,
+    runtime_identity,
+    foreign_reference_release_deferred,
 };
 
 pub fn negotiate_api(
@@ -1695,6 +1742,13 @@ mod tests {
         assert_eq!(
             unsafe {
                 query_capability(opaque, TonicCapability::PROTOCOL_ACCESS_V1, 1, &mut version)
+            },
+            TonicStatus::OK
+        );
+        assert_eq!(version, 1);
+        assert_eq!(
+            unsafe {
+                query_capability(opaque, TonicCapability::CROSS_COLLECTOR_V1, 1, &mut version)
             },
             TonicStatus::OK
         );

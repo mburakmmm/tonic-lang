@@ -181,18 +181,25 @@ size/version/flag doğrulamalı `TonicForeignVTable` ile dış payload'ı manage
 `Object::Foreign` wrapper'a bağlar. Başarılı create sahipliği runtime'a geçirir;
 başarısız create'te payload ve henüz bağlanmamış reference çağıranda kalır.
 
-Vtable trace callback'i opaque payload ve geçici `TonicTraceVisitor` alır. Visitor
-yalnız `foreign_reference_create` sonucu handle'ları kabul eder; duplicate, stale,
-başka runtime'a ait veya yanlış-kind handle kesin hata üretir. Her normal GC
-başlamadan callback yeniden çalışır, handle'lar `Value` kenarlarına çözülür ve
-wrapper'ın precise trace listesi güncellenir. Artık bildirilmeyen handle'lar runtime
-tarafından release edilir. Old foreign wrapper'a yeni nursery değeri yazılmışsa
-owner remembered set'e kaydedilir; minor collection kenarı kaybetmez.
+Vtable trace callback'i opaque payload ve geçici `TonicTraceVisitor` alır. `visit`,
+`foreign_reference_create` sonucu wrapper-owned handle'ları kabul eder; duplicate,
+stale, başka runtime'a ait veya yanlış-kind handle kesin hata üretir. Artık
+bildirilmeyen owned handle'lar runtime tarafından release edilir.
+`TONIC_CAP_CROSS_COLLECTOR_V1` ile eklenen `visit_borrowed`, sahipliği payload'da
+kalan foreign-reference handle'ı yalnız o trace için `Value` kenarına çözer;
+wrapper bu token'ı release etmez. `promote`, borrowed token'dan yeni persistent
+root üretir. `runtime_identity` graph içindeki proxy'lerin doğru runtime'a ait
+olduğunu doğrulamayı, `foreign_reference_release_deferred` ise aktif context
+olmayan proxy deallocation yolunun token'ı doğru owner kuyruğuna bırakmasını sağlar.
+Her normal GC başlamadan callback yeniden çalışır ve wrapper'ın precise trace
+listesi güncellenir. Old foreign wrapper'a yeni nursery değeri yazılmışsa owner
+remembered set'e kaydedilir; minor collection kenarı kaybetmez.
 
 `TONIC_FOREIGN_OWNED` destroy callback'ini zorunlu kılar; borrowed payload destroy
 slotu veremez. Sweep destructor çalıştırmaz: payload ve reference handle'lar pending
-queue'ya taşınır. Compaction bittikten sonra queue reference'ları bırakır ve
-destructor'ı tam bir kez çağırır. Panic tutulur, yeniden denenmez ve
+queue'ya taşınır. Compaction bittikten sonra queue destructor'ı traced kenarlar
+finalization root olarak hâlâ canlıyken tam bir kez çağırır; owned reference'lar
+destructor döndükten sonra bırakılır. Panic tutulur, yeniden denenmez ve
 `foreign_destructor_panics` sayacına yazılır. VM normal Rust Drop yolu da henüz
 toplanmamış owned payload için son cleanup garantisi verir. Vtable kodunu sağlayan
 library runtime kapanana kadar yüklü kalmalıdır; unload protokolü yoktur.
@@ -232,8 +239,11 @@ sonrası toplandığı test edilir. Native result/error scope cleanup stress GC 
 doğrulanır. Tonic↔foreign wrapper döngüsü, shutdown cleanup ve exactly-once payload
 destruction ayrıca test edilir. Doğrudan `PyTonicProxy` wrapper döngüsü refcount-aware
 root demotion ile otomatik toplanır; dış CPython referansı kökü yeniden güçlendirir.
-Arbitrary `ForeignPyObject` iç grafiklerinde transitif proxy taraması henüz garanti
-edilmez.
+Arbitrary `ForeignPyObject` iç grafiklerinde transitif proxy kenarları public
+`Py_tp_traverse` slotuyla bounded biçimde taranır. Traversal hatası, graph limiti
+veya başka runtime'a ait proxy görülürse adapter güçlü kökü koruyarak conservative
+retention uygular. Ayrıntılı sözleşme
+[ADR 0048](adr/0048-cpython-cross-collector-graph-tracing.md) içindedir.
 
 İlk Cranelift katmanı leaf numeric fonksiyonları çalıştırır ve `/` için opak bir
 runtime helper kullanır; döngülü kodda integer olmayan `+ += - * // %` işlemleri

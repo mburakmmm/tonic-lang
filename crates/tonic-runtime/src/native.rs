@@ -140,6 +140,10 @@ impl HandleTable {
         }
         entry.value.ok_or_else(invalid)
     }
+    pub(crate) fn promote_foreign_reference(&mut self, handle: Handle) -> Result<PersistentHandle> {
+        let value = self.resolve_foreign_reference(handle)?;
+        self.persist_value(value)
+    }
     pub(crate) fn release_foreign_reference(&mut self, handle: Handle) -> Result<()> {
         self.release(handle, HandleKind::ForeignReference)
     }
@@ -457,24 +461,27 @@ impl<'a> Context<'a> {
         payload: usize,
         spec: crate::foreign::ForeignSpec,
     ) -> Result<Handle> {
-        let reference_handles = crate::foreign::trace_handles(spec, payload)?;
+        let traced = crate::foreign::trace_handles(spec, payload, &mut self.vm.handles)?;
         self.vm.heap.foreign_trace_calls += u64::from(spec.trace.is_some());
         self.vm.stats.foreign_trace_calls += u64::from(spec.trace.is_some());
-        let references = reference_handles
+        let references = traced
+            .owned
             .iter()
+            .chain(&traced.borrowed)
             .copied()
             .map(|handle| self.vm.handles.resolve_foreign_reference(handle))
             .collect::<Result<Vec<_>>>()?;
         let foreign = crate::foreign::ForeignObject::new(
             payload,
             spec,
-            reference_handles.clone(),
+            traced.owned.clone(),
+            traced.borrowed,
             references,
         );
         let value = match self.vm.heap.alloc(Object::Foreign(foreign)) {
             Ok(value) => value,
             Err(error) => {
-                for handle in reference_handles {
+                for handle in traced.owned {
                     let _ = self.vm.handles.release_foreign_reference(handle);
                 }
                 return Err(error);

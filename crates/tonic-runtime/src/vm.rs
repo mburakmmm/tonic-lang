@@ -140,6 +140,7 @@ struct JitRuntime<'a> {
     symbols: &'a [String],
     gc_interval: Option<u64>,
     minor_collections: &'a mut u8,
+    runtime_owner: &'a Arc<RuntimeOwner>,
 }
 impl JitRuntime<'_> {
     fn safepoint(
@@ -152,13 +153,16 @@ impl JitRuntime<'_> {
             self.heap.allocations - self.heap.last_collection_allocations >= interval.max(1)
         }) {
             let started = std::time::Instant::now();
-            let mut roots = self.roots.to_vec();
-            roots.extend(registers.iter().copied().map(Value::from_jit));
             let trace_calls = self
                 .heap
                 .refresh_foreign_references(self.handles)
                 .map_err(runtime_failure)?;
             self.stats.foreign_trace_calls += trace_calls;
+            drain_deferred_handle_releases(self.runtime_owner, self.handles)
+                .map_err(runtime_failure)?;
+            let mut roots = self.roots.to_vec();
+            roots.extend(registers.iter().copied().map(Value::from_jit));
+            self.handles.roots(|value| roots.push(value));
             let collection = if *self.minor_collections >= MINORS_PER_MAJOR - 1 {
                 *self.minor_collections = 0;
                 self.heap.collect(roots)
@@ -176,6 +180,32 @@ impl JitRuntime<'_> {
         Ok(())
     }
 }
+
+fn drain_deferred_handle_releases(owner: &RuntimeOwner, handles: &mut HandleTable) -> Result<()> {
+    for raw in owner.take_persistent_releases() {
+        let handle = PersistentHandle::from_raw(raw);
+        handles.release_persistent(&handle).map_err(|error| {
+            Diagnostic::new(
+                error.kind,
+                format!("invalid deferred persistent release: {}", error.message),
+            )
+        })?;
+    }
+    for raw in owner.take_foreign_reference_releases() {
+        let handle = crate::native::Handle::from_raw(raw);
+        handles.release_foreign_reference(handle).map_err(|error| {
+            Diagnostic::new(
+                error.kind,
+                format!(
+                    "invalid deferred foreign reference release: {}",
+                    error.message
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 impl tonic_jit::Runtime for JitRuntime<'_> {
     fn binary(
         &mut self,
@@ -819,16 +849,7 @@ impl Vm {
     }
 
     pub(crate) fn drain_deferred_persistent_releases(&mut self) -> Result<()> {
-        for raw in self.runtime_owner.take_persistent_releases() {
-            let handle = PersistentHandle::from_raw(raw);
-            self.handles.release_persistent(&handle).map_err(|error| {
-                Diagnostic::new(
-                    error.kind,
-                    format!("invalid deferred persistent release: {}", error.message),
-                )
-            })?;
-        }
-        Ok(())
+        drain_deferred_handle_releases(&self.runtime_owner, &mut self.handles)
     }
     pub fn call_persistent(
         &mut self,
@@ -1074,6 +1095,7 @@ impl Vm {
     fn append_gc_roots(
         &self,
         excluded_registers: Option<std::ops::Range<usize>>,
+        include_handles: bool,
         roots: &mut Vec<Value>,
     ) {
         // Exact Value roots, not conservative scanning of the host stack.
@@ -1099,16 +1121,19 @@ impl Vm {
         for args in &self.arguments {
             args.trace(|value| roots.push(value));
         }
-        self.handles.roots(|value| roots.push(value));
+        if include_handles {
+            self.handles.roots(|value| roots.push(value));
+        }
     }
     pub fn collect_garbage(&mut self) -> Result<crate::CollectionStats> {
         self.ensure_running()?;
         self.drain_deferred_persistent_releases()?;
         let start = std::time::Instant::now();
-        let mut roots = Vec::new();
-        self.append_gc_roots(None, &mut roots);
         self.stats.foreign_trace_calls +=
             self.heap.refresh_foreign_references(&mut self.handles)?;
+        self.drain_deferred_persistent_releases()?;
+        let mut roots = Vec::new();
+        self.append_gc_roots(None, true, &mut roots);
         let stats = self.heap.collect(roots)?;
         let (destructors, panics) = self.heap.drain_foreign_finalizers(&mut self.handles);
         self.stats.foreign_destructor_calls += destructors;
@@ -1120,10 +1145,11 @@ impl Vm {
     }
     fn collect_automatic(&mut self) -> Result<crate::CollectionStats> {
         let start = std::time::Instant::now();
-        let mut roots = Vec::new();
-        self.append_gc_roots(None, &mut roots);
         self.stats.foreign_trace_calls +=
             self.heap.refresh_foreign_references(&mut self.handles)?;
+        self.drain_deferred_persistent_releases()?;
+        let mut roots = Vec::new();
+        self.append_gc_roots(None, true, &mut roots);
         let stats = if self.minor_collections >= MINORS_PER_MAJOR - 1 {
             self.minor_collections = 0;
             self.heap.collect(roots)?
@@ -3135,7 +3161,7 @@ impl Vm {
         let mut roots = std::mem::take(&mut self.jit_roots);
         roots.clear();
         if safepoints > 0 {
-            self.append_gc_roots(Some(base..end), &mut roots);
+            self.append_gc_roots(Some(base..end), false, &mut roots);
         }
         self.stats.jit_calls += 1;
         let mut direct_calls = 0;
@@ -3152,6 +3178,7 @@ impl Vm {
                 symbols: &program.symbols,
                 gc_interval: self.gc_interval,
                 minor_collections: &mut self.minor_collections,
+                runtime_owner: &self.runtime_owner,
             };
             function.run_from_with_globals_counted(
                 &mut self.jit_registers,

@@ -19,3 +19,7 @@ unsafe_code = "allow"
 [[bench]]
 name = "bridge"
 harness = false
+
+[[bench]]
+name = "cross_runtime_gc"
+harness = false

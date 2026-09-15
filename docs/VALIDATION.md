@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-13 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+15 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -24,6 +24,7 @@
 - `cargo bench -p tonic-runtime --bench callback --locked --offline`
 - `cargo bench -p tonic-runtime --bench foreign_lifecycle --locked --offline`
 - `cargo bench -p tonic-cpython --bench bridge --locked --offline`
+- `cargo bench -p tonic-cpython --bench cross_runtime_gc --locked --offline`
 - `cc -std=c11 -Wall -Wextra -Werror -Iinclude -fsyntax-only tests/c_header_smoke.c`
 - `python3 benches/capture.py --output docs/benchmarks/stage2`
 - `python3 benches/capture.py --output docs/benchmarks/stage3`
@@ -34,9 +35,9 @@
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 6, compiler/parser 11, core verifier 8, Cranelift JIT 15, runtime unit 22,
-direct bytecode VM 4, buffer 3, C ABI integration 14, foreign wrapper 6, lifecycle/callback 5,
+direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
 call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 27,
-native handles 5, language/runtime 60, CPython bridge 13; toplam 237 test.
+native handles 5, language/runtime 60, CPython bridge 15; toplam 239 test.
 
 Differential corpus: 269 stdout vakası ve 75 exception türü vakası. Seed 42.
 Son unboxed-loop/deopt-map değişikliğinden sonra debug/release × interpreter/JIT ×
@@ -146,7 +147,7 @@ attribute set/get, property continuation, repr, logical-handle roundtrip ve stre
 doğrulanır. Proxy foreign wrapper GC ile ölünce release doğru VM kuyruğunda
 boşaltılır. Ayrı cycle testi proxy→persistent callable→closure/list→proxy halkasını
 idempotent `close_proxy` ile kırar ve kapalı proxy çağrısının kesin diagnostic
-üretmesini doğrular. On test paralel thread koşusunda `PyEval_SaveThread` başlangıç
+üretmesini doğrular. On beş test paralel thread koşusunda `PyEval_SaveThread` başlangıç
 bırakması ve çağrı başına `PyGILState` guard'ıyla geçer. Python traceback metni
 `PythonError`a çevrilir; Tonic callback hata sınıfı CPython'a aktarılır ve iki tarafın
 indicator/state'i temizlenir.
@@ -156,8 +157,13 @@ doğrular. Otomatik cycle testi yalnız wrapper tarafından tutulan proxy'nin pe
 kökünü non-rooting foreign trace kenarına düşürür ve explicit close olmadan
 proxy→closure→list→wrapper halkasını toplar. Ayrı dış-root testi proxy `sys`
 modülünde tutulduğu sürece hedefi yaşatır, attribute silindikten sonra deferred kökü
-boşaltır. Arbitrary `ForeignPyObject` iç nesne grafiklerinin genel taraması henüz bu
-kapsamda değildir.
+boşaltır. Genel graph testi `SimpleNamespace -> proxy` transitif kenarını public
+`Py_tp_traverse` slotuyla bulur; yalnız iki runtime'ın tuttuğu halka explicit close
+olmadan toplanır. Aynı proxy için bir dış CPython referansı bulunduğunda borrowed
+trace token'ı yeniden persistent köke yükseltilir. Traversal/graph sınırları aşılırsa
+veya yabancı runtime proxy'si görülürse güçlü kök conservative biçimde korunur.
+Foreign finalizer payload destructor'ı traced Tonic kenarları hâlâ kökken çalışır;
+owned trace handle'ları destructor döndükten sonra bırakılır.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size
@@ -165,9 +171,9 @@ sayaçları ayrıca test edilir. True division runtime helper'ı float allocatio
 exact error PC/türü ve explicit materialized register roots kullanır. Ardışık iki
 helper arasında yalnız JIT register'ında yaşayan float, helper-triggered stress
 collection'dan sağ çıkar. Bu boxed-register ABI'sinin allocation safepoint testidir;
-unboxed machine deopt map kapsamı ayrı JIT testlerinde doğrulanır. User-language
-user-language finalizer semantiği ve otomatik cross-runtime cycle detection henüz
-uygulanmamıştır; CPython bridge kapsamı yukarıdaki on integration testiyle sınırlıdır.
+unboxed machine deopt map kapsamı ayrı JIT testlerinde doğrulanır. Dil düzeyindeki
+kullanıcı finalizer semantiği henüz uygulanmamıştır; CPython bridge'in iki-collector
+cycle/finalizer sırası yukarıdaki on beş integration testiyle sınırlanır.
 Recursive JIT testi `CALL` side exit'i, explicit child frame, arbitrary-PC native
 resume ve direct bound `LOAD_GLOBAL` yolunu birlikte çalıştırır. Global rebinding
 sonrasında yeni hedef çağrılır; eksik globalin `NameError` konumu exact helper
