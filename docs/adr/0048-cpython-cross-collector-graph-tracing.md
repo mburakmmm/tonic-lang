@@ -36,6 +36,12 @@ bulunursa `TonicTraceVisitor.promote` non-rooting token'dan yeni persistent hand
 üretir. Böylece daha önce zayıflatılmış bir proxy Python koduyla dışarı taşındığında
 hedefi tekrar güçlü biçimde korunur.
 
+`PyTonicProxy`, Python nesnesi tutmadığı için boş bir `Py_tp_traverse` slotuna
+sahiptir; buna rağmen `Py_TPFLAGS_HAVE_GC` ile GC-visible'dır. Bu işaret özellikle
+CPython 3.12'nin container untracking optimizasyonunda gereklidir: proxy bir dict'e
+eklendiğinde dict tracked kalır ve adapter `dict -> proxy` kenarını görebilir.
+Deallocator payload'ı bırakmadan önce proxy'yi CPython GC listelerinden çıkarır.
+
 Borrowed trace token'ı proxy payload'ına aittir. Managed foreign wrapper onu
 yenilemeyi bıraktığında veya toplandığında release etmez; proxy `tp_dealloc`
 callback'i doğru runtime-owner kuyruğuna tam bir kez bırakır. ABI v1 tablosuna

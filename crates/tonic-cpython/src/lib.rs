@@ -974,16 +974,9 @@ unsafe fn graph_has_external_root(
     runtime_id: u64,
 ) -> bool {
     if !graph.complete {
-        #[cfg(test)]
-        eprintln!(
-            "cross-collector graph incomplete: nodes={} proxies={}",
-            graph.nodes.len(),
-            graph.proxies.len()
-        );
         return true;
     }
-    #[allow(clippy::unused_enumerate_index)]
-    for (_node_index, raw) in graph.nodes.iter().enumerate() {
+    for raw in &graph.nodes {
         let object = *raw as *mut ffi::PyObject;
         let incoming = graph.incoming.get(raw).copied().unwrap_or(0);
         let owned_roots = root_counts.get(raw).copied().unwrap_or(0);
@@ -994,25 +987,14 @@ unsafe fn graph_has_external_root(
             // A proxy from another runtime cannot be represented in this trace
             // visitor. Keep every involved persistent root conservatively.
             if unsafe { (*payload).runtime_id } != runtime_id {
-                #[cfg(test)]
-                eprintln!("cross-collector graph contains a foreign-runtime proxy");
                 return true;
             }
             expected += wrappers;
         }
         let Some(reference_count) = (unsafe { python_reference_count(object) }) else {
-            #[cfg(test)]
-            eprintln!("cross-collector refcount unavailable at node {_node_index}");
             return true;
         };
         if reference_count > expected as isize {
-            #[cfg(test)]
-            eprintln!(
-                "cross-collector external node: index={_node_index} proxy={} refcount={reference_count} expected={expected} incoming={incoming} roots={owned_roots} wrappers={wrappers} nodes={} proxies={}",
-                proxy.is_some(),
-                graph.nodes.len(),
-                graph.proxies.len()
-            );
             return true;
         }
     }
