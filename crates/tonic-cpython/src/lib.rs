@@ -218,6 +218,9 @@ unsafe fn prune_proxy_cache(removing: *mut ffi::PyObject) {
 }
 
 unsafe extern "C" fn proxy_dealloc(object: *mut ffi::PyObject) {
+    // A GC-aware extension type must leave CPython's generation lists before
+    // its payload is torn down or its paired allocator releases the object.
+    unsafe { ffi::PyObject_GC_UnTrack(object.cast()) };
     unsafe { prune_proxy_cache(object) };
     let proxy_type = *PROXY_TYPE.get().expect("proxy type initialized") as *mut ffi::PyObject;
     let payload = unsafe { proxy_payload(object) };
@@ -232,6 +235,17 @@ unsafe extern "C" fn proxy_dealloc(object: *mut ffi::PyObject) {
         let free: unsafe extern "C" fn(*mut c_void) = unsafe { mem::transmute(free) };
         unsafe { free(object.cast()) };
     }
+}
+
+unsafe extern "C" fn proxy_traverse(
+    _object: *mut ffi::PyObject,
+    _visit: ffi::PyVisitProc,
+    _state: *mut c_void,
+) -> i32 {
+    // The proxy owns Tonic handles rather than PyObject references. Declaring
+    // the empty slot still makes CPython containers retain GC tracking when a
+    // proxy is inserted, so the cross-collector scanner can reach it.
+    0
 }
 
 unsafe fn proxy_value_handle(
@@ -654,6 +668,10 @@ unsafe fn proxy_type() -> *mut ffi::PyObject {
             function: proxy_set_attr as *const () as *mut c_void,
         },
         ffi::PyTypeSlot {
+            slot: ffi::PY_TP_TRAVERSE,
+            function: proxy_traverse as *const () as *mut c_void,
+        },
+        ffi::PyTypeSlot {
             slot: 0,
             function: ptr::null_mut(),
         },
@@ -662,7 +680,7 @@ unsafe fn proxy_type() -> *mut ffi::PyObject {
         name: PROXY_TYPE_NAME.as_ptr().cast(),
         basic_size: -(mem::size_of::<*mut ProxyPayload>() as i32),
         item_size: 0,
-        flags: 0,
+        flags: ffi::PY_TPFLAGS_HAVE_GC,
         slots: slots.as_mut_ptr(),
     };
     let proxy_type = unsafe { ffi::PyType_FromSpec(&mut spec) };
@@ -964,6 +982,7 @@ unsafe fn graph_has_external_root(
         );
         return true;
     }
+    #[allow(clippy::unused_enumerate_index)]
     for (_node_index, raw) in graph.nodes.iter().enumerate() {
         let object = *raw as *mut ffi::PyObject;
         let incoming = graph.incoming.get(raw).copied().unwrap_or(0);

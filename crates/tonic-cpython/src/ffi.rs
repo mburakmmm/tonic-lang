@@ -33,6 +33,7 @@ pub const PY_TP_REPR: c_int = 66;
 pub const PY_TP_SETATTRO: c_int = 69;
 pub const PY_TP_FREE: c_int = 74;
 pub const PY_TP_TRAVERSE: c_int = 71;
+pub const PY_TPFLAGS_HAVE_GC: u32 = 1 << 14;
 
 pub type PyVisitProc = unsafe extern "C" fn(*mut PyObject, *mut c_void) -> c_int;
 pub type PyTraverseProc = unsafe extern "C" fn(*mut PyObject, PyVisitProc, *mut c_void) -> c_int;
@@ -104,6 +105,7 @@ extern "C" {
     pub fn PyObject_IsInstance(object: *mut PyObject, class: *mut PyObject) -> c_int;
     pub fn PyObject_Type(object: *mut PyObject) -> *mut PyObject;
     pub fn PyObject_GC_IsTracked(object: *mut PyObject) -> c_int;
+    pub fn PyObject_GC_UnTrack(object: *mut c_void);
     pub fn PyImport_ImportModule(name: *const std::ffi::c_char) -> *mut PyObject;
     pub fn PyObject_GetAttrString(
         object: *mut PyObject,
