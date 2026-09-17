@@ -44,6 +44,11 @@ ERRORS = [
     ('range(1,4,0)', 'ValueError'),
     ('def f(a):\n    return a\nf()', 'TypeError'),
     ("1+'x'", 'TypeError'),
+    ("raise ValueError('boom')", 'ValueError'),
+    ('raise 1', 'TypeError'),
+    ('raise', 'RuntimeError'),
+    ("def maybe(flag):\n    if flag:\n        raise ValueError('jit-safe')\n    return 1\ni=0\nwhile i<20:\n    maybe(False)\n    i+=1\nmaybe(True)", 'ValueError'),
+    ('class MyError(Exception):\n    pass\nraise MyError()', 'MyError'),
 ]
 
 def run(binary, source, tonic=False):
@@ -75,7 +80,8 @@ for source, kind in ERRORS:
     py, tonic = run(sys.executable, source), run(TONIC, source, True)
     assert py.returncode != 0 and tonic.returncode != 0, (source, py.stdout, tonic.stdout)
     assert py.stdout == tonic.stdout, (source, py.stdout, tonic.stdout)
-    assert kind + ':' in py.stderr and tonic.stderr.startswith(kind + ':'), (source, py.stderr, tonic.stderr)
+    python_kind = kind + ':' in py.stderr or py.stderr.rstrip().endswith(kind)
+    assert python_kind and tonic.stderr.startswith(kind + ':'), (source, py.stderr, tonic.stderr)
 print(f'PASS: {len(CASES)} output cases + {len(ERRORS)} exception cases; '
       f'Python {sys.version.split()[0]}; GC interval {os.getenv("TONIC_GC_EVERY", "default")}; '
       f'JIT {os.getenv("TONIC_JIT", "0")}')

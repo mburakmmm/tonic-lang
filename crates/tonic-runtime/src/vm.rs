@@ -2,7 +2,7 @@
 pub(crate) mod calls;
 use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
-    heap::{Builtin, Heap, Object},
+    heap::{Builtin, Heap, Object, TracebackEntry},
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
         NativeDef, NativeFn, PersistentHandle,
@@ -73,6 +73,7 @@ pub struct Stats {
     pub jit_deferred: u64,
     pub jit_fallbacks: u64,
     pub jit_unprofitable: u64,
+    pub jit_code_budget_rejections: u64,
     pub jit_compile_ns: u128,
     pub jit_code_bytes: usize,
     pub jit_helper_calls: u64,
@@ -117,7 +118,10 @@ struct Frame {
     base: usize,
     destination: Option<usize>,
     cell_base: usize,
+    argument_base: usize,
+    pending_class_base: usize,
     callable: Option<Value>,
+    exception_stack: Vec<Value>,
     jit_attempted: bool,
     jit_resume: bool,
     jit_expanded_resume_depth: Option<usize>,
@@ -499,6 +503,7 @@ const JIT_DEOPT_LIMIT: u8 = 8;
 const DEFAULT_JIT_THRESHOLD: u32 = 8;
 const DEFAULT_JIT_MIN_INSTRUCTIONS: usize = 7;
 const DEFAULT_JIT_OSR_THRESHOLD: u32 = 64;
+const DEFAULT_JIT_MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
 const QUICKEN_THRESHOLD: u8 = 8;
 const MINORS_PER_MAJOR: u8 = 32;
 #[derive(Clone, Copy, Default)]
@@ -587,6 +592,11 @@ struct FloatCallProfile {
 }
 enum ReturnAction {
     Value,
+    Iterator,
+    IteratorNext {
+        target: usize,
+        pc: usize,
+    },
     Length,
     Truth {
         protocol: TruthProtocol,
@@ -597,10 +607,19 @@ enum ReturnAction {
         class: Value,
         arguments: ExpandedArgs,
     },
-    Class(Value),
+    ClassPrepare(ClassBuild),
+    ClassBody(ClassBody),
+    MetaclassNew(ClassHookState),
+    MetaclassInit(Value),
     SetNames {
         class: Value,
         pending: Vec<SetNameCall>,
+        after: Option<ClassHookState>,
+    },
+    NamespaceLookup {
+        target: usize,
+        symbol: u16,
+        cell: Option<Value>,
     },
     Setter,
 }
@@ -612,6 +631,7 @@ enum TruthProtocol {
 #[derive(Clone, Copy)]
 enum TruthAction {
     Not,
+    Return,
     Jump {
         when: bool,
         target: usize,
@@ -623,24 +643,161 @@ struct SetNameCall {
     call: DescriptorCall,
     name: Value,
 }
+struct ClassBuild {
+    function: Value,
+    bases: Vec<Value>,
+    declared_bases: Vec<Value>,
+    metaclass: Value,
+    qualname: String,
+}
+struct ClassBody {
+    namespace: Value,
+    declared_bases: Vec<Value>,
+    metaclass: Value,
+    qualname: String,
+}
+#[derive(Clone)]
+struct ClassHookState {
+    namespace: Value,
+    mapping: Value,
+    metaclass: Value,
+    name: Value,
+    bases: Value,
+    class_cell: Option<Value>,
+}
+struct PendingClass {
+    state: ClassHookState,
+    finalized: bool,
+}
+#[derive(Clone)]
+struct RuntimeTypes {
+    none: Value,
+    int: Value,
+    bool_: Value,
+    float: Value,
+    str_: Value,
+    list: Value,
+    tuple: Value,
+    dict: Value,
+    range: Value,
+    function: Value,
+    base_exception: Value,
+    exception: Value,
+    type_error: Value,
+    value_error: Value,
+    runtime_error: Value,
+    stop_iteration: Value,
+    other_exceptions: Vec<(String, Value)>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RuntimeTypeKind {
+    Int,
+    Bool,
+    Float,
+    Str,
+    List,
+    Tuple,
+    Dict,
+    Range,
+    Exception,
+}
+impl RuntimeTypes {
+    fn unbound() -> Self {
+        Self {
+            none: Value::UNBOUND,
+            int: Value::UNBOUND,
+            bool_: Value::UNBOUND,
+            float: Value::UNBOUND,
+            str_: Value::UNBOUND,
+            list: Value::UNBOUND,
+            tuple: Value::UNBOUND,
+            dict: Value::UNBOUND,
+            range: Value::UNBOUND,
+            function: Value::UNBOUND,
+            base_exception: Value::UNBOUND,
+            exception: Value::UNBOUND,
+            type_error: Value::UNBOUND,
+            value_error: Value::UNBOUND,
+            runtime_error: Value::UNBOUND,
+            stop_iteration: Value::UNBOUND,
+            other_exceptions: Vec::new(),
+        }
+    }
+    fn roots(&self) -> Vec<Value> {
+        let mut roots = vec![
+            self.none,
+            self.int,
+            self.bool_,
+            self.float,
+            self.str_,
+            self.list,
+            self.tuple,
+            self.dict,
+            self.range,
+            self.function,
+            self.base_exception,
+            self.exception,
+            self.type_error,
+            self.value_error,
+            self.runtime_error,
+            self.stop_iteration,
+        ];
+        roots.extend(self.other_exceptions.iter().map(|(_, value)| *value));
+        roots
+    }
+}
+impl ClassHookState {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.namespace);
+        visit(self.mapping);
+        visit(self.metaclass);
+        visit(self.name);
+        visit(self.bases);
+        self.class_cell.iter().copied().for_each(visit);
+    }
+}
 impl ReturnAction {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
-            Self::Value | Self::Length | Self::Setter => {}
+            Self::Value
+            | Self::Iterator
+            | Self::IteratorNext { .. }
+            | Self::Length
+            | Self::NamespaceLookup { cell: None, .. }
+            | Self::Setter => {}
+            Self::NamespaceLookup {
+                cell: Some(cell), ..
+            } => visit(*cell),
             Self::Truth {
                 action: TruthAction::Jump { original, .. },
                 ..
             } => visit(*original),
             Self::Truth {
-                action: TruthAction::Not,
+                action: TruthAction::Not | TruthAction::Return,
                 ..
             } => {}
-            Self::Initializer(v) | Self::Class(v) => visit(*v),
+            Self::Initializer(v) | Self::MetaclassInit(v) => visit(*v),
             Self::New { class, arguments } => {
                 visit(*class);
                 arguments.trace(visit);
             }
-            Self::SetNames { class, pending } => {
+            Self::ClassPrepare(build) => {
+                visit(build.function);
+                build.bases.iter().copied().for_each(&mut visit);
+                build.declared_bases.iter().copied().for_each(&mut visit);
+                visit(build.metaclass);
+            }
+            Self::ClassBody(body) => {
+                visit(body.namespace);
+                body.declared_bases.iter().copied().for_each(&mut visit);
+                visit(body.metaclass);
+            }
+            Self::MetaclassNew(state) => state.trace(visit),
+            Self::SetNames {
+                class,
+                pending,
+                after,
+            } => {
                 visit(*class);
                 for item in pending {
                     visit(item.call.callable);
@@ -648,6 +805,9 @@ impl ReturnAction {
                         visit(receiver);
                     }
                     visit(item.name);
+                }
+                if let Some(after) = after {
+                    after.trace(visit);
                 }
             }
         }
@@ -663,6 +823,8 @@ impl ReturnAction {
 /// Collection occurs between instructions; native Context scopes cannot collect.
 pub struct Vm {
     object_class: Value,
+    type_class: Value,
+    runtime_types: RuntimeTypes,
     pub(crate) execution: u64,
     phase: RuntimePhase,
     attached_thread: Option<ThreadId>,
@@ -679,6 +841,8 @@ pub struct Vm {
     cells: Vec<Value>,
     arguments: Vec<ExpandedArgs>,
     frames: Vec<Frame>,
+    pending_classes: Vec<PendingClass>,
+    pending_exception: Option<Value>,
     pub limits: Limits,
     pub stats: Stats,
     /// Allocation interval for scheduled minor/major collection; None disables automatic GC.
@@ -695,6 +859,9 @@ pub struct Vm {
     pub jit_osr_threshold: u32,
     /// Enables profile-backed exact-callee leaf inlining. Disable only for A/B measurement.
     pub jit_direct_call_inlining: bool,
+    /// Maximum native code bytes accepted during one module execution.
+    pub jit_max_code_bytes: usize,
+    jit_code_budget_used: usize,
     jit_cache: Vec<JitEntry>,
     jit_hotness: Vec<u32>,
     jit_registers: Vec<u64>,
@@ -713,6 +880,8 @@ impl Vm {
     pub fn new() -> Result<Self> {
         let mut vm = Self {
             object_class: Value::UNBOUND,
+            type_class: Value::UNBOUND,
+            runtime_types: RuntimeTypes::unbound(),
             execution: 0,
             phase: RuntimePhase::Running,
             attached_thread: Some(std::thread::current().id()),
@@ -729,6 +898,8 @@ impl Vm {
             cells: Vec::new(),
             arguments: Vec::new(),
             frames: Vec::new(),
+            pending_classes: Vec::new(),
+            pending_exception: None,
             limits: Limits::default(),
             stats: Stats::default(),
             gc_interval: Some(1024),
@@ -739,6 +910,8 @@ impl Vm {
             jit_min_instructions: DEFAULT_JIT_MIN_INSTRUCTIONS,
             jit_osr_threshold: DEFAULT_JIT_OSR_THRESHOLD,
             jit_direct_call_inlining: true,
+            jit_max_code_bytes: DEFAULT_JIT_MAX_CODE_BYTES,
+            jit_code_budget_used: 0,
             jit_cache: Vec::new(),
             jit_hotness: Vec::new(),
             jit_registers: Vec::new(),
@@ -755,7 +928,6 @@ impl Vm {
         };
         for (name, builtin) in [
             ("print", Builtin::Print),
-            ("range", Builtin::Range),
             ("len", Builtin::Len),
             ("abs", Builtin::Abs),
             ("isinstance", Builtin::IsInstance),
@@ -775,8 +947,158 @@ impl Vm {
         vm.register_native("fastmath", "array", 1, fastmath_array)?;
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
+        let type_new = vm.heap.alloc(Object::Builtin(Builtin::TypeNew))?;
         vm.object_class = vm.heap.root_object_class(object_new)?;
+        vm.type_class = vm.heap.root_type_class(vm.object_class, type_new)?;
+        let int = vm
+            .heap
+            .builtin_class("int", vec![vm.object_class], vm.type_class)?;
+        let base_exception =
+            vm.heap
+                .builtin_class("BaseException", vec![vm.object_class], vm.type_class)?;
+        let exception = vm
+            .heap
+            .builtin_class("Exception", vec![base_exception], vm.type_class)?;
+        let type_error = vm
+            .heap
+            .builtin_class("TypeError", vec![exception], vm.type_class)?;
+        let value_error = vm
+            .heap
+            .builtin_class("ValueError", vec![exception], vm.type_class)?;
+        let runtime_error =
+            vm.heap
+                .builtin_class("RuntimeError", vec![exception], vm.type_class)?;
+        let stop_iteration =
+            vm.heap
+                .builtin_class("StopIteration", vec![exception], vm.type_class)?;
+        let arithmetic_error =
+            vm.heap
+                .builtin_class("ArithmeticError", vec![exception], vm.type_class)?;
+        let lookup_error = vm
+            .heap
+            .builtin_class("LookupError", vec![exception], vm.type_class)?;
+        let name_error = vm
+            .heap
+            .builtin_class("NameError", vec![exception], vm.type_class)?;
+        let import_error = vm
+            .heap
+            .builtin_class("ImportError", vec![exception], vm.type_class)?;
+        let other_exceptions = vec![
+            ("ArithmeticError".into(), arithmetic_error),
+            (
+                "OverflowError".into(),
+                vm.heap
+                    .builtin_class("OverflowError", vec![arithmetic_error], vm.type_class)?,
+            ),
+            (
+                "ZeroDivisionError".into(),
+                vm.heap.builtin_class(
+                    "ZeroDivisionError",
+                    vec![arithmetic_error],
+                    vm.type_class,
+                )?,
+            ),
+            ("LookupError".into(), lookup_error),
+            (
+                "IndexError".into(),
+                vm.heap
+                    .builtin_class("IndexError", vec![lookup_error], vm.type_class)?,
+            ),
+            (
+                "KeyError".into(),
+                vm.heap
+                    .builtin_class("KeyError", vec![lookup_error], vm.type_class)?,
+            ),
+            ("NameError".into(), name_error),
+            (
+                "UnboundLocalError".into(),
+                vm.heap
+                    .builtin_class("UnboundLocalError", vec![name_error], vm.type_class)?,
+            ),
+            (
+                "AttributeError".into(),
+                vm.heap
+                    .builtin_class("AttributeError", vec![exception], vm.type_class)?,
+            ),
+            ("ImportError".into(), import_error),
+            (
+                "ModuleNotFoundError".into(),
+                vm.heap
+                    .builtin_class("ModuleNotFoundError", vec![import_error], vm.type_class)?,
+            ),
+            (
+                "RecursionError".into(),
+                vm.heap
+                    .builtin_class("RecursionError", vec![runtime_error], vm.type_class)?,
+            ),
+            (
+                "OSError".into(),
+                vm.heap
+                    .builtin_class("OSError", vec![exception], vm.type_class)?,
+            ),
+            (
+                "MemoryError".into(),
+                vm.heap
+                    .builtin_class("MemoryError", vec![exception], vm.type_class)?,
+            ),
+        ];
+        vm.runtime_types = RuntimeTypes {
+            none: vm
+                .heap
+                .builtin_class("NoneType", vec![vm.object_class], vm.type_class)?,
+            int,
+            bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
+            float: vm
+                .heap
+                .builtin_class("float", vec![vm.object_class], vm.type_class)?,
+            str_: vm
+                .heap
+                .builtin_class("str", vec![vm.object_class], vm.type_class)?,
+            list: vm
+                .heap
+                .builtin_class("list", vec![vm.object_class], vm.type_class)?,
+            tuple: vm
+                .heap
+                .builtin_class("tuple", vec![vm.object_class], vm.type_class)?,
+            dict: vm
+                .heap
+                .builtin_class("dict", vec![vm.object_class], vm.type_class)?,
+            range: vm
+                .heap
+                .builtin_class("range", vec![vm.object_class], vm.type_class)?,
+            function: vm
+                .heap
+                .builtin_class("function", vec![vm.object_class], vm.type_class)?,
+            base_exception,
+            exception,
+            type_error,
+            value_error,
+            runtime_error,
+            stop_iteration,
+            other_exceptions,
+        };
         vm.builtins.push(("object".into(), vm.object_class));
+        vm.builtins.push(("type".into(), vm.type_class));
+        for (name, value) in [
+            ("int", vm.runtime_types.int),
+            ("bool", vm.runtime_types.bool_),
+            ("float", vm.runtime_types.float),
+            ("str", vm.runtime_types.str_),
+            ("list", vm.runtime_types.list),
+            ("tuple", vm.runtime_types.tuple),
+            ("dict", vm.runtime_types.dict),
+            ("range", vm.runtime_types.range),
+            ("BaseException", vm.runtime_types.base_exception),
+            ("Exception", vm.runtime_types.exception),
+            ("TypeError", vm.runtime_types.type_error),
+            ("ValueError", vm.runtime_types.value_error),
+            ("RuntimeError", vm.runtime_types.runtime_error),
+            ("StopIteration", vm.runtime_types.stop_iteration),
+        ] {
+            vm.builtins.push((name.into(), value));
+        }
+        vm.builtins
+            .extend(vm.runtime_types.other_exceptions.iter().cloned());
         Ok(vm)
     }
     fn ensure_attached(&self) -> Result<()> {
@@ -883,6 +1205,8 @@ impl Vm {
         self.cells.clear();
         self.arguments.clear();
         self.frames.clear();
+        self.pending_classes.clear();
+        self.pending_exception = None;
         self.registers.push(Value::UNBOUND);
         let first = self.registers.len();
         self.registers.extend(values);
@@ -918,6 +1242,8 @@ impl Vm {
         self.registers.clear();
         self.cells.clear();
         self.arguments.clear();
+        self.pending_classes.clear();
+        self.pending_exception = None;
         self.handles.persist_value(result?)
     }
     pub(crate) fn reenter_from_native(
@@ -937,6 +1263,7 @@ impl Vm {
         let cell_len = self.cells.len();
         let argument_depth = self.arguments.len();
         let frame_depth = self.frames.len();
+        let pending_class_depth = self.pending_classes.len();
         let required = 1usize
             .checked_add(arguments.len())
             .and_then(|count| register_len.checked_add(count))
@@ -971,6 +1298,7 @@ impl Vm {
         self.registers.truncate(register_len);
         self.cells.truncate(cell_len);
         self.arguments.truncate(argument_depth);
+        self.pending_classes.truncate(pending_class_depth);
         result
     }
     pub(crate) fn reenter_from_native_expanded(
@@ -990,6 +1318,7 @@ impl Vm {
         let cell_len = self.cells.len();
         let argument_depth = self.arguments.len();
         let frame_depth = self.frames.len();
+        let pending_class_depth = self.pending_classes.len();
         let required = register_len
             .checked_add(1)
             .ok_or_else(|| Diagnostic::new("ResourceError", "callback register overflow"))?;
@@ -1016,6 +1345,7 @@ impl Vm {
         self.registers.truncate(register_len);
         self.cells.truncate(cell_len);
         self.arguments.truncate(argument_depth);
+        self.pending_classes.truncate(pending_class_depth);
         result
     }
     pub fn begin_shutdown(&mut self) -> Result<()> {
@@ -1043,6 +1373,8 @@ impl Vm {
         self.registers.clear();
         self.cells.clear();
         self.arguments.clear();
+        self.pending_classes.clear();
+        self.pending_exception = None;
         self.globals.clear();
         self.constants.clear();
         self.jit_globals.clear();
@@ -1113,13 +1445,23 @@ impl Vm {
         }
         roots.extend(self.modules.values().copied());
         roots.extend(self.builtins.iter().map(|(_, v)| *v));
+        roots.extend(self.runtime_types.roots());
+        roots.extend(self.pending_exception);
         roots.extend(self.frames.iter().filter_map(|frame| frame.callable));
         roots.extend(self.frames.iter().filter_map(|frame| frame.namespace));
+        roots.extend(
+            self.frames
+                .iter()
+                .flat_map(|frame| frame.exception_stack.iter().copied()),
+        );
         for frame in &self.frames {
             frame.action.trace(|value| roots.push(value));
         }
         for args in &self.arguments {
             args.trace(|value| roots.push(value));
+        }
+        for pending in &self.pending_classes {
+            pending.state.trace(|value| roots.push(value));
         }
         if include_handles {
             self.handles.roots(|value| roots.push(value));
@@ -1252,6 +1594,7 @@ impl Vm {
             + self.constants.iter().map(Vec::len).sum::<usize>()
             + self.modules.len()
             + self.builtins.len()
+            + self.runtime_types.roots().len()
             + self
                 .frames
                 .iter()
@@ -1269,6 +1612,15 @@ impl Vm {
                 + args.invalid_keywords.len()
                 + usize::from(args.deferred_star.is_some());
         }
+        roots += self
+            .pending_classes
+            .iter()
+            .map(|pending| {
+                let mut count = 0;
+                pending.state.trace(|_| count += 1);
+                count
+            })
+            .sum::<usize>();
         self.handles.roots(|_| roots += 1);
         let mut edges = 0;
         self.heap.trace_all(|_| edges += 1);
@@ -1294,9 +1646,12 @@ impl Vm {
         self.cells.clear();
         self.arguments.clear();
         self.frames.clear();
+        self.pending_classes.clear();
+        self.pending_exception = None;
         self.constants.clear();
         self.globals.clear();
         self.jit_cache = (0..program.code.len()).map(|_| JitEntry::Untried).collect();
+        self.jit_code_budget_used = 0;
         self.jit_hotness = vec![0; program.code.len()];
         self.jit_registers.clear();
         self.jit_globals.clear();
@@ -1410,6 +1765,8 @@ impl Vm {
         self.registers.clear();
         self.cells.clear();
         self.arguments.clear();
+        self.pending_classes.clear();
+        self.pending_exception = None;
         result
     }
     fn read(&self, index: usize) -> Result<Value> {
@@ -1422,6 +1779,348 @@ impl Vm {
         } else {
             Ok(v)
         }
+    }
+    pub(super) fn builtin_type_kind(&self, class: Value) -> Option<RuntimeTypeKind> {
+        [
+            (self.runtime_types.int, RuntimeTypeKind::Int),
+            (self.runtime_types.bool_, RuntimeTypeKind::Bool),
+            (self.runtime_types.float, RuntimeTypeKind::Float),
+            (self.runtime_types.str_, RuntimeTypeKind::Str),
+            (self.runtime_types.list, RuntimeTypeKind::List),
+            (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
+            (self.runtime_types.dict, RuntimeTypeKind::Dict),
+            (self.runtime_types.range, RuntimeTypeKind::Range),
+            (
+                self.runtime_types.base_exception,
+                RuntimeTypeKind::Exception,
+            ),
+            (self.runtime_types.exception, RuntimeTypeKind::Exception),
+            (self.runtime_types.type_error, RuntimeTypeKind::Exception),
+            (self.runtime_types.value_error, RuntimeTypeKind::Exception),
+            (self.runtime_types.runtime_error, RuntimeTypeKind::Exception),
+            (
+                self.runtime_types.stop_iteration,
+                RuntimeTypeKind::Exception,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(candidate, kind)| (candidate == class).then_some(kind))
+        .or_else(|| {
+            self.runtime_types
+                .other_exceptions
+                .iter()
+                .any(|(_, candidate)| *candidate == class)
+                .then_some(RuntimeTypeKind::Exception)
+        })
+    }
+    pub(super) fn runtime_class(&self, value: Value) -> Result<Value> {
+        if value.as_bool().is_some() {
+            return Ok(self.runtime_types.bool_);
+        }
+        if value == Value::NONE {
+            return Ok(self.runtime_types.none);
+        }
+        if value.integer().is_some() {
+            return Ok(self.runtime_types.int);
+        }
+        Ok(match self.heap.get(value)? {
+            Object::Class(class) if class.metaclass != Value::UNBOUND => class.metaclass,
+            Object::Instance { class, .. } => *class,
+            Object::Int(_) => self.runtime_types.int,
+            Object::Float(_) => self.runtime_types.float,
+            Object::Str(_) => self.runtime_types.str_,
+            Object::List(_) => self.runtime_types.list,
+            Object::Tuple(_) => self.runtime_types.tuple,
+            Object::Dict(_) => self.runtime_types.dict,
+            Object::Range { .. } => self.runtime_types.range,
+            Object::Function { .. } => self.runtime_types.function,
+            Object::Exception { class, .. } => *class,
+            _ => self.object_class,
+        })
+    }
+    fn exception_diagnostic(&self, value: Value) -> Result<Diagnostic> {
+        let (class, message) = match self.heap.get(value) {
+            Ok(Object::Exception { class, message, .. }) => (*class, message.clone()),
+            Ok(Object::Instance { class, .. })
+                if self.instance_check(value, self.runtime_types.base_exception, false, 0)? =>
+            {
+                (*class, String::new())
+            }
+            Ok(Object::Class(_))
+                if self.instance_check(value, self.runtime_types.base_exception, true, 0)? =>
+            {
+                (value, String::new())
+            }
+            _ => {
+                return Ok(Diagnostic::new(
+                    "TypeError",
+                    "exceptions must derive from BaseException",
+                ))
+            }
+        };
+        Ok(Diagnostic::new(
+            self.heap.class(class)?.name.clone(),
+            message,
+        ))
+    }
+    fn normalize_raised_exception(&mut self, value: Value) -> Result<Value> {
+        match self.heap.get(value) {
+            Ok(Object::Exception { .. }) => return Ok(value),
+            Ok(Object::Instance { .. })
+                if self.instance_check(value, self.runtime_types.base_exception, false, 0)? =>
+            {
+                return Ok(value)
+            }
+            Ok(Object::Class(_))
+                if self.instance_check(value, self.runtime_types.base_exception, true, 0)? =>
+            {
+                if self.builtin_type_kind(value) == Some(RuntimeTypeKind::Exception) {
+                    return self.heap.alloc(Object::Exception {
+                        class: value,
+                        message: String::new(),
+                        arguments: Vec::new(),
+                        attributes: Default::default(),
+                        cause: None,
+                        context: None,
+                        suppress_context: false,
+                        traceback: None,
+                    });
+                }
+                return self.heap.alloc(Object::Exception {
+                    class: value,
+                    message: String::new(),
+                    arguments: Vec::new(),
+                    attributes: Default::default(),
+                    cause: None,
+                    context: None,
+                    suppress_context: false,
+                    traceback: None,
+                });
+            }
+            _ => {}
+        }
+        Err(Diagnostic::new(
+            "TypeError",
+            "exceptions must derive from BaseException",
+        ))
+    }
+    fn validate_iterator(&self, value: Value) -> Result<()> {
+        if self.heap.is_iterator(value)
+            || self.heap.special_method_call(value, "__next__")?.is_some()
+        {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(
+                "TypeError",
+                "__iter__ returned a non-iterator",
+            ))
+        }
+    }
+    fn exception_from_diagnostic(&mut self, error: &Diagnostic) -> Result<Value> {
+        let class = match error.kind.as_str() {
+            "TypeError" => self.runtime_types.type_error,
+            "ValueError" => self.runtime_types.value_error,
+            "StopIteration" => self.runtime_types.stop_iteration,
+            "RuntimeError" => self.runtime_types.runtime_error,
+            name => self
+                .runtime_types
+                .other_exceptions
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, value)| *value)
+                .unwrap_or(self.runtime_types.runtime_error),
+        };
+        let message = error.message.clone();
+        let argument = self.heap.alloc(Object::Str(message.clone()))?;
+        self.heap.alloc(Object::Exception {
+            class,
+            message,
+            arguments: vec![argument],
+            attributes: Default::default(),
+            cause: None,
+            context: None,
+            suppress_context: false,
+            traceback: None,
+        })
+    }
+    fn dispatch_exception(
+        &mut self,
+        program: &Program,
+        error: &Diagnostic,
+        minimum_depth: usize,
+        current_code: usize,
+        current_pc: usize,
+    ) -> Result<bool> {
+        let exception = match self.pending_exception.take() {
+            Some(value) => value,
+            None => self.exception_from_diagnostic(error)?,
+        };
+        let active_context = self
+            .frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.exception_stack.last().copied())
+            .filter(|active| *active != exception);
+        if let Some(context) = active_context {
+            if matches!(self.heap.get(exception), Ok(Object::Exception { .. })) {
+                self.heap.set_exception_context(exception, context)?;
+            }
+        }
+        let last = self.frames.len().saturating_sub(1);
+        let stop_iteration =
+            self.instance_check(exception, self.runtime_types.stop_iteration, false, 0)?;
+        let key_error_class = self
+            .runtime_types
+            .other_exceptions
+            .iter()
+            .find(|(name, _)| name == "KeyError")
+            .map(|(_, class)| *class);
+        let key_error = match key_error_class {
+            Some(class) => self.instance_check(exception, class, false, 0)?,
+            None => false,
+        };
+        let mut selected = None;
+        let mut traceback = Vec::new();
+        for frame_index in (minimum_depth..self.frames.len()).rev() {
+            let frame = &self.frames[frame_index];
+            let fault_pc = if frame_index == last && frame.code == current_code {
+                current_pc
+            } else {
+                frame.ip.saturating_sub(1)
+            };
+            let code = &program.code[frame.code];
+            traceback.push(TracebackEntry {
+                function: code.name.clone(),
+                span: code.spans[fault_pc],
+            });
+            let region = code
+                .exception_regions
+                .iter()
+                .filter(|region| {
+                    usize::from(region.start) <= fault_pc && fault_pc < usize::from(region.end)
+                })
+                .min_by_key(|region| region.end - region.start)
+                .copied();
+            if let Some(region) = region {
+                selected = Some((frame_index, region));
+                break;
+            }
+            if key_error {
+                if let ReturnAction::NamespaceLookup {
+                    target,
+                    symbol,
+                    cell,
+                } = &frame.action
+                {
+                    let (target, symbol, cell) = (*target, *symbol, *cell);
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    let fallback = if let Some(cell) = cell {
+                        self.heap.cell(cell)?
+                    } else {
+                        self.globals[usize::from(symbol)]
+                    };
+                    if fallback != Value::UNBOUND {
+                        self.registers[target] = fallback;
+                        return Ok(true);
+                    }
+                    let name = &program.symbols[usize::from(symbol)];
+                    let error =
+                        Diagnostic::new("NameError", format!("name '{name}' is not defined"));
+                    let caller = self.frames.last().ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "namespace lookup lost caller frame")
+                    })?;
+                    return self.dispatch_exception(
+                        program,
+                        &error,
+                        minimum_depth,
+                        caller.code,
+                        caller.ip.saturating_sub(1),
+                    );
+                }
+            }
+            if stop_iteration {
+                if let ReturnAction::IteratorNext { target, pc } = frame.action {
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                        target,
+                        pc,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.jump(unwind.4, unwind.5);
+                    return Ok(true);
+                }
+            }
+        }
+        traceback.reverse();
+        if matches!(self.heap.get(exception), Ok(Object::Exception { .. })) {
+            self.heap.record_exception_trace(exception, traceback)?;
+        }
+        let Some((frame_index, region)) = selected else {
+            self.pending_exception = Some(exception);
+            return Ok(false);
+        };
+        self.frames.truncate(frame_index + 1);
+        let frame = self.frames.last_mut().expect("selected exception frame");
+        let code = &program.code[frame.code];
+        self.registers
+            .truncate(frame.base + usize::from(code.registers));
+        self.cells
+            .truncate(frame.cell_base + code.cell_locals.len() + code.free_vars.len());
+        self.arguments.truncate(frame.argument_base);
+        self.pending_classes.truncate(frame.pending_class_base);
+        frame.ip = usize::from(region.target);
+        frame.jit_resume = false;
+        frame.jit_expanded_resume_depth = None;
+        self.registers[frame.base + usize::from(region.exception)] = exception;
+        Ok(true)
+    }
+    pub(super) fn instance_check(
+        &self,
+        value: Value,
+        target: Value,
+        subclass: bool,
+        depth: usize,
+    ) -> Result<bool> {
+        if depth > 100 {
+            return Err(Diagnostic::new("RecursionError", "classinfo nesting limit"));
+        }
+        if let Ok(Object::Tuple(types)) = self.heap.get(target) {
+            for target in types {
+                if self.instance_check(value, *target, subclass, depth + 1)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.heap.class(target)?;
+        let actual = if subclass {
+            self.heap.class(value)?;
+            value
+        } else {
+            self.runtime_class(value)?
+        };
+        Ok(actual == target
+            || self
+                .heap
+                .class(actual)
+                .is_ok_and(|class| class.mro.contains(&target)))
     }
     fn execute(&mut self, p: &Program, output: &mut dyn Write) -> Result<()> {
         self.execute_until_depth(p, output, 0)
@@ -1442,11 +2141,21 @@ impl Vm {
                 && self.frames.last().is_some_and(|frame| {
                     frame.jit_resume || (frame.ip == 0 && !frame.jit_attempted)
                 })
-                && self.try_jit(p, output)?
             {
-                continue;
+                match self.try_jit(p, output) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        let frame = self.frames.last().expect("active JIT frame");
+                        let code = frame.code;
+                        let pc = frame.ip.saturating_sub(1);
+                        if self.dispatch_exception(p, &error, depth, code, pc)? {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
             }
-            let frame = self.frames.last_mut().expect("active frame");
             if self
                 .limits
                 .instructions
@@ -1457,11 +2166,18 @@ impl Vm {
                     "instruction budget exhausted",
                 ));
             }
-            let code_id = frame.code;
-            let pc = frame.ip;
-            let base = frame.base;
-            let cell_base = frame.cell_base;
-            frame.ip += 1;
+            let (code_id, pc, base, cell_base, namespace) = {
+                let frame = self.frames.last_mut().expect("active frame");
+                let state = (
+                    frame.code,
+                    frame.ip,
+                    frame.base,
+                    frame.cell_base,
+                    frame.namespace,
+                );
+                frame.ip += 1;
+                state
+            };
             let code = &p.code[code_id];
             let i = code.instructions[pc];
             let op = Op::try_from(i.opcode)?;
@@ -1469,577 +2185,1031 @@ impl Vm {
             let a = base + i.a as usize;
             let b = base + i.b as usize;
             let c = base + i.c as usize;
-            match op {
-                Op::LoadCell => {
-                    let value = self.heap.cell(self.cells[cell_base + i.b as usize])?;
-                    if value == Value::UNBOUND {
-                        return Err(Diagnostic::new(
-                            if (i.b as usize) < code.cell_locals.len() {
-                                "UnboundLocalError"
-                            } else {
-                                "NameError"
+            let step = (|| -> Result<()> {
+                match op {
+                    Op::LoadCell => {
+                        let value = self.heap.cell(self.cells[cell_base + i.b as usize])?;
+                        if value == Value::UNBOUND {
+                            return Err(Diagnostic::new(
+                                if (i.b as usize) < code.cell_locals.len() {
+                                    "UnboundLocalError"
+                                } else {
+                                    "NameError"
+                                },
+                                "captured variable referenced before assignment",
+                            ));
+                        }
+                        self.registers[a] = value;
+                    }
+                    Op::StoreCell => self
+                        .heap
+                        .store_cell(self.cells[cell_base + i.b as usize], self.read(a)?)?,
+                    Op::Const => self.registers[a] = self.constants[code_id][i.b as usize],
+                    Op::Move => self.registers[a] = self.read(b)?,
+                    Op::LoadGlobal => {
+                        let v = self.globals[i.b as usize];
+                        if v == Value::UNBOUND {
+                            return Err(Diagnostic::new(
+                                "NameError",
+                                format!("name '{}' is not defined", p.symbols[i.b as usize]),
+                            ));
+                        }
+                        self.registers[a] = v;
+                    }
+                    Op::StoreGlobal => {
+                        let value = self.read(a)?;
+                        self.globals[i.b as usize] = value;
+                        self.jit_globals[i.b as usize] = value.raw();
+                    }
+                    Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul => {
+                        let left = self.read(b)?;
+                        let right = self.read(c)?;
+                        self.registers[a] = if self.adaptive_specialization {
+                            self.adaptive_binary(code_id, pc, op, left, right)?
+                        } else if op == Op::InplaceAdd {
+                            self.heap.inplace_add(left, right)?
+                        } else {
+                            self.heap.binary(op, left, right)?
+                        };
+                    }
+                    Op::FloorDiv | Op::Mod | Op::Div => {
+                        self.registers[a] = self.heap.binary(op, self.read(b)?, self.read(c)?)?
+                    }
+                    Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
+                        self.registers[a] = self.heap.compare(op, self.read(b)?, self.read(c)?)?
+                    }
+                    Op::Neg | Op::Pos => self.registers[a] = self.heap.unary(op, self.read(b)?)?,
+                    Op::Not => {
+                        let value = self.read(b)?;
+                        self.invoke_truth(p, value, a, TruthAction::Not, output)?;
+                    }
+                    Op::Jump => self.jump(i.a as usize, pc),
+                    Op::JumpFalse | Op::JumpTrue => {
+                        let value = self.read(a)?;
+                        self.invoke_truth(
+                            p,
+                            value,
+                            a,
+                            TruthAction::Jump {
+                                when: op == Op::JumpTrue,
+                                target: i.b as usize,
+                                pc,
+                                original: value,
                             },
-                            "captured variable referenced before assignment",
-                        ));
+                            output,
+                        )?;
                     }
-                    self.registers[a] = value;
-                }
-                Op::StoreCell => self
-                    .heap
-                    .store_cell(self.cells[cell_base + i.b as usize], self.read(a)?)?,
-                Op::Const => self.registers[a] = self.constants[code_id][i.b as usize],
-                Op::Move => self.registers[a] = self.read(b)?,
-                Op::LoadGlobal => {
-                    let v = self.globals[i.b as usize];
-                    if v == Value::UNBOUND {
-                        return Err(Diagnostic::new(
-                            "NameError",
-                            format!("name '{}' is not defined", p.symbols[i.b as usize]),
-                        ));
-                    }
-                    self.registers[a] = v;
-                }
-                Op::StoreGlobal => {
-                    let value = self.read(a)?;
-                    self.globals[i.b as usize] = value;
-                    self.jit_globals[i.b as usize] = value.raw();
-                }
-                Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul => {
-                    let left = self.read(b)?;
-                    let right = self.read(c)?;
-                    self.registers[a] = if self.adaptive_specialization {
-                        self.adaptive_binary(code_id, pc, op, left, right)?
-                    } else if op == Op::InplaceAdd {
-                        self.heap.inplace_add(left, right)?
-                    } else {
-                        self.heap.binary(op, left, right)?
-                    };
-                }
-                Op::FloorDiv | Op::Mod | Op::Div => {
-                    self.registers[a] = self.heap.binary(op, self.read(b)?, self.read(c)?)?
-                }
-                Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-                    self.registers[a] = self.heap.compare(op, self.read(b)?, self.read(c)?)?
-                }
-                Op::Neg | Op::Pos => self.registers[a] = self.heap.unary(op, self.read(b)?)?,
-                Op::Not => {
-                    let value = self.read(b)?;
-                    self.invoke_truth(p, value, a, TruthAction::Not, output)?;
-                }
-                Op::Jump => self.jump(i.a as usize, pc),
-                Op::JumpFalse | Op::JumpTrue => {
-                    let value = self.read(a)?;
-                    self.invoke_truth(
-                        p,
-                        value,
-                        a,
-                        TruthAction::Jump {
-                            when: op == Op::JumpTrue,
-                            target: i.b as usize,
-                            pc,
-                            original: value,
-                        },
-                        output,
-                    )?;
-                }
-                Op::Function => {
-                    let site = &code.functions[i.b as usize];
-                    let captures = site
-                        .captures
-                        .iter()
-                        .map(|c| self.cells[cell_base + *c as usize])
-                        .collect();
-                    self.registers[a] = self.heap.alloc(Object::Function {
-                        code: site.code,
-                        execution: self.execution,
-                        captures,
-                        defaults: site
-                            .defaults
+                    Op::Function => {
+                        let site = &code.functions[i.b as usize];
+                        let captures = site
+                            .captures
                             .iter()
-                            .map(|r| self.read(base + *r as usize))
-                            .collect::<Result<_>>()?,
-                    })?
-                }
-                Op::Return => {
-                    let mut value = self.read(a)?;
-                    let frame = self.frames.pop().expect("active frame");
-                    let mut set_names = None;
-                    let mut finish_new = None;
-                    let mut finish_truth = None;
-                    match frame.action {
-                        ReturnAction::Value => {}
-                        ReturnAction::Length => value = self.validate_length(value)?,
-                        ReturnAction::Truth { protocol, action } => {
-                            finish_truth = Some((protocol, action));
-                        }
-                        ReturnAction::Initializer(instance) => {
-                            if value != Value::NONE {
-                                return Err(Diagnostic::new(
-                                    "TypeError",
-                                    "__init__ must return None",
-                                ));
-                            }
-                            value = instance;
-                        }
-                        ReturnAction::New { class, arguments } => {
-                            finish_new = Some((class, arguments));
-                        }
-                        ReturnAction::Class(namespace) => {
-                            self.heap.finish_class(namespace)?;
-                            let metadata = &p.code[frame.code];
-                            if let Some((cell, _)) =
-                                metadata.cell_locals.iter().enumerate().find(|(_, local)| {
-                                    p.symbols[metadata.locals[**local as usize].0 as usize]
-                                        == "__class__"
-                                })
-                            {
-                                self.heap
-                                    .store_cell(self.cells[frame.cell_base + cell], namespace)?;
-                            }
-                            value = namespace;
-                            let mut pending = self
-                                .heap
-                                .descriptor_set_names(namespace)?
-                                .into_iter()
-                                .map(|(call, name)| SetNameCall { call, name })
-                                .collect::<Vec<_>>();
-                            pending.reverse();
-                            set_names = Some((namespace, pending));
-                        }
-                        ReturnAction::SetNames { class, pending } => {
-                            value = class;
-                            set_names = Some((class, pending));
-                        }
-                        ReturnAction::Setter => value = Value::NONE,
+                            .map(|c| self.cells[cell_base + *c as usize])
+                            .collect();
+                        self.registers[a] = self.heap.alloc(Object::Function {
+                            code: site.code,
+                            execution: self.execution,
+                            captures,
+                            defaults: site
+                                .defaults
+                                .iter()
+                                .map(|r| self.read(base + *r as usize))
+                                .collect::<Result<_>>()?,
+                        })?
                     }
-                    self.registers.truncate(frame.base);
-                    self.cells.truncate(frame.cell_base);
-                    if let Some(dest) = frame.destination {
-                        self.registers[dest] = value;
-                        if let Some((protocol, action)) = finish_truth {
-                            self.finish_truth(dest, value, protocol, action)?;
-                        } else if let Some((class, arguments)) = finish_new {
-                            self.finish_new(p, dest, class, value, arguments, output)?;
-                        } else if let Some((class, pending)) = set_names {
-                            self.invoke_set_names(p, dest, class, pending, output)?;
+                    Op::Return => {
+                        let mut value = self.read(a)?;
+                        let frame = self.frames.pop().expect("active frame");
+                        let mut set_names = None;
+                        let mut finish_new = None;
+                        let mut finish_metaclass_new = None;
+                        let mut finish_metaclass_init = None;
+                        let mut finish_truth = None;
+                        let mut class_prepare = None;
+                        let mut class_body = None;
+                        match frame.action {
+                            ReturnAction::Value => {}
+                            ReturnAction::Iterator => self.validate_iterator(value)?,
+                            ReturnAction::IteratorNext { .. } => {}
+                            ReturnAction::Length => value = self.validate_length(value)?,
+                            ReturnAction::Truth { protocol, action } => {
+                                finish_truth = Some((protocol, action));
+                            }
+                            ReturnAction::Initializer(instance) => {
+                                if value != Value::NONE {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "__init__ must return None",
+                                    ));
+                                }
+                                value = instance;
+                            }
+                            ReturnAction::New { class, arguments } => {
+                                finish_new = Some((class, arguments));
+                            }
+                            ReturnAction::ClassPrepare(build) => {
+                                class_prepare = Some((build, value));
+                            }
+                            ReturnAction::ClassBody(body) => {
+                                let metadata = &p.code[frame.code];
+                                let class_cell = metadata
+                                    .cell_locals
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, local)| {
+                                        p.symbols[metadata.locals[**local as usize].0 as usize]
+                                            == "__class__"
+                                    })
+                                    .map(|(cell, _)| self.cells[frame.cell_base + cell]);
+                                class_body = Some((body, class_cell));
+                            }
+                            ReturnAction::MetaclassNew(state) => {
+                                finish_metaclass_new = Some((state, value));
+                            }
+                            ReturnAction::MetaclassInit(class) => {
+                                if value != Value::NONE {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "metaclass __init__ must return None",
+                                    ));
+                                }
+                                value = class;
+                                finish_metaclass_init = Some(class);
+                            }
+                            ReturnAction::SetNames {
+                                class,
+                                pending,
+                                after,
+                            } => {
+                                value = class;
+                                set_names = Some((class, pending, after));
+                            }
+                            ReturnAction::NamespaceLookup { .. } => {}
+                            ReturnAction::Setter => value = Value::NONE,
                         }
-                    } else if set_names.is_some() || finish_new.is_some() || finish_truth.is_some()
-                    {
-                        return Err(Diagnostic::new(
-                            "BytecodeError",
-                            "continuation has no destination",
-                        ));
-                    }
-                }
-                Op::Call => self.execute_call(p, code_id, pc, output)?,
-                Op::Class => {
-                    let function = self.read(b)?;
-                    let (body, execution) = match self.heap.get(function)? {
-                        Object::Function {
-                            code, execution, ..
-                        } => (*code as usize, *execution),
-                        _ => {
+                        self.registers.truncate(frame.base);
+                        self.cells.truncate(frame.cell_base);
+                        let continuation_required = set_names.is_some()
+                            || finish_new.is_some()
+                            || finish_metaclass_new.is_some()
+                            || finish_metaclass_init.is_some()
+                            || finish_truth.is_some()
+                            || class_prepare.is_some()
+                            || class_body.is_some();
+                        if let Some(dest) = frame.destination {
+                            self.registers[dest] = value;
+                            if let Some((protocol, action)) = finish_truth {
+                                self.finish_truth(dest, value, protocol, action)?;
+                            } else if let Some((class, arguments)) = finish_new {
+                                self.finish_new(p, dest, class, value, arguments, output)?;
+                            } else if let Some((build, mapping)) = class_prepare {
+                                self.enter_class_body(p, dest, build, Some(mapping))?;
+                            } else if let Some((body, class_cell)) = class_body {
+                                self.complete_class_body(p, dest, body, class_cell, output)?;
+                            } else if let Some((state, result)) = finish_metaclass_new {
+                                self.finish_metaclass_new(p, dest, state, result, output)?;
+                            } else if finish_metaclass_init.is_some() {
+                                self.registers[dest] = value;
+                            } else if let Some((class, pending, after)) = set_names {
+                                self.invoke_set_names(p, dest, class, pending, after, output)?;
+                            }
+                        } else if continuation_required {
                             return Err(Diagnostic::new(
                                 "BytecodeError",
-                                "expected class body function",
-                            ))
+                                "continuation has no destination",
+                            ));
                         }
-                    };
-                    if execution != self.execution || !p.code[body].class_body {
-                        return Err(Diagnostic::new("BytecodeError", "invalid class body"));
                     }
-                    let site = &code.calls[i.c as usize];
-                    let mut bases = Vec::new();
-                    for r in 0..site.count {
-                        bases.push(self.read(base + (site.first + r) as usize)?);
-                    }
-                    if bases.is_empty() {
-                        bases.push(self.object_class);
-                    }
-                    let namespace = self.heap.namespace(&p.code[body].name, bases)?;
-                    self.enter_frame(
-                        p,
-                        body,
-                        Some(a),
-                        Arguments::Direct {
-                            first: 0,
-                            count: 0,
-                            keywords: &[],
-                            receiver: None,
-                        },
-                        Some(function),
-                    )?;
-                    let frame = self.frames.last_mut().expect("class frame");
-                    frame.namespace = Some(namespace);
-                    frame.action = ReturnAction::Class(namespace);
-                }
-                Op::LoadName | Op::ClassDeref => {
-                    let namespace = frame.namespace.ok_or_else(|| {
-                        Diagnostic::new("BytecodeError", "class frame has no namespace")
-                    })?;
-                    let name = &p.symbols[i.b as usize];
-                    let value = if let Some(value) = self.heap.namespace_get(namespace, name)? {
-                        value
-                    } else if op == Op::ClassDeref {
-                        self.heap.cell(self.cells[cell_base + i.c as usize])?
-                    } else {
-                        self.globals[i.b as usize]
-                    };
-                    if value == Value::UNBOUND {
-                        return Err(Diagnostic::new(
-                            "NameError",
-                            format!("name '{name}' is not defined"),
-                        ));
-                    }
-                    self.registers[a] = value;
-                }
-                Op::StoreName => {
-                    let namespace = frame.namespace.ok_or_else(|| {
-                        Diagnostic::new("BytecodeError", "class frame has no namespace")
-                    })?;
-                    self.heap
-                        .namespace_set(namespace, &p.symbols[i.b as usize], self.read(a)?)?;
-                }
-                Op::SetAttr => {
-                    let owner = self.read(a)?;
-                    let value = self.read(b)?;
-                    if let Some(setter) =
-                        self.heap.property_setter(owner, &p.symbols[i.c as usize])?
-                    {
-                        let depth = self.frames.len();
-                        self.invoke(
-                            p,
-                            setter,
-                            a,
-                            Arguments::Direct {
-                                receiver: Some(owner),
-                                first: b,
-                                count: 1,
-                                keywords: &[],
-                            },
-                            output,
-                        )?;
-                        if self.frames.len() > depth {
-                            self.frames
-                                .last_mut()
-                                .expect("property setter frame")
-                                .action = ReturnAction::Setter;
-                        } else {
-                            self.registers[a] = Value::NONE;
+                    Op::Raise => {
+                        if i.b == 1 {
+                            let value = self
+                                .frames
+                                .iter()
+                                .rev()
+                                .find_map(|frame| frame.exception_stack.last().copied())
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "RuntimeError",
+                                        "no active exception to reraise",
+                                    )
+                                })?;
+                            self.pending_exception = Some(value);
+                            return Err(self.exception_diagnostic(value)?);
                         }
-                    } else if let Some(setter) = self
-                        .heap
-                        .descriptor_setter(owner, &p.symbols[i.c as usize])?
-                    {
-                        let depth = self.frames.len();
-                        self.invoke(
-                            p,
-                            setter.callable,
-                            a,
-                            Arguments::Inline {
-                                receiver: setter.receiver,
-                                positional: [owner, value],
-                                count: 2,
-                            },
-                            output,
-                        )?;
-                        if self.frames.len() > depth {
-                            self.frames
-                                .last_mut()
-                                .expect("descriptor setter frame")
-                                .action = ReturnAction::Setter;
-                        } else {
-                            self.registers[a] = Value::NONE;
-                        }
-                    } else {
-                        self.heap.set_attr(owner, &p.symbols[i.c as usize], value)?;
-                    }
-                }
-                Op::DelAttr => {
-                    let owner = self.read(a)?;
-                    let name = &p.symbols[i.b as usize];
-                    if let Some(deleter) = self.heap.property_deleter(owner, name)? {
-                        let depth = self.frames.len();
-                        self.invoke(
-                            p,
-                            deleter,
-                            a,
-                            Arguments::Direct {
-                                receiver: Some(owner),
-                                first: 0,
-                                count: 0,
-                                keywords: &[],
-                            },
-                            output,
-                        )?;
-                        if self.frames.len() > depth {
-                            self.frames
-                                .last_mut()
-                                .expect("property deleter frame")
-                                .action = ReturnAction::Setter;
-                        } else {
-                            self.registers[a] = Value::NONE;
-                        }
-                    } else if let Some(deleter) = self.heap.descriptor_deleter(owner, name)? {
-                        let depth = self.frames.len();
-                        self.invoke(
-                            p,
-                            deleter.callable,
-                            a,
-                            Arguments::Inline {
-                                receiver: deleter.receiver,
-                                positional: [owner, Value::UNBOUND],
-                                count: 1,
-                            },
-                            output,
-                        )?;
-                        if self.frames.len() > depth {
-                            self.frames
-                                .last_mut()
-                                .expect("descriptor deleter frame")
-                                .action = ReturnAction::Setter;
-                        } else {
-                            self.registers[a] = Value::NONE;
-                        }
-                    } else {
-                        self.heap.del_attr(owner, name)?;
-                    }
-                }
-                Op::BeginArgs => self.arguments.push(ExpandedArgs::default()),
-                Op::ArgPos | Op::ArgStar | Op::ArgNamed | Op::ArgMapping => {
-                    let value = self.read(a)?;
-                    if self.adaptive_specialization && op == Op::ArgStar {
-                        let length = match self.heap.get(value) {
-                            Ok(Object::List(values) | Object::Tuple(values)) => {
-                                u16::try_from(values.len()).ok()
+                        let value = self.normalize_raised_exception(self.read(a)?)?;
+                        if i.b == 2 {
+                            let source = self.read(c)?;
+                            if source == Value::NONE {
+                                self.heap.set_exception_cause(value, None, true)?;
+                            } else {
+                                let cause =
+                                    self.normalize_raised_exception(source).map_err(|_| {
+                                        Diagnostic::new(
+                                            "TypeError",
+                                            "exception causes must derive from BaseException",
+                                        )
+                                    })?;
+                                self.heap.set_exception_cause(value, Some(cause), true)?;
                             }
-                            _ => None,
-                        };
-                        self.observe_sequence(code_id, pc, length);
+                        }
+                        self.pending_exception = Some(value);
+                        return Err(self.exception_diagnostic(value)?);
                     }
-                    if self.adaptive_specialization && op == Op::ArgMapping {
-                        self.observe_mapping(p, code_id, pc, value);
+                    Op::ExceptionMatch => {
+                        let exception = self.read(b)?;
+                        let class = self.read(c)?;
+                        self.registers[a] =
+                            Value::bool(self.instance_check(exception, class, false, 0)?);
                     }
-                    self.append_argument(p, op, value, i.b, i.c)?
-                }
-                Op::CallExpanded => {
-                    let callee = self.read(b)?;
-                    if self.adaptive_specialization {
-                        self.observe_expanded_call(p, code_id, pc, callee);
+                    Op::ClearException => {
+                        self.frames
+                            .last_mut()
+                            .expect("active frame")
+                            .exception_stack
+                            .pop();
                     }
-                    if let Some(value) = self
-                        .arguments
-                        .last_mut()
-                        .expect("verified argument stack")
-                        .deferred_star
-                        .take()
-                    {
-                        self.append_argument(p, Op::ArgStar, value, 0, 0)?;
+                    Op::PushException => {
+                        let exception = self.read(a)?;
+                        self.frames
+                            .last_mut()
+                            .expect("active frame")
+                            .exception_stack
+                            .push(exception);
                     }
-                    let args = self.arguments.pop().expect("verified argument stack");
-                    let resume = self
-                        .frames
-                        .last()
-                        .and_then(|frame| frame.jit_expanded_resume_depth)
-                        == Some(self.arguments.len());
-                    if resume {
-                        let frame = self.frames.last_mut().expect("expanded-call frame");
-                        frame.jit_expanded_resume_depth = None;
-                        frame.jit_resume = true;
-                    }
-                    self.invoke(p, callee, a, Arguments::Expanded(args), output)?;
-                }
-                Op::Dict => {
-                    self.registers[a] = self.heap.alloc(Object::Dict(Default::default()))?
-                }
-                Op::SetItem => self
-                    .heap
-                    .set_item(self.read(a)?, self.read(b)?, self.read(c)?)?,
-                Op::DictMerge => self.heap.dict_merge(self.read(a)?, self.read(b)?)?,
-                Op::Tuple | Op::List => {
-                    let end = b + i.c as usize;
-                    for n in b..end {
-                        self.read(n)?;
-                    }
-                    let values = self.registers[b..end].to_vec();
-                    self.registers[a] = self.heap.alloc(if op == Op::Tuple {
-                        Object::Tuple(values)
-                    } else {
-                        Object::List(values)
-                    })?;
-                }
-                Op::Item => self.registers[a] = self.heap.item(self.read(b)?, self.read(c)?)?,
-                Op::Slice => {
-                    let values = [self.read(b)?, self.read(b + 1)?, self.read(b + 2)?];
-                    self.registers[a] = self.heap.alloc(Object::Slice(values))?;
-                }
-                Op::Unpack => {
-                    let source = self.read(b)?;
-                    let count = i.c as usize;
-                    // Generic iterable unpack validates length before assigning targets.
-                    // Values stay in the caller register window; no temporary guest tuple.
-                    let iterator = self.heap.iterator(source)?;
-                    for n in 0..count {
-                        let value = self.heap.next(iterator)?.ok_or_else(|| {
-                            Diagnostic::new("ValueError", "not enough values to unpack")
+                    Op::ClearBinding => match i.a {
+                        0 => self.registers[base + usize::from(i.b)] = Value::UNBOUND,
+                        1 => {
+                            self.globals[usize::from(i.b)] = Value::UNBOUND;
+                            self.jit_globals[usize::from(i.b)] = Value::UNBOUND.raw();
+                        }
+                        2 => self
+                            .heap
+                            .store_cell(self.cells[cell_base + usize::from(i.b)], Value::UNBOUND)?,
+                        3 => self.heap.namespace_delete(
+                            namespace.ok_or_else(|| {
+                                Diagnostic::new("BytecodeError", "class frame has no namespace")
+                            })?,
+                            &p.symbols[usize::from(i.b)],
+                        )?,
+                        _ => unreachable!("verified clear-binding kind"),
+                    },
+                    Op::ContextEnter => {
+                        let manager = self.read(c)?;
+                        let class_manager = matches!(self.heap.get(manager), Ok(Object::Class(_)));
+                        let exit = if class_manager {
+                            self.heap.metaclass_method_call(manager, "__exit__")?
+                        } else {
+                            self.heap.special_method_call(manager, "__exit__")?
+                        }
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "TypeError",
+                                "object does not support the context manager protocol",
+                            )
                         })?;
-                        self.registers[a + n] = value;
-                    }
-                    if self.heap.next(iterator)?.is_some() {
-                        return Err(Diagnostic::new("ValueError", "too many values to unpack"));
-                    }
-                }
-                Op::Iter => self.registers[a] = self.heap.iterator(self.read(b)?)?,
-                Op::Next => {
-                    if let Some(value) = self.heap.next(self.read(b)?)? {
-                        self.registers[a] = value;
-                    } else {
-                        self.jump(i.c as usize, pc);
-                    }
-                }
-                Op::Import => {
-                    let name = &p.symbols[i.b as usize];
-                    self.registers[a] = *self.modules.get(name).ok_or_else(|| {
-                        Diagnostic::new(
-                            "ModuleNotFoundError",
-                            format!("no registered native module '{name}'"),
-                        )
-                    })?;
-                }
-                Op::Attr => {
-                    let object = self.read(b)?;
-                    let name = &p.symbols[i.c as usize];
-                    let method_candidate = (self.adaptive_specialization
-                        && self.jit_direct_call_inlining)
-                        .then(|| self.heap.direct_method(object, name))
-                        .flatten();
-                    let mut missed_monomorphic = None;
-                    if self.adaptive_specialization {
-                        match self.adaptive_sites[code_id][pc] {
-                            AdaptiveState::AttrSlot {
-                                class,
-                                shape,
-                                slot,
-                                epoch,
-                            } => {
-                                let cached = AttrCacheEntry {
-                                    class,
-                                    shape,
-                                    slot,
-                                    epoch,
-                                };
-                                if let Some(value) = self.cached_attr(object, cached) {
-                                    self.registers[a] = value;
-                                    continue;
-                                }
-                                self.stats.attr_cache_misses += 1;
-                                missed_monomorphic = Some(cached);
-                                self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
-                            }
-                            AdaptiveState::AttrSlotPic(index) => {
-                                let pic = self.attr_pics[index as usize];
-                                if let Some(value) = self
-                                    .cached_attr(object, pic.first)
-                                    .or_else(|| self.cached_attr(object, pic.second))
-                                {
-                                    self.registers[a] = value;
-                                    continue;
-                                }
-                                self.stats.attr_cache_misses += 1;
-                                self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
-                            }
-                            _ => {}
+                        let enter = if class_manager {
+                            self.heap.metaclass_method_call(manager, "__enter__")?
+                        } else {
+                            self.heap.special_method_call(manager, "__enter__")?
                         }
-                    }
-                    let mut cache = None;
-                    if let Some(access) = self.heap.super_getter(object, name)? {
-                        match access {
-                            crate::classes::DescriptorAccess::Value(value) => {
-                                self.registers[a] = value
-                            }
-                            crate::classes::DescriptorAccess::Call {
-                                callable,
-                                receiver,
-                                positional,
-                                count,
-                            } => self.invoke(
-                                p,
-                                callable,
-                                a,
-                                Arguments::Inline {
-                                    receiver,
-                                    positional,
-                                    count,
-                                },
-                                output,
-                            )?,
-                        }
-                    } else if let Some(getter) = self.heap.property_getter(object, name)? {
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "TypeError",
+                                "object does not support the context manager protocol",
+                            )
+                        })?;
+                        self.registers[b] = self.heap.alloc(Object::Tuple(vec![
+                            exit.callable,
+                            exit.receiver.unwrap_or(Value::NONE),
+                            Value::bool(exit.receiver.is_some()),
+                        ]))?;
                         self.invoke(
                             p,
-                            getter,
+                            enter.callable,
                             a,
-                            Arguments::Direct {
-                                receiver: Some(object),
-                                first: 0,
+                            Arguments::Inline {
+                                receiver: enter.receiver,
+                                positional: [Value::UNBOUND; 3],
                                 count: 0,
-                                keywords: &[],
                             },
                             output,
                         )?;
-                    } else if let Some(access) = self.heap.descriptor_getter(object, name)? {
-                        match access {
-                            crate::classes::DescriptorAccess::Value(value) => {
-                                self.registers[a] = value
+                    }
+                    Op::ContextExit => {
+                        let token = self.read(b)?;
+                        let exception = self.read(c)?;
+                        let (callable, receiver) = match self.heap.get(token)? {
+                            Object::Tuple(values) if values.len() == 3 => {
+                                let bound = values[2].as_bool().ok_or_else(|| {
+                                    Diagnostic::new("BytecodeError", "invalid context exit token")
+                                })?;
+                                (values[0], bound.then_some(values[1]))
                             }
-                            crate::classes::DescriptorAccess::Call {
-                                callable,
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "BytecodeError",
+                                    "invalid context exit token",
+                                ))
+                            }
+                        };
+                        let mut positional = [Value::NONE; 3];
+                        if exception != Value::NONE {
+                            let traceback = self
+                                .heap
+                                .exception_traceback(exception)?
+                                .unwrap_or(Value::NONE);
+                            positional = [self.runtime_class(exception)?, exception, traceback];
+                        }
+                        self.invoke(
+                            p,
+                            callable,
+                            a,
+                            Arguments::Inline {
                                 receiver,
                                 positional,
-                                count,
-                            } => self.invoke(
+                                count: 3,
+                            },
+                            output,
+                        )?;
+                    }
+                    Op::Call => self.execute_call(p, code_id, pc, output)?,
+                    Op::Class => {
+                        let function = self.read(b)?;
+                        let (body, execution) = match self.heap.get(function)? {
+                            Object::Function {
+                                code, execution, ..
+                            } => (*code as usize, *execution),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "BytecodeError",
+                                    "expected class body function",
+                                ))
+                            }
+                        };
+                        if execution != self.execution || !p.code[body].class_body {
+                            return Err(Diagnostic::new("BytecodeError", "invalid class body"));
+                        }
+                        let site = &code.calls[i.c as usize];
+                        let mut bases = Vec::new();
+                        for r in 0..site.count {
+                            bases.push(self.read(base + (site.first + r) as usize)?);
+                        }
+                        let declared_bases = bases.clone();
+                        if bases.is_empty() {
+                            bases.push(self.object_class);
+                        }
+                        let explicit_metaclass = site
+                            .keywords
+                            .first()
+                            .map(|_| self.read(base + (site.first + site.count) as usize))
+                            .transpose()?;
+                        let metaclass = self.heap.select_metaclass(
+                            explicit_metaclass,
+                            &bases,
+                            self.type_class,
+                        )?;
+                        let qualname = p.code[body].name.clone();
+                        let build = ClassBuild {
+                            function,
+                            bases,
+                            declared_bases,
+                            metaclass,
+                            qualname,
+                        };
+                        if self.heap.has_custom_metaclass_hook(
+                            build.metaclass,
+                            self.type_class,
+                            "__prepare__",
+                        )? {
+                            let prepare = self.heap.attr(build.metaclass, "__prepare__")?;
+                            let name = build.qualname.rsplit('.').next().unwrap_or(&build.qualname);
+                            let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+                            let base_tuple = self
+                                .heap
+                                .alloc(Object::Tuple(build.declared_bases.clone()))?;
+                            let depth = self.frames.len();
+                            self.invoke(
                                 p,
-                                callable,
+                                prepare,
                                 a,
                                 Arguments::Inline {
-                                    receiver,
-                                    positional,
-                                    count,
+                                    receiver: None,
+                                    positional: [name, base_tuple, Value::UNBOUND],
+                                    count: 2,
                                 },
                                 output,
-                            )?,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("__prepare__ frame").action =
+                                    ReturnAction::ClassPrepare(build);
+                            } else {
+                                let mapping = self.registers[a];
+                                self.enter_class_body(p, a, build, Some(mapping))?;
+                            }
+                        } else {
+                            self.enter_class_body(p, a, build, None)?;
                         }
-                    } else {
-                        self.registers[a] = self.heap.attr(object, name)?;
-                        cache = self.heap.instance_slot_cache(object, name);
                     }
-                    if let Some((function, kind, _)) = method_candidate {
-                        self.observe_method(code_id, pc, function, kind);
+                    Op::LoadName | Op::ClassDeref => {
+                        let namespace = namespace.ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "class frame has no namespace")
+                        })?;
+                        let name = &p.symbols[i.b as usize];
+                        let custom_mapping = self
+                            .heap
+                            .namespace_backing_mapping(namespace)?
+                            .filter(|mapping| {
+                                !matches!(self.heap.get(*mapping), Ok(Object::Dict(_)))
+                            });
+                        if let Some(mapping) = custom_mapping {
+                            let call = self
+                                .heap
+                                .special_method_call(mapping, "__getitem__")?
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "TypeError",
+                                        "class namespace mapping has no __getitem__",
+                                    )
+                                })?;
+                            let key = self.heap.alloc(Object::Str(name.clone()))?;
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [key, Value::UNBOUND, Value::UNBOUND],
+                                    count: 1,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("namespace __getitem__ frame")
+                                    .action = ReturnAction::NamespaceLookup {
+                                    target: a,
+                                    symbol: i.b,
+                                    cell: (op == Op::ClassDeref)
+                                        .then(|| self.cells[cell_base + i.c as usize]),
+                                };
+                            }
+                        } else {
+                            let value =
+                                if let Some(value) = self.heap.namespace_get(namespace, name)? {
+                                    value
+                                } else if op == Op::ClassDeref {
+                                    self.heap.cell(self.cells[cell_base + i.c as usize])?
+                                } else {
+                                    self.globals[i.b as usize]
+                                };
+                            if value == Value::UNBOUND {
+                                return Err(Diagnostic::new(
+                                    "NameError",
+                                    format!("name '{name}' is not defined"),
+                                ));
+                            }
+                            self.registers[a] = value;
+                        }
                     }
-                    if self.adaptive_specialization {
-                        if let Some((class, shape, slot, epoch)) = cache {
-                            if let Ok(slot) = u16::try_from(slot) {
-                                let current = AttrCacheEntry {
+                    Op::StoreName => {
+                        let namespace = namespace.ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "class frame has no namespace")
+                        })?;
+                        let custom_mapping = self
+                            .heap
+                            .namespace_backing_mapping(namespace)?
+                            .filter(|mapping| {
+                                !matches!(self.heap.get(*mapping), Ok(Object::Dict(_)))
+                            });
+                        if let Some(mapping) = custom_mapping {
+                            let value = self.read(a)?;
+                            let call = self
+                                .heap
+                                .special_method_call(mapping, "__setitem__")?
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "TypeError",
+                                        "class namespace mapping has no __setitem__",
+                                    )
+                                })?;
+                            let key = self
+                                .heap
+                                .alloc(Object::Str(p.symbols[i.b as usize].clone()))?;
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [key, value, Value::UNBOUND],
+                                    count: 2,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("namespace __setitem__ frame")
+                                    .action = ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else {
+                            self.heap.namespace_set(
+                                namespace,
+                                &p.symbols[i.b as usize],
+                                self.read(a)?,
+                            )?;
+                        }
+                    }
+                    Op::SetAttr => {
+                        let owner = self.read(a)?;
+                        let value = self.read(b)?;
+                        if let Some(setter) =
+                            self.heap.property_setter(owner, &p.symbols[i.c as usize])?
+                        {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                setter,
+                                a,
+                                Arguments::Direct {
+                                    receiver: Some(owner),
+                                    first: b,
+                                    count: 1,
+                                    keywords: &[],
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("property setter frame")
+                                    .action = ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else if let Some(setter) = self
+                            .heap
+                            .descriptor_setter(owner, &p.symbols[i.c as usize])?
+                        {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                setter.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: setter.receiver,
+                                    positional: [owner, value, Value::UNBOUND],
+                                    count: 2,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("descriptor setter frame")
+                                    .action = ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else {
+                            self.heap.set_attr(owner, &p.symbols[i.c as usize], value)?;
+                        }
+                    }
+                    Op::DelAttr => {
+                        let owner = self.read(a)?;
+                        let name = &p.symbols[i.b as usize];
+                        if let Some(deleter) = self.heap.property_deleter(owner, name)? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                deleter,
+                                a,
+                                Arguments::Direct {
+                                    receiver: Some(owner),
+                                    first: 0,
+                                    count: 0,
+                                    keywords: &[],
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("property deleter frame")
+                                    .action = ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else if let Some(deleter) = self.heap.descriptor_deleter(owner, name)? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                deleter.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: deleter.receiver,
+                                    positional: [owner, Value::UNBOUND, Value::UNBOUND],
+                                    count: 1,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames
+                                    .last_mut()
+                                    .expect("descriptor deleter frame")
+                                    .action = ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else {
+                            self.heap.del_attr(owner, name)?;
+                        }
+                    }
+                    Op::BeginArgs => self.arguments.push(ExpandedArgs::default()),
+                    Op::ArgPos | Op::ArgStar | Op::ArgNamed | Op::ArgMapping => {
+                        let value = self.read(a)?;
+                        if self.adaptive_specialization && op == Op::ArgStar {
+                            let length = match self.heap.get(value) {
+                                Ok(Object::List(values) | Object::Tuple(values)) => {
+                                    u16::try_from(values.len()).ok()
+                                }
+                                _ => None,
+                            };
+                            self.observe_sequence(code_id, pc, length);
+                        }
+                        if self.adaptive_specialization && op == Op::ArgMapping {
+                            self.observe_mapping(p, code_id, pc, value);
+                        }
+                        self.append_argument(p, op, value, i.b, i.c)?
+                    }
+                    Op::CallExpanded => {
+                        let callee = self.read(b)?;
+                        if self.adaptive_specialization {
+                            self.observe_expanded_call(p, code_id, pc, callee);
+                        }
+                        if let Some(value) = self
+                            .arguments
+                            .last_mut()
+                            .expect("verified argument stack")
+                            .deferred_star
+                            .take()
+                        {
+                            self.append_argument(p, Op::ArgStar, value, 0, 0)?;
+                        }
+                        let args = self.arguments.pop().expect("verified argument stack");
+                        let resume = self
+                            .frames
+                            .last()
+                            .and_then(|frame| frame.jit_expanded_resume_depth)
+                            == Some(self.arguments.len());
+                        if resume {
+                            let frame = self.frames.last_mut().expect("expanded-call frame");
+                            frame.jit_expanded_resume_depth = None;
+                            frame.jit_resume = true;
+                        }
+                        self.invoke(p, callee, a, Arguments::Expanded(args), output)?;
+                    }
+                    Op::Dict => {
+                        self.registers[a] = self.heap.alloc(Object::Dict(Default::default()))?
+                    }
+                    Op::SetItem => {
+                        let owner = self.read(a)?;
+                        let key = self.read(b)?;
+                        let value = self.read(c)?;
+                        if let Some(call) = self.heap.special_method_call(owner, "__setitem__")? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [key, value, Value::UNBOUND],
+                                    count: 2,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("__setitem__ frame").action =
+                                    ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else {
+                            self.heap.set_item(owner, key, value)?;
+                        }
+                    }
+                    Op::DelItem => {
+                        let owner = self.read(a)?;
+                        let key = self.read(b)?;
+                        if let Some(call) = self.heap.special_method_call(owner, "__delitem__")? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [key, Value::UNBOUND, Value::UNBOUND],
+                                    count: 1,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("__delitem__ frame").action =
+                                    ReturnAction::Setter;
+                            } else {
+                                self.registers[a] = Value::NONE;
+                            }
+                        } else {
+                            self.heap.delete_item(owner, key)?;
+                        }
+                    }
+                    Op::DictMerge => self.heap.dict_merge(self.read(a)?, self.read(b)?)?,
+                    Op::Tuple | Op::List => {
+                        let end = b + i.c as usize;
+                        for n in b..end {
+                            self.read(n)?;
+                        }
+                        let values = self.registers[b..end].to_vec();
+                        self.registers[a] = self.heap.alloc(if op == Op::Tuple {
+                            Object::Tuple(values)
+                        } else {
+                            Object::List(values)
+                        })?;
+                    }
+                    Op::Item => {
+                        let owner = self.read(b)?;
+                        let key = self.read(c)?;
+                        if let Some(call) = self.heap.special_method_call(owner, "__getitem__")? {
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [key, Value::UNBOUND, Value::UNBOUND],
+                                    count: 1,
+                                },
+                                output,
+                            )?;
+                        } else {
+                            self.registers[a] = self.heap.item(owner, key)?;
+                        }
+                    }
+                    Op::Slice => {
+                        let values = [self.read(b)?, self.read(b + 1)?, self.read(b + 2)?];
+                        self.registers[a] = self.heap.alloc(Object::Slice(values))?;
+                    }
+                    Op::Unpack => {
+                        let source = self.read(b)?;
+                        let count = i.c as usize;
+                        // Generic iterable unpack validates length before assigning targets.
+                        // Values stay in the caller register window; no temporary guest tuple.
+                        let iterator = self.heap.iterator(source)?;
+                        for n in 0..count {
+                            let value = self.heap.next(iterator)?.ok_or_else(|| {
+                                Diagnostic::new("ValueError", "not enough values to unpack")
+                            })?;
+                            self.registers[a + n] = value;
+                        }
+                        if self.heap.next(iterator)?.is_some() {
+                            return Err(Diagnostic::new("ValueError", "too many values to unpack"));
+                        }
+                    }
+                    Op::Iter => {
+                        let source = self.read(b)?;
+                        match self.heap.iterator(source) {
+                            Ok(iterator) => self.registers[a] = iterator,
+                            Err(error) if error.kind == "TypeError" => {
+                                let Some(call) =
+                                    self.heap.special_method_call(source, "__iter__")?
+                                else {
+                                    return Err(error);
+                                };
+                                let depth = self.frames.len();
+                                self.invoke(
+                                    p,
+                                    call.callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver: call.receiver,
+                                        positional: [Value::UNBOUND; 3],
+                                        count: 0,
+                                    },
+                                    output,
+                                )?;
+                                if self.frames.len() > depth {
+                                    self.frames.last_mut().expect("__iter__ frame").action =
+                                        ReturnAction::Iterator;
+                                } else {
+                                    self.validate_iterator(self.registers[a])?;
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Op::Next => {
+                        let iterator = self.read(b)?;
+                        if self.heap.is_iterator(iterator) {
+                            if let Some(value) = self.heap.next(iterator)? {
+                                self.registers[a] = value;
+                            } else {
+                                self.jump(i.c as usize, pc);
+                            }
+                        } else if let Some(call) =
+                            self.heap.special_method_call(iterator, "__next__")?
+                        {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [Value::UNBOUND; 3],
+                                    count: 0,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("__next__ frame").action =
+                                    ReturnAction::IteratorNext {
+                                        target: i.c as usize,
+                                        pc,
+                                    };
+                            }
+                        } else {
+                            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                        }
+                    }
+                    Op::Import => {
+                        let name = &p.symbols[i.b as usize];
+                        self.registers[a] = *self.modules.get(name).ok_or_else(|| {
+                            Diagnostic::new(
+                                "ModuleNotFoundError",
+                                format!("no registered native module '{name}'"),
+                            )
+                        })?;
+                    }
+                    Op::Attr => {
+                        let object = self.read(b)?;
+                        let name = &p.symbols[i.c as usize];
+                        let method_candidate = (self.adaptive_specialization
+                            && self.jit_direct_call_inlining)
+                            .then(|| self.heap.direct_method(object, name))
+                            .flatten();
+                        let mut missed_monomorphic = None;
+                        if self.adaptive_specialization {
+                            match self.adaptive_sites[code_id][pc] {
+                                AdaptiveState::AttrSlot {
                                     class,
                                     shape,
                                     slot,
                                     epoch,
-                                };
-                                if let Some(previous) =
-                                    missed_monomorphic.filter(|previous| *previous != current)
-                                {
-                                    self.install_attr_pic(code_id, pc, previous, current);
-                                } else {
-                                    self.observe_instance_attr(
-                                        code_id, pc, class, shape, slot, epoch,
-                                    );
+                                } => {
+                                    let cached = AttrCacheEntry {
+                                        class,
+                                        shape,
+                                        slot,
+                                        epoch,
+                                    };
+                                    if let Some(value) = self.cached_attr(object, cached) {
+                                        self.registers[a] = value;
+                                        return Ok(());
+                                    }
+                                    self.stats.attr_cache_misses += 1;
+                                    missed_monomorphic = Some(cached);
+                                    self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
                                 }
+                                AdaptiveState::AttrSlotPic(index) => {
+                                    let pic = self.attr_pics[index as usize];
+                                    if let Some(value) = self
+                                        .cached_attr(object, pic.first)
+                                        .or_else(|| self.cached_attr(object, pic.second))
+                                    {
+                                        self.registers[a] = value;
+                                        return Ok(());
+                                    }
+                                    self.stats.attr_cache_misses += 1;
+                                    self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
+                                }
+                                _ => {}
+                            }
+                        }
+                        let mut cache = None;
+                        if let Some(access) = self.heap.super_getter(object, name)? {
+                            match access {
+                                crate::classes::DescriptorAccess::Value(value) => {
+                                    self.registers[a] = value
+                                }
+                                crate::classes::DescriptorAccess::Call {
+                                    callable,
+                                    receiver,
+                                    positional,
+                                    count,
+                                } => self.invoke(
+                                    p,
+                                    callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver,
+                                        positional,
+                                        count,
+                                    },
+                                    output,
+                                )?,
+                            }
+                        } else if let Some(getter) = self.heap.property_getter(object, name)? {
+                            self.invoke(
+                                p,
+                                getter,
+                                a,
+                                Arguments::Direct {
+                                    receiver: Some(object),
+                                    first: 0,
+                                    count: 0,
+                                    keywords: &[],
+                                },
+                                output,
+                            )?;
+                        } else if let Some(access) = self.heap.descriptor_getter(object, name)? {
+                            match access {
+                                crate::classes::DescriptorAccess::Value(value) => {
+                                    self.registers[a] = value
+                                }
+                                crate::classes::DescriptorAccess::Call {
+                                    callable,
+                                    receiver,
+                                    positional,
+                                    count,
+                                } => self.invoke(
+                                    p,
+                                    callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver,
+                                        positional,
+                                        count,
+                                    },
+                                    output,
+                                )?,
                             }
                         } else {
-                            self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
+                            match self.heap.attr(object, name) {
+                                Ok(value) => {
+                                    self.registers[a] = value;
+                                    cache = self.heap.instance_slot_cache(object, name);
+                                }
+                                Err(error) if error.kind == "AttributeError" => {
+                                    let name = name.clone();
+                                    if !self.invoke_getattr_fallback(p, object, &name, a, output)? {
+                                        return Err(error);
+                                    }
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        if let Some((function, kind, _)) = method_candidate {
+                            self.observe_method(code_id, pc, function, kind);
+                        }
+                        if self.adaptive_specialization {
+                            if let Some((class, shape, slot, epoch)) = cache {
+                                if let Ok(slot) = u16::try_from(slot) {
+                                    let current = AttrCacheEntry {
+                                        class,
+                                        shape,
+                                        slot,
+                                        epoch,
+                                    };
+                                    if let Some(previous) =
+                                        missed_monomorphic.filter(|previous| *previous != current)
+                                    {
+                                        self.install_attr_pic(code_id, pc, previous, current);
+                                    } else {
+                                        self.observe_instance_attr(
+                                            code_id, pc, class, shape, slot, epoch,
+                                        );
+                                    }
+                                }
+                            } else {
+                                self.adaptive_sites[code_id][pc] = AdaptiveState::Generic;
+                            }
                         }
                     }
                 }
+                Ok(())
+            })();
+            if let Err(error) = step {
+                if self.dispatch_exception(p, &error, depth, code_id, pc)? {
+                    continue;
+                }
+                return Err(error);
             }
         }
         Ok(())
@@ -3014,7 +4184,10 @@ impl Vm {
             base,
             destination: Some(destination),
             cell_base: self.cells.len(),
+            argument_base: self.arguments.len(),
+            pending_class_base: self.pending_classes.len(),
             callable: Some(callable),
+            exception_stack: Vec::new(),
             jit_attempted: matches!(self.jit_cache.get(code), Some(JitEntry::Unsupported)),
             jit_resume: false,
             jit_expanded_resume_depth: None,
@@ -3114,6 +4287,17 @@ impl Vm {
             ) {
                 Ok(compiled) => {
                     let metadata = compiled.metadata();
+                    let Some(next_code_bytes) = self
+                        .jit_code_budget_used
+                        .checked_add(metadata.code_bytes)
+                        .filter(|total| *total <= self.jit_max_code_bytes)
+                    else {
+                        self.stats.jit_code_budget_rejections += 1;
+                        self.stats.jit_fallbacks += 1;
+                        self.jit_cache[code_id] = JitEntry::Unsupported;
+                        return Ok(false);
+                    };
+                    self.jit_code_budget_used = next_code_bytes;
                     self.stats.jit_compiled += 1;
                     self.stats.jit_compile_ns += metadata.compile_time.as_nanos();
                     self.stats.jit_code_bytes += metadata.code_bytes;
@@ -3253,12 +4437,328 @@ impl Vm {
         }
         Ok(true)
     }
+    fn enter_class_body(
+        &mut self,
+        program: &Program,
+        destination: usize,
+        build: ClassBuild,
+        mapping: Option<Value>,
+    ) -> Result<()> {
+        let ClassBuild {
+            function,
+            bases,
+            declared_bases,
+            metaclass,
+            qualname,
+        } = build;
+        let (body, execution) = match self.heap.get(function)? {
+            Object::Function {
+                code, execution, ..
+            } => (*code as usize, *execution),
+            _ => {
+                return Err(Diagnostic::new(
+                    "BytecodeError",
+                    "expected class body function",
+                ))
+            }
+        };
+        if execution != self.execution || !program.code[body].class_body {
+            return Err(Diagnostic::new("BytecodeError", "invalid class body"));
+        }
+        let namespace = if let Some(mapping) = mapping {
+            self.heap
+                .namespace_from_mapping(&qualname, bases, metaclass, mapping)?
+        } else {
+            self.heap
+                .namespace_with_metaclass(&qualname, bases, metaclass)?
+        };
+        self.enter_frame(
+            program,
+            body,
+            Some(destination),
+            Arguments::Direct {
+                first: 0,
+                count: 0,
+                keywords: &[],
+                receiver: None,
+            },
+            Some(function),
+        )?;
+        let frame = self.frames.last_mut().expect("class frame");
+        frame.namespace = Some(namespace);
+        frame.action = ReturnAction::ClassBody(ClassBody {
+            namespace,
+            declared_bases,
+            metaclass,
+            qualname,
+        });
+        Ok(())
+    }
+
+    fn complete_class_body(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        body: ClassBody,
+        class_cell: Option<Value>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let custom_new =
+            self.heap
+                .has_custom_metaclass_hook(body.metaclass, self.type_class, "__new__")?;
+        let custom_init =
+            self.heap
+                .has_custom_metaclass_hook(body.metaclass, self.type_class, "__init__")?;
+        if !custom_new && !custom_init {
+            self.heap.finish_class(body.namespace)?;
+            if let Some(cell) = class_cell {
+                self.heap.store_cell(cell, body.namespace)?;
+            }
+            let mut pending = self
+                .heap
+                .descriptor_set_names(body.namespace)?
+                .into_iter()
+                .map(|(call, name)| SetNameCall { call, name })
+                .collect::<Vec<_>>();
+            pending.reverse();
+            return self.invoke_set_names(p, destination, body.namespace, pending, None, output);
+        }
+        let mapping = self.heap.namespace_mapping(body.namespace)?;
+        let name = body.qualname.rsplit('.').next().unwrap_or(&body.qualname);
+        let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+        let bases = self.heap.alloc(Object::Tuple(body.declared_bases))?;
+        let state = ClassHookState {
+            namespace: body.namespace,
+            mapping,
+            metaclass: body.metaclass,
+            name,
+            bases,
+            class_cell,
+        };
+        if custom_new {
+            let constructor = self
+                .heap
+                .class_lookup(state.metaclass, "__new__")?
+                .ok_or_else(|| Diagnostic::new("TypeError", "metaclass has no __new__"))?;
+            self.pending_classes.push(PendingClass {
+                state: state.clone(),
+                finalized: false,
+            });
+            let depth = self.frames.len();
+            let result = self.invoke_target(
+                p,
+                constructor,
+                destination,
+                Arguments::Expanded(ExpandedArgs {
+                    positional: vec![state.metaclass, state.name, state.bases, state.mapping],
+                    ..ExpandedArgs::default()
+                }),
+                output,
+            );
+            if let Err(error) = result {
+                self.pending_classes.pop();
+                return Err(error);
+            }
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("metaclass __new__ frame")
+                    .action = ReturnAction::MetaclassNew(state);
+            } else {
+                let result = self.registers[destination];
+                self.finish_metaclass_new(p, destination, state, result, output)?;
+            }
+            return Ok(());
+        }
+
+        self.finalize_class(&state)?;
+        let mut pending = self
+            .heap
+            .descriptor_set_names(state.namespace)?
+            .into_iter()
+            .map(|(call, name)| SetNameCall { call, name })
+            .collect::<Vec<_>>();
+        pending.reverse();
+        self.invoke_set_names(
+            p,
+            destination,
+            state.namespace,
+            pending,
+            Some(state),
+            output,
+        )
+    }
+
+    fn finalize_class(&mut self, state: &ClassHookState) -> Result<()> {
+        self.heap.finish_class(state.namespace)?;
+        if let Some(cell) = state.class_cell {
+            self.heap.store_cell(cell, state.namespace)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn invoke_dynamic_type(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        name: Value,
+        bases: Value,
+        mapping: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let name = match self.heap.get(name)? {
+            Object::Str(name) => name.clone(),
+            _ => return Err(Diagnostic::new("TypeError", "type name must be a string")),
+        };
+        let mut bases = match self.heap.get(bases)? {
+            Object::Tuple(bases) => bases.clone(),
+            _ => return Err(Diagnostic::new("TypeError", "type bases must be a tuple")),
+        };
+        if bases.is_empty() {
+            bases.push(self.object_class);
+        }
+        let class =
+            self.heap
+                .namespace_from_type_mapping(&name, bases, self.type_class, mapping)?;
+        self.heap.finish_class(class)?;
+        let mut pending = self
+            .heap
+            .descriptor_set_names(class)?
+            .into_iter()
+            .map(|(call, name)| SetNameCall { call, name })
+            .collect::<Vec<_>>();
+        pending.reverse();
+        self.invoke_set_names(p, destination, class, pending, None, output)
+    }
+
+    pub(super) fn invoke_type_new(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        args: &Arguments<'_>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.keyword_count() != 0 || args.count() != 4 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "type.__new__ expects metaclass, name, bases, and namespace",
+            ));
+        }
+        let supplied = [
+            args.positional(&self.registers, 0),
+            args.positional(&self.registers, 1),
+            args.positional(&self.registers, 2),
+            args.positional(&self.registers, 3),
+        ];
+        let index = self
+            .pending_classes
+            .iter()
+            .rposition(|pending| {
+                !pending.finalized
+                    && pending.state.metaclass == supplied[0]
+                    && pending.state.name == supplied[1]
+                    && pending.state.bases == supplied[2]
+                    && (pending.state.mapping == supplied[3]
+                        || matches!(self.heap.try_get(supplied[3]), Some(Object::Dict(_))))
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "UnsupportedFeature",
+                    "type.__new__ is currently available only inside an active metaclass __new__",
+                )
+            })?;
+        let state = self.pending_classes[index].state.clone();
+        if state.mapping != supplied[3] {
+            self.heap
+                .namespace_use_mapping(state.namespace, supplied[3])?;
+        }
+        self.finalize_class(&state)?;
+        self.pending_classes[index].finalized = true;
+        let mut pending = self
+            .heap
+            .descriptor_set_names(state.namespace)?
+            .into_iter()
+            .map(|(call, name)| SetNameCall { call, name })
+            .collect::<Vec<_>>();
+        pending.reverse();
+        self.invoke_set_names(p, destination, state.namespace, pending, None, output)
+    }
+
+    fn finish_metaclass_new(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: ClassHookState,
+        result: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let index = self
+            .pending_classes
+            .iter()
+            .rposition(|pending| pending.state.namespace == state.namespace)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "missing metaclass creation state"))?;
+        self.pending_classes.remove(index);
+        if !self.instance_check(result, state.metaclass, false, 0)? {
+            self.registers[destination] = result;
+            return Ok(());
+        }
+        self.invoke_metaclass_init(p, destination, result, state, output)
+    }
+
+    fn invoke_metaclass_init(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        class: Value,
+        state: ClassHookState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if !self
+            .heap
+            .has_custom_metaclass_hook(state.metaclass, self.type_class, "__init__")?
+        {
+            self.registers[destination] = class;
+            return Ok(());
+        }
+        let call = self
+            .heap
+            .metaclass_method_call(class, "__init__")?
+            .ok_or_else(|| Diagnostic::new("TypeError", "metaclass has no __init__"))?;
+        let depth = self.frames.len();
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Expanded(ExpandedArgs {
+                receiver: call.receiver,
+                positional: vec![state.name, state.bases, state.mapping],
+                ..ExpandedArgs::default()
+            }),
+            output,
+        )?;
+        if self.frames.len() > depth {
+            self.frames
+                .last_mut()
+                .expect("metaclass __init__ frame")
+                .action = ReturnAction::MetaclassInit(class);
+        } else if self.registers[destination] != Value::NONE {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "metaclass __init__ must return None",
+            ));
+        } else {
+            self.registers[destination] = class;
+        }
+        Ok(())
+    }
+
     fn invoke_set_names(
         &mut self,
         p: &Program,
         destination: usize,
         class: Value,
         mut pending: Vec<SetNameCall>,
+        after: Option<ClassHookState>,
         output: &mut dyn Write,
     ) -> Result<()> {
         while let Some(item) = pending.pop() {
@@ -3269,7 +4769,7 @@ impl Vm {
                 destination,
                 Arguments::Inline {
                     receiver: item.call.receiver,
-                    positional: [class, item.name],
+                    positional: [class, item.name, Value::UNBOUND],
                     count: 2,
                 },
                 output,
@@ -3278,12 +4778,21 @@ impl Vm {
                 self.frames
                     .last_mut()
                     .expect("set_name callback frame")
-                    .action = ReturnAction::SetNames { class, pending };
+                    .action = ReturnAction::SetNames {
+                    class,
+                    pending,
+                    after,
+                };
                 return Ok(());
             }
             self.registers[destination] = class;
         }
-        Ok(())
+        if let Some(after) = after {
+            self.invoke_metaclass_init(p, destination, class, after, output)
+        } else {
+            self.registers[destination] = class;
+            Ok(())
+        }
     }
 }
 

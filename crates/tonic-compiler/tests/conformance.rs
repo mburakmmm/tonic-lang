@@ -33,10 +33,99 @@ fn valid_python_forms() {
         "print(-1*2+3, not 1==2)",
         "print([0,1,2,3][1:3], 'abc'[::-1])",
         "del object.attr",
+        "class Meta(type):\n    pass\nclass X(metaclass=Meta):\n    pass",
+        "def fail():\n    raise ValueError('boom')",
     ] {
         compile(src, "x").unwrap();
     }
 }
+
+#[test]
+fn raise_ast_and_bytecode_are_tonic_owned() {
+    let source = "raise ValueError('boom')";
+    let ast = parse(source, "raise").unwrap();
+    assert!(matches!(
+        ast.body[0].kind,
+        StmtKind::Raise {
+            value: Some(_),
+            cause: None
+        }
+    ));
+    let program = compile(source, "raise").unwrap();
+    assert!(program.program().code[0]
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::Raise as u16));
+    let chained = compile("raise ValueError('x') from cause", "raise-from").unwrap();
+    assert!(chained.program().code[0]
+        .instructions
+        .iter()
+        .any(|instruction| { instruction.opcode == Op::Raise as u16 && instruction.b == 2 }));
+}
+
+#[test]
+fn try_except_has_tonic_owned_handlers_and_regions() {
+    let source = "try:\n    int('bad')\nexcept (TypeError, ValueError) as error:\n    print(error)\nelse:\n    print('ok')";
+    let ast = parse(source, "try").unwrap();
+    let StmtKind::Try {
+        body,
+        handlers,
+        otherwise,
+        finalbody,
+    } = &ast.body[0].kind
+    else {
+        panic!("try statement")
+    };
+    assert_eq!((body.len(), handlers.len(), otherwise.len()), (1, 1, 1));
+    assert!(finalbody.is_empty());
+    assert!(handlers[0].type_.is_some());
+    assert!(handlers[0].name.is_some());
+    let program = compile(source, "try").unwrap();
+    let code = &program.program().code[0];
+    assert_eq!(code.exception_regions.len(), 2);
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ExceptionMatch as u16));
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ClearException as u16));
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::PushException as u16));
+    let program = compile(
+        "try:\n    print('body')\nfinally:\n    print('cleanup')",
+        "finally",
+    )
+    .unwrap();
+    assert!(!program.program().code[0].exception_regions.is_empty());
+}
+
+#[test]
+fn with_has_tonic_owned_items_and_context_opcodes() {
+    let source = "with first() as (a,b), second():\n    print(a,b)";
+    let ast = parse(source, "with").unwrap();
+    let StmtKind::With { items, body } = &ast.body[0].kind else {
+        panic!("with statement")
+    };
+    assert_eq!((items.len(), body.len()), (2, 1));
+    assert!(items[0].target.is_some());
+    assert!(items[1].target.is_none());
+    let program = compile(source, "with").unwrap();
+    let code = &program.program().code[0];
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ContextEnter as u16));
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ContextExit as u16));
+    assert!(code.exception_regions.len() >= 2);
+}
+
 #[test]
 fn invalid_python_forms() {
     for src in [
@@ -57,14 +146,13 @@ fn invalid_python_forms() {
 #[test]
 fn unsupported_syntax_is_explicit() {
     for src in [
-        "class X(metaclass=type):\n    pass",
+        "class X(extra=1):\n    pass",
         "async def f():\n    pass",
         "x=[i for i in range(3)]",
         "print(f'{1}')",
         "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",
         "del x",
-        "del x[0]",
     ] {
         let e = compile(src, "x").unwrap_err();
         assert_eq!(e.kind, "UnsupportedSyntax", "{src}");

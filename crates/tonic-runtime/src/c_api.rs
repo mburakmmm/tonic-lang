@@ -491,7 +491,10 @@ unsafe extern "C" fn exception_kind(
     // SAFETY: `write_text` validates null/capacity pairs before writing.
     unsafe {
         boundary(context, false, |state| {
-            let text = state.exception.as_ref().map_or("", |error| error.kind);
+            let text = state
+                .exception
+                .as_ref()
+                .map_or("", |error| error.kind.as_str());
             write_text(text.as_bytes(), output, capacity, required)
         })
     }

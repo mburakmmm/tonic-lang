@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-15 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+17 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -34,13 +34,13 @@
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 6, compiler/parser 11, core verifier 8, Cranelift JIT 15, runtime unit 22,
+Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 27,
-native handles 5, language/runtime 60, CPython bridge 15; toplam 239 test.
+call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 36,
+native handles 5, language/runtime 68, CPython bridge 15 ve HPy manifest 5; toplam 266 test.
 
-Differential corpus: 269 stdout vakası ve 75 exception türü vakası. Seed 42.
-Son unboxed-loop/deopt-map değişikliğinden sonra debug/release × interpreter/JIT ×
+Differential corpus: 284 stdout vakası ve 109 exception türü vakası. Seed 42.
+Exception handler/finally/with/custom iterator değişikliğinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -87,6 +87,24 @@ Lambda positional-only/keyword-only/variadic binding, default değerlendirmesi,
 late-bound closure, recursion ve class-scope ayrımı da corpus içindedir.
 Property getter/setter, data-descriptor önceliği, setter dönüşünün yok sayılması,
 salt-okunur ve getter'sız hata yolları normal/stress GC altında doğrulanır.
+Exception corpus'u typed/tuple/bare handler'ları, `else`, frame'ler arası unwind,
+JIT helper hatasının caller handler'ına aktarılmasını, nested active-context
+restoration'ı, bare reraise'ı, `except as` bağının normal/hata/return/break/continue
+çıkışlarında temizlenmesini ve invalid handler tipini kapsar. Custom iterator
+corpus'u suspending `__iter__`/`__next__`, iç çağrıdan kaçan `StopIteration`,
+iterator içinde yakalanan `StopIteration`, normal hata yayılımı ve geçersiz
+iterator dönüşlerini CPython ile karşılaştırır.
+`finally` corpus'u normal, handled/unhandled exception, `return`, `break`,
+`continue`, nested active exception, return/exception override ve finalizer
+içinden yükselen yeni hata yollarında exactly-once çalışma sırasını kapsar.
+`with` corpus'u capture edilmiş `__exit__` kimliğini, normal ve exception
+argümanlarını, nested ters çıkış sırasını, target-assignment hatasını, suppression
+truthiness'ini, metaclass manager'ı, cross-frame bare reraise'ı, `return`/`break`/
+`continue` çıkışlarını ve exit hatasının önceki exception'ı değiştirmesini kapsar.
+Exception chaining corpus'u explicit `raise from`, örtük `__context__`, `from None`
+suppression, custom exception `__init__`/attribute davranışı, managed
+`__traceback__` erişimi, invalid cause tanısı ve `__exit__` traceback argümanını
+CPython ile karşılaştırır.
 Shape tests metadata sınırlarının kullanıcı attribute kaybına yol açmadığını,
 GC tests class/instance/bound-method/cell döngülerini ve namespace/init roots'u
 kontrol eder. Type ID tükenmesi wrap yapmaz; versiyon ve MRO hareket sonrası korunur.
@@ -95,6 +113,15 @@ Bu sayılar Python sürümünün tamamına conformance anlamına gelmez.
 Verifier testinde 10.000 deterministic decoder mutasyonu; VM testinde 5.000
 mutated program adayı (verify edilenler 30-instruction fuel ile yürütülür).
 Bunlar coverage-guided fuzzing veya formel doğrulama değildir.
+
+Coverage-guided katmanda `fuzz/parser` ve `fuzz/jit_code_object` libFuzzer
+hedefleri vardır. 15 Eylül 2026 yerel koşusunda her hedef 10.000 mutation'ı
+crash/timeout olmadan tamamladı. Parser koşusu 440 corpus girdisi, 2.022 edge ve
+3.946 feature; JIT koşusu 60 corpus girdisi, 187 edge ve 193 feature buldu.
+macOS 26.6 ile mevcut nightly AddressSanitizer, uygulama `main`inden önce
+`AsanInitFromRtl` içindeki recursive malloc kilidinde kaldığı için bu iki koşu
+coverage instrumentation açık, `--sanitizer none` ile yapıldı. ASan sonucu diye
+sunulmaz; Linux x86-64 ve macOS AArch64 sanitizer matrisi açık kabul kapısıdır.
 
 Handle testleri stale reuse, cross-runtime, local Drop, explicit persistent
 release/double release ve borrowed string lifetime kontrol eder. Collector
@@ -289,7 +316,7 @@ eşitliğiyle doğrular.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; uzak CI bu
-oturumda çalıştırılmadı. Çalışma alanı başlangıçta Git repository değildi;
-commit/remote/push yapılmadı. C ABI header/smoke ve guarded callback testleri vardır,
+oturumda çalıştırılmadı ve kullanıcı isteği gereği remote GitHub işlemi yapılmadı.
+C ABI header/smoke ve guarded callback testleri vardır,
 ancak sanitizer sonucu varmış gibi raporlanmaz; JIT differential yalnız yukarıdaki belgelenmiş kapsamı
 kanıtlar.

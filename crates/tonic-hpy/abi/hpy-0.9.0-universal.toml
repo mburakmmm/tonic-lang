@@ -1,0 +1,129 @@
+schema_version = 1
+implementation_status = "inventory-only"
+
+[upstream]
+hpy_version = "0.9.0"
+hpy_git_tag = "0.9.0"
+hpy_docs_revision = "f6114734"
+hpy_sdist_sha256 = "4545310f3a7f9ac249c0f19a80a9b05f46565afb62b7e9225b79493b7b6c70cc"
+ahpy_git_revision = "880d46d7d348df759ef062711ab3b4876bd648b8"
+
+[universal_abi]
+name = "universal"
+major = 0
+minor = 0
+tag = "hpy0"
+compile_definition = "HPY_ABI_UNIVERSAL"
+public_header = "hpy/devel/include/hpy.h"
+context_header = "hpy/devel/include/hpy/universal/autogen_ctx.h"
+context_metadata_fields = ["name", "abi_version"]
+context_first_slot = 0
+context_last_slot = 260
+context_slot_count = 261
+context_layout_rule = "HPy_ID order; new members append"
+handle_storage = "intptr_t"
+null_handle_bits = 0
+default_function_state = "unavailable"
+implemented_functions = []
+planned_h1_functions = [
+  "HPy_Dup",
+  "HPy_Close",
+  "HPyLong_FromInt64_t",
+  "HPyLong_AsInt64_t",
+  "HPyUnicode_FromString",
+  "HPyUnicode_AsUTF8AndSize",
+  "HPyErr_SetString",
+  "HPyErr_Occurred",
+  "HPyErr_Clear",
+]
+
+[module_symbols]
+required_major_prefix = "get_required_hpy_major_version_"
+required_minor_prefix = "get_required_hpy_minor_version_"
+context_init_prefix = "HPyInitGlobalContext_"
+module_init_prefix = "HPyInit_"
+
+[[platform_suffixes]]
+platform = "linux"
+suffix = ".hpy0.so"
+state = "inventory-only"
+
+[[platform_suffixes]]
+platform = "macos"
+suffix = ".hpy0.so"
+state = "inventory-only"
+
+[[platform_suffixes]]
+platform = "windows"
+suffix = ".hpy0.pyd"
+state = "unavailable"
+
+[[capabilities]]
+id = "module-init"
+planned_milestone = "H1"
+state = "unavailable"
+
+[[capabilities]]
+id = "local-handles"
+planned_milestone = "H1"
+state = "unavailable"
+
+[[capabilities]]
+id = "integer-conversion"
+planned_milestone = "H1"
+state = "unavailable"
+
+[[capabilities]]
+id = "unicode"
+planned_milestone = "H1"
+state = "unavailable"
+
+[[capabilities]]
+id = "exception-state"
+planned_milestone = "H1"
+state = "unavailable"
+
+[[capabilities]]
+id = "containers-builders"
+planned_milestone = "H2"
+state = "unavailable"
+
+[[capabilities]]
+id = "attributes-items-calls"
+planned_milestone = "H2"
+state = "unavailable"
+
+[[capabilities]]
+id = "globals"
+planned_milestone = "H3"
+state = "unavailable"
+
+[[capabilities]]
+id = "fields"
+planned_milestone = "H3"
+state = "unavailable"
+
+[[capabilities]]
+id = "types"
+planned_milestone = "H4"
+state = "unavailable"
+
+[[capabilities]]
+id = "buffer"
+planned_milestone = "H5"
+state = "unavailable"
+
+[[capabilities]]
+id = "execution-state"
+planned_milestone = "H5"
+state = "unavailable"
+
+[[capabilities]]
+id = "debug-context"
+planned_milestone = "H6"
+state = "unavailable"
+
+[[capabilities]]
+id = "trace-context"
+planned_milestone = "H6"
+state = "unavailable"

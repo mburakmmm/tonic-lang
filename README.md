@@ -45,10 +45,10 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Comprehensions, exception
-handlers, generators, async execution, structural matching, general filesystem
-imports, metaclasses, a full standard library, and several remaining protocols
-are still tracked in the [roadmap](docs/ROADMAP.md).
+The unsupported surface is reported explicitly. Comprehensions, generators,
+async execution, structural matching, general filesystem
+imports, a full standard library, and several remaining protocols are still
+tracked in the [roadmap](docs/ROADMAP.md).
 
 ## Architecture
 
@@ -139,8 +139,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 239 Rust tests and a differential corpus of
-269 output cases plus 75 exception cases. The documented local matrix covers
+The repository currently contains 266 Rust tests and a differential corpus of
+284 output cases plus 109 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution.
 
 ```sh

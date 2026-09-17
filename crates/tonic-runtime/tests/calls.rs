@@ -14,7 +14,6 @@ fn error(s: &str) -> String {
         .run(&compile(s, "calls").unwrap(), &mut Vec::new())
         .unwrap_err()
         .kind
-        .into()
 }
 #[test]
 fn positional_keyword_and_defaults() {

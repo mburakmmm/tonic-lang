@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 6;
+pub const BYTECODE_VERSION: u16 = 12;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -60,6 +60,14 @@ pub enum Op {
     ClassDeref = 66,
     Slice = 67,
     DelAttr = 68,
+    DelItem = 69,
+    Raise = 70,
+    ExceptionMatch = 71,
+    ClearException = 72,
+    ClearBinding = 73,
+    PushException = 74,
+    ContextEnter = 75,
+    ContextExit = 76,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -117,6 +125,14 @@ impl TryFrom<u16> for Op {
             66 => Self::ClassDeref,
             67 => Self::Slice,
             68 => Self::DelAttr,
+            69 => Self::DelItem,
+            70 => Self::Raise,
+            71 => Self::ExceptionMatch,
+            72 => Self::ClearException,
+            73 => Self::ClearBinding,
+            74 => Self::PushException,
+            75 => Self::ContextEnter,
+            76 => Self::ContextExit,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -174,6 +190,13 @@ pub struct FunctionSite {
     pub captures: Vec<u16>,
     pub defaults: Vec<u16>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExceptionRegion {
+    pub start: u16,
+    pub end: u16,
+    pub target: u16,
+    pub exception: u16,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     pub positional: u16,
@@ -199,6 +222,7 @@ pub struct CodeObject {
     pub cell_locals: Vec<u16>,
     pub free_vars: Vec<SymbolId>,
     pub functions: Vec<FunctionSite>,
+    pub exception_regions: Vec<ExceptionRegion>,
 }
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -315,6 +339,25 @@ impl Program {
                 for capture in &site.captures {
                     if *capture as usize >= cell_count {
                         return Err(bad("closure capture out of bounds"));
+                    }
+                }
+            }
+            for region in &code.exception_regions {
+                if region.start >= region.end
+                    || region.end as usize > code.instructions.len()
+                    || region.target as usize >= code.instructions.len()
+                    || region.exception >= code.registers
+                {
+                    return Err(bad("invalid exception region"));
+                }
+            }
+            for (index, left) in code.exception_regions.iter().enumerate() {
+                for right in &code.exception_regions[index + 1..] {
+                    let overlaps = left.start < right.end && right.start < left.end;
+                    let nested = (left.start <= right.start && right.end <= left.end)
+                        || (right.start <= left.start && left.end <= right.end);
+                    if overlaps && !nested {
+                        return Err(bad("partially overlapping exception regions"));
                     }
                 }
             }
@@ -444,6 +487,13 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::DelItem => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
                     Op::Add
                     | Op::InplaceAdd
                     | Op::Sub
@@ -489,6 +539,60 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::Raise => {
+                        if i.b > 2 || (i.b != 2 && i.c != 0) {
+                            return Err(bad("invalid raise operand"));
+                        }
+                        match i.b {
+                            0 => reg(i.a)?,
+                            1 if i.a != 0 => return Err(bad("nonzero bare raise operand")),
+                            1 => {}
+                            2 => {
+                                reg(i.a)?;
+                                reg(i.c)?;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    Op::ExceptionMatch => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        reg(i.c)?;
+                    }
+                    Op::ClearException => {
+                        if i.a != 0 || i.b != 0 || i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
+                    Op::PushException => {
+                        reg(i.a)?;
+                        if i.b != 0 || i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
+                    Op::ContextEnter | Op::ContextExit => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        reg(i.c)?;
+                    }
+                    Op::ClearBinding => {
+                        if i.a > 3 || i.c != 0 {
+                            return Err(bad("invalid clear-binding operand"));
+                        }
+                        match i.a {
+                            0 => reg(i.b)?,
+                            1 => sym(i.b)?,
+                            2 if i.b as usize >= cell_count => {
+                                return Err(bad("clear cell out of bounds"));
+                            }
+                            2 => {}
+                            3 if !code.class_body => {
+                                return Err(bad("namespace clear outside class body"));
+                            }
+                            3 => sym(i.b)?,
+                            _ => unreachable!(),
+                        }
+                    }
                     Op::Function => {
                         reg(i.a)?;
                         if i.b as usize >= code.functions.len() {
@@ -504,8 +608,15 @@ impl Program {
                         if i.c as usize >= code.calls.len() {
                             return Err(bad("call site out of bounds"));
                         }
-                        if op == Op::Class && !code.calls[i.c as usize].keywords.is_empty() {
-                            return Err(bad("class base window cannot contain keywords"));
+                        if op == Op::Class {
+                            let keywords = &code.calls[i.c as usize].keywords;
+                            if keywords.len() > 1
+                                || keywords
+                                    .iter()
+                                    .any(|name| self.symbols[name.0 as usize] != "metaclass")
+                            {
+                                return Err(bad("invalid class keyword window"));
+                            }
                         }
                     }
                     Op::Tuple | Op::List => {
@@ -527,7 +638,9 @@ impl Program {
                         sym(i.c)?;
                     }
                 }
-                if pc + 1 == code.instructions.len() && !matches!(op, Op::Jump | Op::Return) {
+                if pc + 1 == code.instructions.len()
+                    && !matches!(op, Op::Jump | Op::Return | Op::Raise)
+                {
                     return Err(bad("code can fall off end"));
                 }
             }
@@ -563,6 +676,11 @@ fn verify_argument_stack(code: &CodeObject) -> Result<()> {
     let bad = || Diagnostic::new("BytecodeError", "unbalanced expanded argument stack");
     let mut depths = vec![None; code.instructions.len()];
     let mut work = vec![(0usize, 0usize)];
+    work.extend(
+        code.exception_regions
+            .iter()
+            .map(|region| (region.target as usize, 0usize)),
+    );
     while let Some((pc, mut depth)) = work.pop() {
         if let Some(previous) = depths[pc] {
             if previous != depth {
@@ -584,7 +702,7 @@ fn verify_argument_stack(code: &CodeObject) -> Result<()> {
             _ => {}
         }
         match op {
-            Op::Return => {
+            Op::Return | Op::Raise => {
                 if depth != 0 {
                     return Err(bad());
                 }

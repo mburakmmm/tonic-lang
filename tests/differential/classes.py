@@ -515,6 +515,500 @@ print(not d)
 del Dynamic.__bool__
 print(not d,not object())
 ''',
+'''class Descriptor:
+    def __set_name__(self,owner,name):
+        print('set_name',owner.__name__,name)
+class Meta(type):
+    @classmethod
+    def __prepare__(mcls,name,bases):
+        print('prepare',mcls.__name__,name,len(bases))
+        return {'seed':4}
+    def __new__(mcls,name,bases,namespace):
+        print('new',mcls.__name__,name,len(bases),namespace['seed'])
+        namespace['made']=namespace['seed']+1
+        cls=super().__new__(mcls,name,bases,namespace)
+        print('after_new',cls.__name__)
+        return cls
+    def __init__(cls,name,bases,namespace):
+        print('init',cls.__name__,name,namespace['made'])
+        cls.ready=namespace['made']+1
+class C(metaclass=Meta):
+    print('body',seed)
+    item=Descriptor()
+print(C.made,C.ready,type(C)==Meta)
+class InitOnly(type):
+    def __init__(cls,name,bases,namespace):
+        cls.copied=namespace['value']
+class I(metaclass=InitOnly):
+    value=9
+print(I.copied)
+''',
+'''class D:
+    def __set_name__(self,owner,name):
+        print('set_name',owner.__name__,name)
+ns={'x':3,'d':D()}
+C=type('C',(),ns)
+print(C.__name__,C.__bases__[0]==object,C.x,C.__module__,C.__qualname__,C.__doc__)
+print(len(ns),hasattr(ns,'__module__'))
+class Base:
+    value=5
+Child=type('Child',(Base,),{'extra':7,'__module__':'custom'})
+print(Child().value,Child.extra,Child.__module__)
+''',
+'''Mixed=type('Mixed',(),{1:2,'x':3})
+view=Mixed.__dict__
+seen=0
+for key in view:
+    if key==1:
+        seen+=view[key]
+print(view[1],view[1.0],seen,Mixed.x)
+Mixed.y=4
+del Mixed.x
+print(view['y'],hasattr(Mixed,'x'))
+''',
+'''class Bag:
+    def __init__(self):
+        self.data={}
+    def __getitem__(self,key):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        return self.data[key]+1
+    def __setitem__(self,key,value):
+        self.data[key]=value+2
+        return 99
+b=Bag()
+b['x']=4
+print(b['x'],b.data['x'])
+b.__getitem__=lambda key:100
+print(b['x'],b.__getitem__('x'))
+class Static:
+    __getitem__=staticmethod(lambda key:key+3)
+    __setitem__=staticmethod(lambda key,value:print('static-set',key,value))
+class ByClass:
+    @classmethod
+    def __getitem__(cls,key):
+        return cls.__name__+key
+print(Static()[4],ByClass()['!'])
+Static()[1]=2
+''',
+'''values=[1,2,3]
+del values[-2]
+print(values)
+data={'a':1,'b':2}
+del data['a']
+print(data)
+class Bag:
+    def __init__(self):
+        self.data={'x':4,'y':5}
+    def __delitem__(self,key):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        del self.data[key]
+        print('deleted',key)
+        return 99
+b=Bag()
+del b['x']
+print(b.data)
+b.__delitem__=lambda key:print('shadow',key)
+del b['y']
+print(b.data)
+class Static:
+    __delitem__=staticmethod(lambda key:print('static',key))
+del Static()[7]
+''',
+'''print(type(1).__name__,type(True).__name__,type(None).__name__,type(1.5).__name__,type('x').__name__,type([]).__name__,type(()).__name__,type({}).__name__)
+print(type(1)==int,isinstance(True,bool),isinstance(True,int),isinstance(1,object),issubclass(bool,int),isinstance(1,(str,int)))
+print(type(range(3))==range,isinstance(range(3),range),issubclass(range,object))
+print(int(),int(True),int(3.9),int('42'))
+print(int('101',2),int('0xff',0),int('10',base=2))
+print(float(),float(2),float('2.5'))
+class Truth:
+    def __bool__(self):
+        total=0.0
+        for i in range(20):
+            total+=0.5
+        return True
+print(bool(),bool([]),bool([1]),bool(Truth()))
+print(str(),str(12),list('ab'),tuple([1,2]),list(range(3)))
+print(dict({'x':3}),dict(a=1),dict({'a':1},b=2),dict([('a',1),('b',2)]))
+''',
+'''class Missing:
+    def __init__(self):
+        self.present=7
+    def __getattr__(self,name):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        return name+'!'
+m=Missing()
+m.__getattr__=lambda name:'shadow'
+print(m.present,m.absent,getattr(m,'other'))
+class StaticMissing:
+    __getattr__=staticmethod(lambda name:'static-'+name)
+class ClassMissing:
+    @classmethod
+    def __getattr__(cls,name):
+        return cls.__name__+'-'+name
+print(StaticMissing().x,ClassMissing().y)
+class Meta(type):
+    def __getattr__(cls,name):
+        return cls.__name__+'-'+name
+class C(metaclass=Meta):
+    present=3
+print(C.present,C.missing)
+''',
+'''print(type(ValueError('x')).__name__,isinstance(ValueError(),Exception),issubclass(TypeError,BaseException),str(RuntimeError('bad')))
+''',
+'''def fail(kind):
+    scratch=0.0
+    for i in range(20):
+        scratch+=0.5
+    if kind==0:
+        int('bad')
+    if kind==1:
+        return 1//0
+    raise KeyError('key')
+try:
+    fail(0)
+except TypeError:
+    print('wrong')
+except (ValueError, LookupError) as error:
+    print('caught',type(error).__name__,isinstance(error,Exception))
+try:
+    print(error)
+except NameError:
+    print('cleared')
+try:
+    try:
+        fail(1)
+    except ArithmeticError:
+        raise
+except ZeroDivisionError:
+    print('reraised')
+try:
+    print('body')
+except Exception:
+    print('bad')
+else:
+    print('else')
+try:
+    fail(2)
+except:
+    print('bare')
+''',
+'''try:
+    raise ValueError('outer')
+except ValueError as outer:
+    try:
+        raise TypeError('inner')
+    except TypeError as inner:
+        pass
+    try:
+        print(inner)
+    except NameError:
+        print('inner-cleared')
+    try:
+        raise
+    except ValueError:
+        print('outer-restored')
+try:
+    print(outer)
+except NameError:
+    print('outer-cleared')
+try:
+    try:
+        raise ValueError('first')
+    except ValueError as failed:
+        raise TypeError('second')
+except TypeError:
+    print('handler-error')
+try:
+    print(failed)
+except NameError:
+    print('failed-cleared')
+for mode in range(2):
+    try:
+        raise LookupError('loop')
+    except LookupError as loop_error:
+        if mode==0:
+            continue
+        break
+try:
+    print(loop_error)
+except NameError:
+    print('loop-cleared')
+def leave():
+    try:
+        raise ValueError('return')
+    except ValueError as returned:
+        return 7
+print(leave())
+try:
+    raise
+except RuntimeError:
+    print('no-active')
+''',
+'''try:
+    print('body')
+finally:
+    print('normal-final')
+try:
+    try:
+        raise ValueError('boom')
+    finally:
+        print('exception-final')
+except ValueError:
+    print('exception-kept')
+try:
+    raise ValueError('handled')
+except ValueError:
+    print('handled')
+else:
+    print('bad-else')
+finally:
+    print('handler-final')
+def leave(mode):
+    try:
+        if mode==0:
+            return 10
+        return 20
+    finally:
+        print('return-final',mode)
+print(leave(0),leave(1))
+def override():
+    try:
+        return 1
+    finally:
+        return 2
+print('override',override())
+def suppress():
+    try:
+        raise ValueError('suppressed')
+    finally:
+        return 3
+print('suppress',suppress())
+for i in range(3):
+    try:
+        if i==0:
+            continue
+        break
+    finally:
+        print('loop-final',i)
+try:
+    def fail_return():
+        try:
+            return 1
+        finally:
+            print('raising-final')
+            raise TypeError('override')
+    fail_return()
+except TypeError:
+    print('return-overridden')
+try:
+    try:
+        raise ValueError('active')
+    finally:
+        try:
+            raise
+        except ValueError:
+            print('active-in-final')
+except ValueError:
+    print('reraised-after-final')
+try:
+    try:
+        raise ValueError('old')
+    finally:
+        raise TypeError('new')
+except TypeError:
+    print('exception-overridden')
+''',
+'''class Manager:
+    def __init__(self,name,suppress=False):
+        self.name=name
+        self.suppress=suppress
+    def __enter__(self):
+        print('enter',self.name)
+        return self.name+'-value'
+    def __exit__(self,kind,value,traceback):
+        print('exit',self.name,kind.__name__ if kind else 'None')
+        return self.suppress
+with Manager('normal') as value:
+    print(value)
+with Manager('outer') as outer, Manager('inner') as inner:
+    print(outer,inner)
+try:
+    with Manager('propagate'):
+        raise ValueError('boom')
+except ValueError:
+    print('propagated')
+with Manager('suppress',True):
+    raise LookupError('hidden')
+print('suppressed')
+def leave():
+    with Manager('return'):
+        return 7
+print(leave())
+for i in range(2):
+    with Manager('loop'+str(i)):
+        if i==0:
+            continue
+        break
+class Truth:
+    def __bool__(self):
+        print('truth')
+        return True
+class TruthManager(Manager):
+    def __exit__(self,kind,value,traceback):
+        print('truth-exit',kind.__name__)
+        return Truth()
+with TruthManager('truth-manager'):
+    raise TypeError('hidden')
+def old_exit(self,kind,value,traceback):
+    print('captured-old')
+class Mutating:
+    __exit__=old_exit
+    def __enter__(self):
+        Mutating.__exit__=lambda self,kind,value,traceback: print('new')
+        return self
+with Mutating():
+    pass
+class TargetManager(Manager):
+    def __enter__(self):
+        return [1]
+try:
+    with TargetManager('target') as (a,b):
+        pass
+except ValueError:
+    print('target-error')
+class Meta(type):
+    def __enter__(cls):
+        print('meta-enter')
+        return cls.__name__
+    def __exit__(cls,kind,value,traceback):
+        print('meta-exit',kind.__name__ if kind else 'None')
+class ManagedClass(metaclass=Meta):
+    pass
+with ManagedClass as class_name:
+    print(class_name)
+class Reraising(Manager):
+    def __exit__(self,kind,value,traceback):
+        print('bare-exit')
+        raise
+try:
+    with Reraising('reraising'):
+        raise KeyError('same')
+except KeyError:
+    print('bare-reraised')
+class RaisingExit(Manager):
+    def __exit__(self,kind,value,traceback):
+        print('raising-exit',kind.__name__ if kind else 'None')
+        raise TypeError('new')
+try:
+    with Manager('exit-outer'):
+        with RaisingExit('exit-inner'):
+            pass
+except TypeError:
+    print('exit-replaced')
+''',
+'''def divide(a,b):
+    return a/b
+i=0
+while i<20:
+    divide(20,2)
+    i+=1
+try:
+    divide(1,0)
+except ZeroDivisionError as error:
+    print(type(error).__name__)
+''',
+'''class Counter:
+    def __init__(self,n):
+        self.i=0
+        self.n=n
+    def __iter__(self):
+        return self
+    def stop(self):
+        raise StopIteration
+    def __next__(self):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        if self.i>=self.n:
+            self.stop()
+        value=self.i
+        self.i+=1
+        return value
+for value in Counter(4):
+    print(value)
+else:
+    print('done')
+class Recover:
+    def __init__(self):
+        self.first=True
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.first:
+            self.first=False
+            try:
+                raise StopIteration
+            except StopIteration:
+                return 9
+        raise StopIteration
+for value in Recover():
+    print('recovered',value)
+class Failing:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise ValueError('iteration failed')
+try:
+    for value in Failing():
+        pass
+except ValueError as error:
+    print(type(error).__name__)
+''',
+'''class PlainError(Exception):
+    pass
+print(PlainError(1,'two').args,str(PlainError(1,'two')))
+class MyError(Exception):
+    def __init__(self,message):
+        self.label=message
+try:
+    try:
+        raise KeyError('context')
+    except KeyError:
+        raise MyError('outer') from ValueError('cause')
+except MyError as error:
+    print(error.label,error.args,error.__traceback__==None)
+    print(type(error.__cause__).__name__,type(error.__context__).__name__,error.__suppress_context__)
+try:
+    try:
+        raise ValueError('implicit')
+    except ValueError:
+        raise TypeError('replacement')
+except TypeError as error:
+    print(error.__cause__,type(error.__context__).__name__,error.__suppress_context__)
+try:
+    try:
+        raise LookupError('hidden')
+    except LookupError:
+        raise RuntimeError('clean') from None
+except RuntimeError as error:
+    print(error.__cause__,type(error.__context__).__name__,error.__suppress_context__)
+class TraceManager:
+    def __enter__(self):
+        return self
+    def __exit__(self,kind,value,traceback):
+        print(type(value).__name__,traceback==None)
+try:
+    with TraceManager():
+        raise ValueError('managed')
+except ValueError:
+    pass
+''',
 ]
 ERRORS = [
     ('class C:\n    pass\nC(1)', 'TypeError'),
@@ -560,4 +1054,33 @@ ERRORS = [
     ('class C:\n    def __len__(self):\n        return -1\nif C():\n    pass', 'ValueError'),
     ('class C:\n    def __len__(self):\n        return 1.0\nnot C()', 'TypeError'),
     ('class C:\n    __bool__=1\nC() and 1', 'TypeError'),
+    ('class Meta(type):\n    def __init__(cls,name,bases,namespace):\n        return 1\nclass C(metaclass=Meta):\n    pass', 'TypeError'),
+    ("type(1,(),{})", 'TypeError'),
+    ("type('C',[],{})", 'TypeError'),
+    ("type('C',(),[])", 'TypeError'),
+    ("type('C',(1,),{})", 'TypeError'),
+    ('class C:\n    __getitem__=1\nC()[0]', 'TypeError'),
+    ('class C:\n    __setitem__=1\nC()[0]=2', 'TypeError'),
+    ('class C:\n    pass\nC()[0]', 'TypeError'),
+    ('class C:\n    pass\nC()[0]=2', 'TypeError'),
+    ('x=[]\ndel x[0]', 'IndexError'),
+    ("x={}\ndel x['missing']", 'KeyError'),
+    ('del (1)[0]', 'TypeError'),
+    ('class C:\n    __delitem__=1\ndel C()[0]', 'TypeError'),
+    ("int('bad')", 'ValueError'),
+    ("float('bad')", 'ValueError'),
+    ('int(1.0,2)', 'TypeError'),
+    ('list(1)', 'TypeError'),
+    ('dict(1)', 'TypeError'),
+    ("int('10',1)", 'ValueError'),
+    ('int(10,2)', 'TypeError'),
+    ('dict([(1,)])', 'ValueError'),
+    ('class C:\n    __getattr__=1\nC().missing', 'TypeError'),
+    ("try:\n    int('bad')\nexcept 1:\n    pass", 'TypeError'),
+    ('raise', 'RuntimeError'),
+    ("raise TypeError('outer') from 1", 'TypeError'),
+    ('class MissingEnter:\n    def __exit__(self,a,b,c):\n        pass\nwith MissingEnter():\n    pass', 'TypeError'),
+    ('class MissingExit:\n    def __enter__(self):\n        pass\nwith MissingExit():\n    pass', 'TypeError'),
+    ('class Bad:\n    def __iter__(self):\n        return 1\nfor value in Bad():\n    pass', 'TypeError'),
+    ('class Bad:\n    def __iter__(self):\n        return self\nfor value in Bad():\n    pass', 'TypeError'),
 ]

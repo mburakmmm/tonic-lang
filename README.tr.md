@@ -51,13 +51,14 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | Interop | ABI v1 C table/panic guard; typed buffer; callback/reentry; foreign wrapper/vtable, precise trace ve deferred exactly-once destructor; staged shutdown |
 | Sınıflar | class scope, `__init__`, bound/unbound metot, private mangling, C3 multiple inheritance, class attribute rebinding |
 | Özel protokoller | instance `__call__`, `__len__`, `__bool__`; class MRO lookup ve askıya alınabilir VM continuation |
-| Decorator/descriptor dilimi | function/class decorators, `staticmethod`, `classmethod`, property, custom `__get__/__set__/__delete__` ve otomatik `__set_name__`; metaclass yok |
-| M3 | class/instance, ortak shapes + slotlar ve dictionary fallback var; tam descriptor/metaclass protokolü yok |
+| Decorator/descriptor dilimi | function/class decorators, `staticmethod`, `classmethod`, property, custom `__get__/__set__/__delete__`, otomatik `__set_name__`, metaclass seçimi ve `__prepare__/__new__/__init__` zinciri |
+| M3 | class/instance, ortak shapes + slotlar, dictionary fallback, canlı mappingproxy ve canonical builtin type nesneleri |
 | Bellek | precise generational tracing, nursery/old ayrımı, write barrier, remembered set, cycle collection, compaction ve stress GC |
 | JIT ilk dilim | Cranelift 0.119; integer native yolları, runtime-helper true division, resumable recursive calls, loop OSR, allocation/call/backedge safepoint'leri |
 | M4 interpreter | integer aritmetik quickening; monomorphic ve iki girişli basit function-call ile class/shape/slot/dependency-version guard'lı instance attribute cache'leri |
 | M4–M7 | expanded sequence/mapping, observed variadic, exact-float direct ve loop-carried F64 yolları; PC-indexli deopt map ve tam register rekonstrüksiyonu |
-| Geniş dil | comprehension, exception handlers, generator, async, match vb. henüz yok |
+| İstisnalar | managed exception nesneleri ve traceback state, typed/tuple/bare `try/except/else`, bare reraise, `raise from`, cause/context zinciri, frame unwind, `finally` ve senkron `with` |
+| Geniş dil | comprehension, generator, async, match, f-string vb. henüz yok |
 | CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve bounded iki-collector graph/cycle taraması |
 | HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
 | Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
@@ -90,6 +91,10 @@ kaynak sessizce atlanmaz. Parser bağımlılığının gramer kapsamı, Tonic'in
 kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilmez.
 
 ## Doğrulama
+
+Güncel yerel matris 266 Rust testi ile 284 stdout ve 109 exception türü
+diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
+modlarında çalıştırır.
 
 ```sh
 cargo fmt --all --check
@@ -218,8 +223,17 @@ slice assignment, range/custom-object slicing, string repetition, general filesy
 import/stdlib ve REPL yoktur. List, tuple ve Unicode string üzerinde read-only slice;
 açık uçlar, negatif sınırlar ve negatif adım desteklenir.
 Descriptor `__get__`/`__set__`/`__delete__` data ve non-data önceliğiyle,
-`__set_name__` class body sonrasında tanım sırasıyla çalışır; metaclass,
-custom numeric/operator/iteration protokolleri ve `__dict__` view henüz yoktur.
+`__set_name__` class body sonrasında tanım sırasıyla çalışır. Metaclass seçimi,
+dict tabanlı `__prepare__`, `__new__/__init__` zinciri, canlı salt okunur class
+`__dict__` mappingproxy, `for` için custom `__iter__/__next__` ve dict dışı
+class namespace mapping'leri desteklenir; kalan numeric/operator protokolleri
+açıktır.
+Senkron context manager `__enter__/__exit__` özel-metot lookup'u, nested unwind,
+exception suppression, managed traceback aktarımı ve return/break/continue
+temizliğiyle desteklenir. `raise ... from ...`, örtük `__context__`, explicit
+`__cause__`, `from None` suppression ve `__traceback__` exception state'i
+desteklenir; traceback nesnesinin ayrıntılı frame-introspection API'si henüz
+bootstrap kapsamı dışındadır.
 `object.__new__`, custom/inherited `__new__`, instance dışı dönüşte `__init__`
 atlama ve otomatik static binding desteklenir. Method ve class-scope lambda
 gövdeleri hareketli-GC uyumlu örtük
@@ -241,8 +255,8 @@ Koşul, `while`, `and/or` ve `not` instance truthiness için önce `__bool__`, s
 frame'i askıya alınır. `__bool__` yalnız bool döndürebilir; `__len__` aynı integer ve
 negatiflik sözleşmesini kullanır. Kısa devrede özgün operand korunur.
 Property data-descriptor önceliği ile normal attribute, `getattr` ve `setattr`
-yollarında çalışır. Guest exception yakalama henüz olmadığı için property üzerinde
-`hasattr` ve default'lu `getattr` açıkça desteklenmez; property `getter` yardımcısı yoktur.
+yollarında çalışır. Guest exception handler'ları property/getattr hata yollarını
+yakalayabilir; property `getter` yardımcısı henüz yoktur.
 Bootstrap sınıf doğrulaması `__init__/__new__/__call__/__len__/__bool__/__get__/__set__/__delete__/__set_name__/__module__/__qualname__/__doc__/__name__`
 dışındaki `__...__` üyeleri reddeder; özel metadata adları da bu geçici
 kısıta dahildir.

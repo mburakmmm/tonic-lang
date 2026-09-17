@@ -9,6 +9,184 @@ fn run(source: &str) -> String {
     String::from_utf8(output).unwrap()
 }
 #[test]
+fn class_dict_is_a_live_read_only_mappingproxy() {
+    assert_eq!(
+        run(
+            "def make_view():\n    class Hidden:\n        secret=42\n    return Hidden.__dict__\nhidden=make_view()\nprint(hidden['secret'])\nclass C:\n    x=1\nview=C.__dict__\nprint(view['x'],len(view))\nC.x=7\nC.y=9\nprint(view['x'],view['y'],len(view))\nnames=''\nfor name in view:\n    if name=='x' or name=='y':\n        names+=name\nprint(names)\nprint(view)"
+        ),
+        "42\n1 4\n7 9 5\nxy\nmappingproxy({'__module__': '__main__', '__qualname__': 'C', '__doc__': None, 'x': 7, 'y': 9})\n"
+    );
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile("class C:\n    x=1\nC.__dict__['x']=2", "mappingproxy-write").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "TypeError");
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile(
+                "class C:\n    x=1\nview=C.__dict__\nfor name in view:\n    C.y=2",
+                "mappingproxy-iteration",
+            )
+            .unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "RuntimeError");
+}
+#[test]
+fn explicit_metaclasses_select_the_most_derived_compatible_type() {
+    assert_eq!(
+        run(
+            "class Meta(type):\n    marker='meta'\n    @classmethod\n    def __prepare__(mcls,name,bases):\n        print('prepare',name,len(bases))\n        return {'seed': 5}\nclass ChildMeta(Meta):\n    pass\ndef choose():\n    print('choose')\n    return Meta\nclass A(metaclass=choose()):\n    print('body',seed)\n    value=seed+1\nclass B(A,metaclass=ChildMeta):\n    pass\nclass C(B):\n    pass\ndef local_class():\n    class LocalMeta(type):\n        pass\n    class Local(metaclass=LocalMeta):\n        pass\n    return Local\nLocal=local_class()\nlocal=Local()\nprint(type.__class__==type,object.__class__==type,Meta.__class__==type)\nprint(A.__class__==Meta,B.__class__==ChildMeta,C.__class__==ChildMeta)\nprint(type(Local)==Local.__class__,type(local)==Local,Local.__class__.__name__)\nprint(A.seed,A.value,isinstance(A,Meta),isinstance(B,Meta),issubclass(ChildMeta,Meta))"
+        ),
+        "choose\nprepare A 0\nbody 5\nprepare B 1\nprepare C 1\nTrue True True\nTrue True True\nTrue True LocalMeta\n5 6 True True True\n"
+    );
+
+    for (source, kind) in [
+        (
+            "class M1(type):\n    pass\nclass M2(type):\n    pass\nclass A(metaclass=M1):\n    pass\nclass B(metaclass=M2):\n    pass\nclass C(A,B):\n    pass",
+            "TypeError",
+        ),
+        ("class C(metaclass=object):\n    pass", "TypeError"),
+        (
+            "class Meta(type):\n    @classmethod\n    def __prepare__(mcls,name,bases):\n        return 1\nclass C(metaclass=Meta):\n    pass",
+            "TypeError",
+        ),
+        (
+            "class Meta(type):\n    pass\nMeta()",
+            "UnsupportedFeature",
+        ),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "metaclass-errors").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, kind);
+    }
+}
+#[test]
+fn custom_prepare_mapping_can_be_converted_by_metaclass_new() {
+    assert_eq!(
+        run(
+            "class Namespace:\n    def __init__(self):\n        self.data={}\n    def __getitem__(self,key):\n        return self.data[key]\n    def __setitem__(self,key,value):\n        self.data[key]=value\nclass Meta(type):\n    @classmethod\n    def __prepare__(mcls,name,bases):\n        return Namespace()\n    def __new__(mcls,name,bases,namespace):\n        copied={'__module__':namespace['__module__'],'__qualname__':namespace['__qualname__'],'__doc__':namespace['__doc__'],'value':namespace['value']}\n        return super().__new__(mcls,name,bases,copied)\nseed=40\nclass C(metaclass=Meta):\n    value=seed+1\nprint(C.value,C.__module__,C.__qualname__,C.__doc__)"
+        ),
+        "41 __main__ C None\n"
+    );
+}
+#[test]
+fn builtin_type_objects_share_type_checks_and_constructors() {
+    assert_eq!(
+        run(
+            "print(type(1).__name__,type(True).__name__,type(None).__name__,type(1.5).__name__,type('x').__name__,type([]).__name__,type(()).__name__,type({}).__name__)\nprint(type(1)==int,isinstance(True,bool),isinstance(True,int),isinstance(1,object),issubclass(bool,int),isinstance(1,(str,int)))\nprint(type(range(3))==range,isinstance(range(3),range),issubclass(range,object))\nprint(int(),int(True),int(3.9),int('42'))\nprint(int('101',2),int('0xff',0),int('10',base=2))\nprint(float(),float(2),float('2.5'))\nclass Truth:\n    def __bool__(self):\n        total=0.0\n        for i in range(20):\n            total+=0.5\n        return True\nprint(bool(),bool([]),bool([1]),bool(Truth()))\nprint(str(),str(12),list('ab'),tuple([1,2]),list(range(3)))\nprint(dict({'x':3}),dict(a=1),dict({'a':1},b=2),dict([('a',1),('b',2)]))"
+        ),
+        "int bool NoneType float str list tuple dict\nTrue True True True True True\nTrue True True\n0 1 3 42\n5 255 2\n0.0 2.0 2.5\nFalse False True True\n 12 ['a', 'b'] (1, 2) [0, 1, 2]\n{'x': 3} {'a': 1} {'a': 1, 'b': 2} {'a': 1, 'b': 2}\n"
+    );
+    for (source, kind) in [
+        ("int('bad')", "ValueError"),
+        ("float('bad')", "ValueError"),
+        ("int(1.0,2)", "TypeError"),
+        ("list(1)", "TypeError"),
+        ("dict(1)", "TypeError"),
+        ("int('10',1)", "ValueError"),
+        ("int(10,2)", "TypeError"),
+        ("dict([(1,)])", "ValueError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "builtin-type-errors").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, kind);
+    }
+}
+#[test]
+fn getattr_fallback_uses_instance_class_and_metaclass_protocols() {
+    assert_eq!(
+        run(
+            "class Missing:\n    def __init__(self):\n        self.present=7\n    def __getattr__(self,name):\n        scratch=0.0\n        for i in range(20):\n            scratch+=0.5\n        return name+'!'\nm=Missing()\nm.__getattr__=lambda name:'shadow'\nprint(m.present,m.absent,getattr(m,'other'))\nclass StaticMissing:\n    __getattr__=staticmethod(lambda name:'static-'+name)\nclass ClassMissing:\n    @classmethod\n    def __getattr__(cls,name):\n        return cls.__name__+'-'+name\nprint(StaticMissing().x,ClassMissing().y)\nclass Meta(type):\n    def __getattr__(cls,name):\n        return cls.__name__+'-'+name\nclass C(metaclass=Meta):\n    present=3\nprint(C.present,C.missing)"
+        ),
+        "7 absent! other!\nstatic-x ClassMissing-y\n3 C-missing\n"
+    );
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile("class C:\n    __getattr__=1\nC().missing", "getattr-error").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "TypeError");
+}
+#[test]
+fn metaclass_new_init_chain_preserves_namespace_and_order() {
+    assert_eq!(
+        run(
+            "class Descriptor:\n    def __set_name__(self,owner,name):\n        print('set_name',owner.__name__,name)\nclass Meta(type):\n    @classmethod\n    def __prepare__(mcls,name,bases):\n        print('prepare',mcls.__name__,name,len(bases))\n        return {'seed': 4}\n    def __new__(mcls,name,bases,namespace):\n        print('new',mcls.__name__,name,len(bases),namespace['seed'])\n        namespace['made']=namespace['seed']+1\n        cls=super().__new__(mcls,name,bases,namespace)\n        print('after_new',cls.__name__)\n        return cls\n    def __init__(cls,name,bases,namespace):\n        print('init',cls.__name__,name,namespace['made'])\n        cls.ready=namespace['made']+1\nclass C(metaclass=Meta):\n    print('body',seed)\n    item=Descriptor()\nprint(C.made,C.ready,type(C)==Meta)\nclass InitOnly(type):\n    def __init__(cls,name,bases,namespace):\n        cls.copied=namespace['value']\nclass I(metaclass=InitOnly):\n    value=9\nprint(I.copied)\nclass Nested(type):\n    def __new__(mcls,name,bases,namespace):\n        if name=='Outer':\n            class Inner(metaclass=mcls):\n                marker=7\n            print('nested',Inner.marker)\n        return super().__new__(mcls,name,bases,namespace)\nclass Outer(metaclass=Nested):\n    pass\nprint(Outer.__name__)"
+        ),
+        "prepare Meta C 0\nbody 4\nnew Meta C 0 4\nset_name C item\nafter_new C\ninit C C 5\n5 6 True\n9\nnested 7\nOuter\n"
+    );
+
+    for (source, kind) in [
+        (
+            "class Meta(type):\n    def __new__(mcls,name,bases,namespace):\n        return 42\n    def __init__(cls,name,bases,namespace):\n        print('must not run')\nclass C(metaclass=Meta):\n    pass\nprint(C)",
+            None,
+        ),
+        (
+            "class Meta(type):\n    def __init__(cls,name,bases,namespace):\n        return 1\nclass C(metaclass=Meta):\n    pass",
+            Some("TypeError"),
+        ),
+        (
+            "type.__new__(type,'C',(),{})",
+            Some("UnsupportedFeature"),
+        ),
+    ] {
+        let result = Vm::new().unwrap().run(
+            &compile(source, "metaclass-new-init-errors").unwrap(),
+            &mut Vec::new(),
+        );
+        match kind {
+            Some(kind) => assert_eq!(result.unwrap_err().kind, kind),
+            None => result.unwrap(),
+        }
+    }
+}
+#[test]
+fn three_argument_type_copies_namespace_and_runs_set_name() {
+    assert_eq!(
+        run(
+            "class D:\n    def __set_name__(self,owner,name):\n        print('set_name',owner.__name__,name)\nns={'x':3,'d':D()}\nC=type('C',(),ns)\nprint(C.__name__,C.__bases__[0]==object,C.x,C.__module__,C.__qualname__,C.__doc__)\nprint(len(ns),hasattr(ns,'__module__'))\nclass Base:\n    value=5\nChild=type('Child',(Base,),{'extra':7,'__module__':'custom'})\nprint(Child().value,Child.extra,Child.__module__)\nMixed=type('Mixed',(),{1:2,'x':3})\nview=Mixed.__dict__\nseen=0\nfor key in view:\n    if key==1:\n        seen+=view[key]\nprint(view[1],view[1.0],seen,Mixed.x)\nMixed.y=4\ndel Mixed.x\nprint(view['y'],hasattr(Mixed,'x'))"
+        ),
+        "set_name C d\nC True 3 __main__ C None\n2 False\n5 7 custom\n2 2 2 3\n4 False\n"
+    );
+    for source in [
+        "type(1,(),{})",
+        "type('C',[],{})",
+        "type('C',(),[])",
+        "type('C',(1,),{})",
+        "type()",
+        "type('C',())",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "dynamic-type-errors").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError");
+    }
+}
+#[test]
 fn constructors_methods_and_binding() {
     assert_eq!(run("class Point:\n    tag='point'\n    def __init__(self,x,y=2):\n        self.x=x\n        self.y=y\n    def total(self,/,*,scale=1):\n        return (self.x+self.y)*scale\np=Point(3,y=4)\nprint(p.x,p.tag,p.total(scale=2))\nf=p.total\np.x+=10\nprint(f(),Point.total(p),f.__self__==p,f.__func__==Point.total)"),"3 point 14\n17 17 True True\n");
 }
@@ -29,7 +207,7 @@ fn implicit_class_cells_and_super_follow_c3_mro() {
             .unwrap()
             .run(&compile(source, "super-errors").unwrap(), &mut Vec::new())
             .unwrap_err();
-        assert!(matches!(error.kind, "RuntimeError" | "TypeError"));
+        assert!(matches!(error.kind.as_str(), "RuntimeError" | "TypeError"));
     }
 }
 #[test]
@@ -99,6 +277,54 @@ fn callable_and_length_protocols_use_class_lookup_and_normal_frames() {
         vm.stats.heap_allocations
     }
     assert_eq!(allocations(1), allocations(1_000));
+}
+#[test]
+fn item_protocols_use_special_lookup_and_setter_continuations() {
+    assert_eq!(
+        run(
+            "class Bag:\n    def __init__(self):\n        self.data={}\n    def __getitem__(self,key):\n        scratch=0.0\n        for i in range(20):\n            scratch+=0.5\n        return self.data[key]+1\n    def __setitem__(self,key,value):\n        self.data[key]=value+2\n        return 99\nb=Bag()\nb['x']=4\nprint(b['x'],b.data['x'])\nb.__getitem__=lambda key: 100\nprint(b['x'],b.__getitem__('x'))\nclass Static:\n    __getitem__=staticmethod(lambda key:key+3)\n    __setitem__=staticmethod(lambda key,value: print('static-set',key,value))\nclass ByClass:\n    @classmethod\n    def __getitem__(cls,key):\n        return cls.__name__+key\nprint(Static()[4],ByClass()['!'])\nStatic()[1]=2"
+        ),
+        "7 6\n7 100\n7 ByClass!\nstatic-set 1 2\n"
+    );
+    for source in [
+        "class C:\n    __getitem__=1\nC()[0]",
+        "class C:\n    __setitem__=1\nC()[0]=2",
+        "class C:\n    pass\nC()[0]",
+        "class C:\n    pass\nC()[0]=2",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "item-protocol-errors").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError");
+    }
+}
+#[test]
+fn item_deletion_supports_builtin_and_custom_protocols() {
+    assert_eq!(
+        run(
+            "values=[1,2,3]\ndel values[-2]\nprint(values)\ndata={'a':1,'b':2}\ndel data['a']\nprint(data)\nclass Bag:\n    def __init__(self):\n        self.data={'x':4,'y':5}\n    def __delitem__(self,key):\n        scratch=0.0\n        for i in range(20):\n            scratch+=0.5\n        del self.data[key]\n        print('deleted',key)\n        return 99\nb=Bag()\ndel b['x']\nprint(b.data)\nb.__delitem__=lambda key: print('shadow',key)\ndel b['y']\nprint(b.data)\nclass Static:\n    __delitem__=staticmethod(lambda key:print('static',key))\ndel Static()[7]"
+        ),
+        "[1, 3]\n{'b': 2}\ndeleted x\n{'y': 5}\ndeleted y\n{}\nstatic 7\n"
+    );
+    for (source, kind) in [
+        ("x=[]\ndel x[0]", "IndexError"),
+        ("x={}\ndel x['missing']", "KeyError"),
+        ("del (1)[0]", "TypeError"),
+        ("class C:\n    __delitem__=1\ndel C()[0]", "TypeError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "delete-item-errors").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, kind);
+    }
 }
 #[test]
 fn truth_protocols_suspend_and_preserve_boolean_operands() {
@@ -262,7 +488,7 @@ fn descriptor_set_name_runs_in_definition_order_before_decorators() {
             .unwrap()
             .run(&compile(source, "set-name").unwrap(), &mut Vec::new())
             .unwrap_err();
-        assert!(matches!(error.kind, "NameError" | "TypeError"));
+        assert!(matches!(error.kind.as_str(), "NameError" | "TypeError"));
     }
 }
 #[test]
@@ -368,7 +594,6 @@ fn class_errors_and_unsupported_protocols_are_explicit() {
         ("class C(1):\n    pass","TypeError"),
         ("class A:\n    pass\nclass B(A,A):\n    pass","TypeError"),
         ("class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    pass","TypeError"),
-        ("class C:\n    def __getattr__(self,name):\n        return 1","UnsupportedFeature"),
         ("class C:\n    pass\nC.__eq__=1","UnsupportedFeature"),
         ("x=object()\nx.a=1","AttributeError"),
         ("object.x=1","TypeError"),

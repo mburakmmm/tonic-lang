@@ -1,16 +1,21 @@
 #[path = "gc.rs"]
 mod gc;
-use crate::value::Value;
+use crate::{classes::ClassDictionaryKey, value::Value};
 pub use gc::CollectionStats;
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use std::collections::HashSet;
-use tonic_core::diagnostic::{Diagnostic, Result};
+use tonic_core::diagnostic::{Diagnostic, Result, Span};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TracebackEntry {
+    pub function: String,
+    pub span: Span,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Builtin {
     Print,
-    Range,
     Len,
     Abs,
     IsInstance,
@@ -23,11 +28,15 @@ pub(crate) enum Builtin {
     Property,
     Super,
     ObjectNew,
+    TypeNew,
 }
 #[derive(Debug)]
 pub(crate) enum Object {
     Class(Box<crate::classes::Class>),
     Namespace(Box<crate::classes::Class>),
+    MappingProxy {
+        class: Value,
+    },
     Instance {
         class: Value,
         attributes: crate::shapes::Attributes,
@@ -58,6 +67,19 @@ pub(crate) enum Object {
     List(Vec<Value>),
     Slice([Value; 3]),
     Dict(crate::dict::Dict),
+    Exception {
+        class: Value,
+        message: String,
+        arguments: Vec<Value>,
+        attributes: crate::shapes::Attributes,
+        cause: Option<Value>,
+        context: Option<Value>,
+        suppress_context: bool,
+        traceback: Option<Value>,
+    },
+    Traceback {
+        entries: Vec<TracebackEntry>,
+    },
     Function {
         code: u16,
         execution: u64,
@@ -82,6 +104,11 @@ pub(crate) enum Object {
         index: usize,
         version: u64,
     },
+    MappingProxyIterator {
+        class: Value,
+        index: usize,
+        size: usize,
+    },
     RangeIterator {
         next: i128,
         stop: i128,
@@ -89,13 +116,61 @@ pub(crate) enum Object {
     },
 }
 impl Object {
+    pub(crate) fn instance_class(&self) -> Option<Value> {
+        match self {
+            Self::Instance { class, .. } | Self::Exception { class, .. } => Some(*class),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn instance_parts(&self) -> Option<(Value, &crate::shapes::Attributes)> {
+        match self {
+            Self::Instance { class, attributes }
+            | Self::Exception {
+                class, attributes, ..
+            } => Some((*class, attributes)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn instance_attributes_mut(&mut self) -> Option<&mut crate::shapes::Attributes> {
+        match self {
+            Self::Instance { attributes, .. } | Self::Exception { attributes, .. } => {
+                Some(attributes)
+            }
+            _ => None,
+        }
+    }
+
     /// Every managed edge must be visible to precise tracing, including cycles.
     pub fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
             Self::Class(c) | Self::Namespace(c) => c.trace(visit),
+            Self::MappingProxy { class } | Self::MappingProxyIterator { class, .. } => {
+                visit(*class)
+            }
             Self::Instance { class, attributes } => {
                 visit(*class);
                 attributes.trace(visit);
+            }
+            Self::Exception {
+                class,
+                cause,
+                context,
+                traceback,
+                arguments,
+                attributes,
+                ..
+            } => {
+                visit(*class);
+                attributes.trace(&mut visit);
+                arguments.iter().copied().for_each(&mut visit);
+                cause
+                    .iter()
+                    .chain(context)
+                    .chain(traceback)
+                    .copied()
+                    .for_each(visit);
             }
             Self::BoundMethod { function, receiver } => {
                 visit(*function);
@@ -265,6 +340,87 @@ impl Heap {
             _ => Err(Diagnostic::new("BytecodeError", "expected closure cell")),
         }
     }
+    pub fn set_exception_cause(
+        &mut self,
+        owner: Value,
+        cause: Option<Value>,
+        suppress_context: bool,
+    ) -> Result<()> {
+        if let Some(cause) = cause {
+            self.write_barrier(owner, cause);
+        }
+        let Object::Exception {
+            cause: slot,
+            suppress_context: suppress,
+            ..
+        } = self.get_mut(owner)?
+        else {
+            return Err(Diagnostic::new("TypeError", "expected exception instance"));
+        };
+        *slot = cause;
+        *suppress = suppress_context;
+        Ok(())
+    }
+    pub fn set_exception_context(&mut self, owner: Value, context: Value) -> Result<()> {
+        self.write_barrier(owner, context);
+        let Object::Exception { context: slot, .. } = self.get_mut(owner)? else {
+            return Err(Diagnostic::new("TypeError", "expected exception instance"));
+        };
+        if slot.is_none() {
+            *slot = Some(context);
+        }
+        Ok(())
+    }
+    pub fn exception_traceback(&self, owner: Value) -> Result<Option<Value>> {
+        let Object::Exception { traceback, .. } = self.get(owner)? else {
+            return Err(Diagnostic::new("TypeError", "expected exception instance"));
+        };
+        Ok(*traceback)
+    }
+    pub fn record_exception_trace(
+        &mut self,
+        owner: Value,
+        entries: Vec<TracebackEntry>,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let traceback = match self.exception_traceback(owner)? {
+            Some(traceback) => traceback,
+            None => {
+                let traceback = self.alloc(Object::Traceback {
+                    entries: Vec::new(),
+                })?;
+                self.write_barrier(owner, traceback);
+                let Object::Exception {
+                    traceback: slot, ..
+                } = self.get_mut(owner)?
+                else {
+                    unreachable!("validated exception changed kind")
+                };
+                *slot = Some(traceback);
+                traceback
+            }
+        };
+        let before = self.get(traceback)?.estimated_bytes();
+        {
+            let Object::Traceback {
+                entries: traceback_entries,
+            } = self.get_mut(traceback)?
+            else {
+                return Err(Diagnostic::new("RuntimeError", "invalid traceback object"));
+            };
+            for entry in entries {
+                if traceback_entries.last() != Some(&entry) {
+                    traceback_entries.push(entry);
+                }
+            }
+        }
+        let after = self.get(traceback)?.estimated_bytes();
+        self.bytes += after.saturating_sub(before);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(())
+    }
     /// Managed mutation boundary. Native extensions and the VM cannot bypass
     /// the owner/value write barrier by mutating list storage directly.
     pub fn append_list(&mut self, owner: Value, value: Value) -> Result<()> {
@@ -309,7 +465,7 @@ impl Heap {
         }
         slot.location
     }
-    fn try_get(&self, value: Value) -> Option<&Object> {
+    pub(crate) fn try_get(&self, value: Value) -> Option<&Object> {
         self.objects
             .get(self.location(value)?)
             .map(|entry| &entry.object)
@@ -470,6 +626,7 @@ impl Heap {
             Object::Tuple(v) | Object::List(v) => !v.is_empty(),
             Object::Buffer(buffer) => buffer.len() != 0,
             Object::Dict(dict) => !dict.entries.is_empty(),
+            Object::MappingProxy { class } => self.class(*class)?.dictionary_len() != 0,
             Object::Range { start, stop, step } => {
                 if *step > 0 {
                     start < stop
@@ -482,6 +639,23 @@ impl Heap {
     }
     pub fn format(&self, v: Value, repr: bool) -> Result<String> {
         self.format_depth(v, repr, &mut Vec::new())
+    }
+    pub(crate) fn exception_message(&self, arguments: &[Value]) -> Result<String> {
+        match arguments {
+            [] => Ok(String::new()),
+            [value] => self.format(*value, false),
+            values => {
+                let mut message = String::from("(");
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        message.push_str(", ");
+                    }
+                    message.push_str(&self.format(*value, true)?);
+                }
+                message.push(')');
+                Ok(message)
+            }
+        }
     }
     fn format_depth(&self, v: Value, repr: bool, path: &mut Vec<Value>) -> Result<String> {
         if path.len() > 100 {
@@ -501,7 +675,56 @@ impl Heap {
         }
         Ok(match self.get(v)? {
             Object::Class(c) => format!("<class '{}'>", c.name),
+            Object::Exception {
+                class,
+                message,
+                arguments,
+                ..
+            } => {
+                if repr {
+                    let name = &self.class(*class)?.name;
+                    let mut result = format!("{name}(");
+                    for (index, value) in arguments.iter().enumerate() {
+                        if index != 0 {
+                            result.push_str(", ");
+                        }
+                        result.push_str(&self.format_depth(*value, true, path)?);
+                    }
+                    result.push(')');
+                    result
+                } else {
+                    message.clone()
+                }
+            }
+            Object::MappingProxy { class } => {
+                if path.contains(&v) {
+                    return Ok("mappingproxy({...})".into());
+                }
+                path.push(v);
+                let class = self.class(*class)?;
+                let entries = (0..class.dictionary_len())
+                    .filter_map(|index| class.dictionary_entry(index))
+                    .collect::<Vec<_>>();
+                let mut result = String::from("mappingproxy({");
+                for (index, (key, value)) in entries.into_iter().enumerate() {
+                    if index > 0 {
+                        result.push_str(", ");
+                    }
+                    match key {
+                        ClassDictionaryKey::String(name) => result.push_str(&quote(&name)),
+                        ClassDictionaryKey::Other(key) => {
+                            result.push_str(&self.format_depth(key, true, path)?)
+                        }
+                    }
+                    result.push_str(": ");
+                    result.push_str(&self.format_depth(value, true, path)?);
+                }
+                path.pop();
+                result.push_str("})");
+                result
+            }
             Object::Instance { class, .. } => format!("<{} instance>", self.class(*class)?.name),
+            Object::Traceback { .. } => "<traceback object>".into(),
             Object::BoundMethod { .. } => "<bound method>".into(),
             Object::StaticMethod(_) => "<staticmethod>".into(),
             Object::ClassMethod(_) => "<classmethod>".into(),
@@ -601,7 +824,8 @@ impl Heap {
             }
             Object::Iterator { .. }
             | Object::RangeIterator { .. }
-            | Object::DictIterator { .. } => "<iterator>".into(),
+            | Object::DictIterator { .. }
+            | Object::MappingProxyIterator { .. } => "<iterator>".into(),
         })
     }
     pub fn trace_all(&self, mut visit: impl FnMut(Value)) {
@@ -654,6 +878,23 @@ impl Object {
                 Self::Class(c) | Self::Namespace(c) => c.estimated_bytes(),
                 Self::Instance { attributes, .. } => attributes.estimated_bytes(),
                 Self::Str(s) => s.capacity(),
+                Self::Exception {
+                    message,
+                    arguments,
+                    attributes,
+                    ..
+                } => {
+                    message.capacity()
+                        + arguments.capacity() * std::mem::size_of::<Value>()
+                        + attributes.estimated_bytes()
+                }
+                Self::Traceback { entries } => {
+                    entries.capacity() * std::mem::size_of::<TracebackEntry>()
+                        + entries
+                            .iter()
+                            .map(|entry| entry.function.capacity())
+                            .sum::<usize>()
+                }
                 Self::Tuple(v) | Self::List(v) => v.capacity() * 8,
                 Self::Buffer(buffer) => buffer.estimated_bytes(),
                 Self::Foreign(foreign) => foreign.estimated_bytes(),

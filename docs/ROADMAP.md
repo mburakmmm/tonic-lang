@@ -36,9 +36,55 @@ sonra alınır.
 - [x] Callable instance `__call__` ve `len(instance)`/`__len__`; MRO lookup, dönüş doğrulama.
 - [x] Truthiness `__bool__` → `__len__` fallback; branch/not continuation ve operand koruma.
 - [ ] Metaclass ve class namespace customization.
+  - [x] Canlı, salt okunur class `__dict__` mappingproxy; index/len/iteration ve
+    GC izleme.
+  - [x] `type` bootstrap nesnesi, explicit metaclass seçimi, kalıtım ve en türemiş
+    uyumlu metaclass conflict çözümü.
+  - [x] Kalıtılan `__prepare__` çağrısı, dict namespace identity/live body erişimi
+    ve tamamlanırken class attribute materialization.
+  - [x] Standart metaclass `__new__`/`__init__` çağrı zinciri; gerçek namespace
+    kimliği, `type.__new__`, `__set_name__` sırası, iç içe oluşturma ve kesin GC roots.
+  - [x] String-key dict için üç argümanlı doğrudan `type(name, bases, namespace)`;
+    input mapping kopyası, implicit object base ve `__set_name__` devamları.
+  - [x] Programatik class dict içinde string olmayan key'lerin insertion order,
+    eşitlik tabanlı mappingproxy lookup/iteration ve precise GC ile korunması.
+  - [x] Dict dışı özel `__prepare__` namespace mapping'leri; VM `__getitem__`/
+    `__setitem__` dispatch'i, global fallback ve `type.__new__` için dict dönüşümü.
 - [ ] Type nesneleri ve kalan özel numeric/operator/attribute/iteration protokolleri.
+  - [x] Instance `__getitem__`/`__setitem__`/`__delitem__`; special-method MRO
+    lookup, static/class binding, suspending frame ve mutation-return discard.
+  - [x] `del list[index]` ve `del dict[key]`; negatif index, insertion-order
+    korunumu, iterator version invalidation ve doğru IndexError/KeyError.
+  - [x] Canonical builtin type nesneleri: None/int/bool/float/str/list/tuple/dict/
+    range/function class-of-value, `bool <: int`, tuple classinfo, canonical
+    callable `range` kimliği ve basic int/float/bool/str/list/tuple/dict
+    constructor yolları.
+  - [x] Mevcut builtin-iterable yüzeyi için constructor varyantları: `int` base,
+    `dict` mapping/iterable-pair/keyword ve list/tuple iterable materialization.
+  - [x] Instance ve metaclass `__getattr__` fallback'i; descriptor/normal lookup
+    sonrası suspending call, iki argümanlı `getattr` ve stress-GC roots.
+  - [x] `for` için user-defined `__iter__`/`__next__`; suspending çağrı zinciri,
+    yalnız iterator sınırından kaçan `StopIteration` tüketimi ve hata yayılımı.
+  - [ ] Builtin type alt sınıflarının native storage kurucuları, constructor/
+    unpack/star yollarında genel user iterable tüketimi, `__getattribute__`/
+    attribute mutation ve kalan numeric/comparison protokolleri.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [ ] Exception objects/handlers/traceback state, try/raise/finally/with.
+  - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/
+    StopIteration type nesneleri, managed exception instance'ı, user subclass,
+    bytecode v9 `RAISE`, uncaught traceback ve JIT-safe interpreter fallback.
+  - [x] Bytecode v10 exception region'ları, nested frame unwind, dynamic tuple/
+    bare handler matching, active exception stack, bare reraise, `except as`
+    cleanup ve `try/except/else`; JIT helper hatasının interpreter handler'ına
+    aktarılması.
+  - [x] `try/finally`; normal/hata/return/break/continue çıkışlarında exactly-once
+    çalışma, pending exception context, nested finalizer ve override semantiği.
+  - [x] Bytecode v11 senkron context manager (`with`); capture edilmiş `__exit__`,
+    nested unwind, suppression truthiness, metaclass manager ve bütün yapısal
+    çıkışlar.
+  - [x] Bytecode v12 `raise ... from ...`; explicit/implicit cause-context ve
+    suppression state'i, GC-traced managed traceback nesnesi, `__traceback__`
+    erişimi ve context-manager traceback aktarımı.
 - [ ] Generators, yield/from, coroutine/async, suspended frame roots.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
@@ -75,6 +121,15 @@ sonra alınır.
 - [x] Native float öncesi ölçüm: function-loop boxed helper ve üç-op direct leaf; allocation/helper/deopt sayaçlarıyla kabul bütçesi.
 - [x] Geniş JIT: exact-float profilli direct leaf'te unbox-once, Cranelift F64 SSA, box-on-return, atomik guard deopt ve IEEE/stress-GC testleri.
 - [x] Unboxed machine değerleri için PC-indexli deopt stack map, arbitrary-PC OSR initialization ve poll-deopt'ta tam interpreter-register rekonstrüksiyonu.
+- [x] Public JIT API'sinde bağımsız `CodeObject` yapısal doğrulaması; bozuk
+  register/constant/jump/profile girdisi codegen öncesinde tanımlı hataya döner.
+- [x] Yürütme başına 64 MiB varsayılan native code bütçesi; taşma/limit halinde
+  derlenmiş giriş bırakılır, sayaçlanır ve interpreter güvenle devam eder.
+- [x] Parser ve public JIT `CodeObject` girişi için libFuzzer hedefleri; her
+  hedefte ilk 10.000 coverage-guided mutation koşusu crash'siz tamamlandı.
+- [ ] Sanitizer kapısı ve x86-64/AArch64 debug-release platform matrisi. Yerel
+  macOS 26.6 nightly ASan runtime'ı Tonic `main`inden önce init kilidinde kalıyor;
+  coverage koşusu `--sanitizer none` ile doğrulandı.
 - [x] Native C function-table ABI/version/capability, exception status ve panic guard.
 - [x] Buffer descriptor, dtype/shape/stride, owner, mutability; fastmath.sum zero-copy örneği.
 - [x] Thread attach, persistent callback, reentry, shutdown/finalization.
@@ -96,7 +151,7 @@ sonra alınır.
   - [x] Arbitrary `ForeignPyObject` nesne grafiklerinde proxy kenarlarını bulan bounded
     iki-collector cycle detection, conservative fallback ve finalizer sırası.
 - [ ] Tonic HPy Universal host ve aHPy uyumluluk hattı.
-  - [ ] Exact HPy sürüm/ABI/context envanteri, fail-closed capability manifesti ve
+  - [x] Exact HPy sürüm/ABI/context envanteri, fail-closed capability manifesti ve
     izole `tonic-hpy` crate sınırı.
   - [ ] Platform/ABI/init-symbol doğrulamalı `.hpy0` shared-library loader; libpython
     bağımlılığı olmadan constant module ve scalar Fibonacci.
@@ -126,9 +181,9 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler iki paralel hattır: kalan özel protokoller ile
-metaclass/class namespace customization kapsamını genişletmek ve HPy H0 sürüm/ABI
-envanterini kurmak. HPy/aHPy kararının ayrıntıları
+Sıradaki çekirdek işler kalan iterator tüketicileri, managed traceback/chaining
+ve HPy H1 shared-library loader/handle yüzeyidir.
+HPy/aHPy kararının ayrıntıları
 [HPY_AHPY_STRATEGY.md](HPY_AHPY_STRATEGY.md) ve
 [ADR 0049](adr/0049-hpy-universal-host.md) içindedir. M5'in
 generational kabul koşulu nursery, remembered set, write barrier, minor/major

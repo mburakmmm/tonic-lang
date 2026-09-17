@@ -16,7 +16,7 @@ pub struct Stmt {
 pub enum StmtKind {
     Assign(Vec<Target>, Expr),
     AugAssign(Target, BinaryOp, Expr),
-    DeleteAttributes(Vec<(Expr, SymbolId)>),
+    DeleteTargets(Vec<Target>),
     Expr(Expr),
     Function {
         name: SymbolId,
@@ -32,9 +32,24 @@ pub enum StmtKind {
         label: String,
         decorators: Vec<Expr>,
         bases: Vec<Expr>,
+        metaclass: Option<(SymbolId, Expr)>,
         body: Vec<Stmt>,
     },
     Return(Option<Expr>),
+    Raise {
+        value: Option<Expr>,
+        cause: Option<Expr>,
+    },
+    Try {
+        body: Vec<Stmt>,
+        handlers: Vec<ExceptHandler>,
+        otherwise: Vec<Stmt>,
+        finalbody: Vec<Stmt>,
+    },
+    With {
+        items: Vec<WithItem>,
+        body: Vec<Stmt>,
+    },
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>, Vec<Stmt>),
     For(Target, Expr, Vec<Stmt>, Vec<Stmt>),
@@ -44,6 +59,18 @@ pub enum StmtKind {
     Break,
     Continue,
     Pass,
+}
+#[derive(Clone, Debug)]
+pub struct ExceptHandler {
+    pub type_: Option<Expr>,
+    pub name: Option<SymbolId>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+#[derive(Clone, Debug)]
+pub struct WithItem {
+    pub context: Expr,
+    pub target: Option<Target>,
 }
 #[derive(Clone, Debug)]
 pub enum Target {

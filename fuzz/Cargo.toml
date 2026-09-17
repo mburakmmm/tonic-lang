@@ -1,0 +1,28 @@
+[package]
+name = "tonic-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tonic-compiler = { path = "../crates/tonic-compiler" }
+tonic-core = { path = "../crates/tonic-core" }
+tonic-jit = { path = "../crates/tonic-jit" }
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jit_code_object"
+path = "fuzz_targets/jit_code_object.rs"
+test = false
+doc = false
+bench = false

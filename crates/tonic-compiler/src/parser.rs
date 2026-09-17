@@ -25,7 +25,9 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
             Tok::Newline => tokens = 0,
             Tok::Indent => indent += 1,
             Tok::Dedent => indent = indent.saturating_sub(1),
-            Tok::If | Tok::Elif | Tok::While | Tok::For | Tok::Def | Tok::Class => compounds += 1,
+            Tok::If | Tok::Elif | Tok::While | Tok::For | Tok::Def | Tok::Class | Tok::Try => {
+                compounds += 1
+            }
             _ => {}
         }
         tokens += 1;
@@ -128,20 +130,33 @@ impl Adapter {
                 let mut targets = Vec::new();
                 for target in d.targets {
                     let target_span = span(&target);
-                    let py::Expr::Attribute(attribute) = target else {
-                        return Err(unsupported(target_span, "non-attribute delete target"));
-                    };
-                    targets.push((
-                        self.expr(*attribute.value)?,
-                        self.symbol(attribute.attr.as_str())?,
-                    ));
+                    let target = self.target(target)?;
+                    if !matches!(target, Target::Attribute(..) | Target::Item(..)) {
+                        return Err(unsupported(target_span, "delete target"));
+                    }
+                    targets.push(target);
                 }
-                StmtKind::DeleteAttributes(targets)
+                StmtKind::DeleteTargets(targets)
             }
             py::Stmt::Expr(e) => StmtKind::Expr(self.expr(*e.value)?),
             py::Stmt::ClassDef(c) => {
-                if !c.keywords.is_empty() || !c.type_params.is_empty() {
-                    return Err(unsupported(s, "metaclass keywords/type parameters"));
+                if !c.type_params.is_empty() {
+                    return Err(unsupported(s, "class type parameters"));
+                }
+                let mut metaclass = None;
+                for keyword in c.keywords {
+                    if keyword.arg.as_ref().map(|name| name.as_str()) != Some("metaclass") {
+                        return Err(unsupported(
+                            s,
+                            "class keyword arguments other than metaclass",
+                        ));
+                    }
+                    if metaclass.is_some() {
+                        return Err(
+                            Diagnostic::new("SyntaxError", "duplicate metaclass keyword").at(s),
+                        );
+                    }
+                    metaclass = Some((self.symbol("metaclass")?, self.expr(keyword.value)?));
                 }
                 let label = c.name.to_string();
                 let name = self.symbol(&label)?;
@@ -159,6 +174,9 @@ impl Adapter {
                     .collect::<Result<_>>()?;
                 let previous_class = self.class_name.replace(label.clone());
                 let previous_depth = std::mem::replace(&mut self.depth, 0);
+                self.symbol("__module__")?;
+                self.symbol("__qualname__")?;
+                self.symbol("__doc__")?;
                 let mut body = self.block(c.body)?;
                 if let Some(Stmt {
                     kind:
@@ -183,6 +201,7 @@ impl Adapter {
                     label,
                     decorators,
                     bases,
+                    metaclass,
                     body,
                 }
             }
@@ -216,6 +235,57 @@ impl Adapter {
                     return Err(Diagnostic::new("SyntaxError", "return outside function").at(s));
                 }
                 StmtKind::Return(r.value.map(|v| self.expr(*v)).transpose()?)
+            }
+            py::Stmt::Raise(r) => StmtKind::Raise {
+                value: r.exc.map(|value| self.expr(*value)).transpose()?,
+                cause: r.cause.map(|value| self.expr(*value)).transpose()?,
+            },
+            py::Stmt::Try(t) => {
+                let handlers = t
+                    .handlers
+                    .into_iter()
+                    .map(|handler| {
+                        let py::ExceptHandler::ExceptHandler(handler) = handler;
+                        let handler_span = span(&handler);
+                        Ok(ExceptHandler {
+                            type_: handler.type_.map(|value| self.expr(*value)).transpose()?,
+                            name: handler
+                                .name
+                                .map(|name| self.symbol(name.as_str()))
+                                .transpose()?,
+                            body: self.block(handler.body)?,
+                            span: handler_span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                StmtKind::Try {
+                    body: self.block(t.body)?,
+                    handlers,
+                    otherwise: self.block(t.orelse)?,
+                    finalbody: self.block(t.finalbody)?,
+                }
+            }
+            py::Stmt::With(w) => {
+                if w.type_comment.is_some() {
+                    return Err(unsupported(s, "with type comment"));
+                }
+                let items = w
+                    .items
+                    .into_iter()
+                    .map(|item| {
+                        Ok(WithItem {
+                            context: self.expr(item.context_expr)?,
+                            target: item
+                                .optional_vars
+                                .map(|target| self.target(*target))
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                StmtKind::With {
+                    items,
+                    body: self.block(w.body)?,
+                }
             }
             py::Stmt::If(i) => StmtKind::If(
                 self.expr(*i.test)?,

@@ -1,4 +1,5 @@
 use crate::{
+    classes::ClassDictionaryKey,
     heap::{Heap, Object},
     value::Value,
 };
@@ -354,6 +355,7 @@ impl Heap {
             Object::Tuple(v) | Object::List(v) => BigInt::from(v.len()),
             Object::Buffer(buffer) => BigInt::from(buffer.len()),
             Object::Dict(dict) => BigInt::from(dict.entries.len()),
+            Object::MappingProxy { class } => BigInt::from(self.class(*class)?.dictionary_len()),
             Object::Range { start, stop, step } => BigInt::from(range_len(*start, *stop, *step)),
             _ => return Err(Diagnostic::new("TypeError", "object has no len()")),
         };
@@ -368,6 +370,31 @@ impl Heap {
                         .unwrap_or_else(|_| "missing key".into()),
                 )
             });
+        }
+        if let Ok(Object::MappingProxy { class }) = self.get(v) {
+            let class = *class;
+            if let Ok(Object::Str(name)) = self.get(index) {
+                if let Some(value) = self
+                    .class(class)?
+                    .attributes
+                    .iter()
+                    .find(|(attribute, _)| attribute == name)
+                    .map(|(_, value)| *value)
+                {
+                    return Ok(value);
+                }
+            }
+            let extras = self.class(class)?.extra_attributes.clone();
+            for (key, value) in extras {
+                if self.dict_keys_equal(key, index)? {
+                    return Ok(value);
+                }
+            }
+            return Err(Diagnostic::new(
+                "KeyError",
+                self.format(index, true)
+                    .unwrap_or_else(|_| "missing key".into()),
+            ));
         }
         if let Ok(Object::Slice(components)) = self.get(index) {
             return self.slice(v, *components);
@@ -457,12 +484,29 @@ impl Heap {
                 index: 0,
                 version: dict.version,
             },
+            Object::MappingProxy { class } => Object::MappingProxyIterator {
+                class: *class,
+                index: 0,
+                size: self.class(*class)?.dictionary_len(),
+            },
             Object::Iterator { .. }
             | Object::RangeIterator { .. }
-            | Object::DictIterator { .. } => return Ok(v),
+            | Object::DictIterator { .. }
+            | Object::MappingProxyIterator { .. } => return Ok(v),
             _ => return Err(Diagnostic::new("TypeError", "object is not iterable")),
         };
         self.alloc(object)
+    }
+    pub fn is_iterator(&self, value: Value) -> bool {
+        self.try_get(value).is_some_and(|object| {
+            matches!(
+                object,
+                Object::Iterator { .. }
+                    | Object::RangeIterator { .. }
+                    | Object::DictIterator { .. }
+                    | Object::MappingProxyIterator { .. }
+            )
+        })
     }
     pub fn next(&mut self, v: Value) -> Result<Option<Value>> {
         match self.get_mut(v)? {
@@ -488,6 +532,27 @@ impl Heap {
                     }
                 }
                 Ok(value)
+            }
+            Object::MappingProxyIterator { class, index, size } => {
+                let (class, index, size) = (*class, *index, *size);
+                let class_object = self.class(class)?;
+                if class_object.dictionary_len() != size {
+                    return Err(Diagnostic::new(
+                        "RuntimeError",
+                        "dictionary changed size during iteration",
+                    ));
+                }
+                let key = class_object.dictionary_entry(index).map(|(key, _)| key);
+                if let Some(key) = key {
+                    if let Object::MappingProxyIterator { index, .. } = self.get_mut(v)? {
+                        *index += 1;
+                    }
+                    return Ok(Some(match key {
+                        ClassDictionaryKey::String(name) => self.alloc(Object::Str(name))?,
+                        ClassDictionaryKey::Other(value) => value,
+                    }));
+                }
+                Ok(None)
             }
             Object::RangeIterator { next, stop, step } => {
                 if (*step > 0 && *next >= *stop) || (*step < 0 && *next <= *stop) {

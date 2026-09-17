@@ -7,6 +7,8 @@ use crate::{
     native::Context,
     value::Value,
 };
+use num_bigint::BigInt;
+use num_traits::FromPrimitive;
 use std::io::Write;
 use tonic_core::{
     ast::SymbolId,
@@ -58,7 +60,7 @@ pub(crate) enum Arguments<'a> {
     },
     Inline {
         receiver: Option<Value>,
-        positional: [Value; 2],
+        positional: [Value; 3],
         count: usize,
     },
     Expanded(ExpandedArgs),
@@ -103,7 +105,7 @@ impl Arguments<'_> {
             Self::Expanded(args) => args.receiver,
         }
     }
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         usize::from(self.receiver().is_some())
             + match self {
                 Self::Direct { count, .. } => *count,
@@ -111,7 +113,7 @@ impl Arguments<'_> {
                 Self::Expanded(args) => args.positional.len(),
             }
     }
-    fn positional(&self, registers: &[Value], i: usize) -> Value {
+    pub(super) fn positional(&self, registers: &[Value], i: usize) -> Value {
         if i == 0 {
             if let Some(receiver) = self.receiver() {
                 return receiver;
@@ -124,7 +126,7 @@ impl Arguments<'_> {
             Self::Expanded(args) => args.positional[i],
         }
     }
-    fn keyword_count(&self) -> usize {
+    pub(super) fn keyword_count(&self) -> usize {
         match self {
             Self::Direct { keywords, .. } => keywords.len(),
             Self::Inline { .. } => 0,
@@ -184,7 +186,7 @@ impl Vm {
                         receiver: Some(*receiver),
                     })
                 }
-                Object::Instance { .. } => {
+                object if object.instance_class().is_some() => {
                     let Some(call) = self.heap.special_method_call(callee, "__call__")? else {
                         return Err(Diagnostic::new("TypeError", "object is not callable"));
                     };
@@ -266,6 +268,9 @@ impl Vm {
             }
             Object::Builtin(builtin) => {
                 let builtin = *builtin;
+                if matches!(builtin, Builtin::TypeNew) {
+                    return self.invoke_type_new(p, destination, &args, output);
+                }
                 if matches!(builtin, Builtin::Len) && args.keyword_count() == 0 && args.count() == 1
                 {
                     let owner = args.positional(&self.registers, 0);
@@ -277,7 +282,7 @@ impl Vm {
                             destination,
                             Arguments::Inline {
                                 receiver: call.receiver,
-                                positional: [Value::UNBOUND; 2],
+                                positional: [Value::UNBOUND; 3],
                                 count: 0,
                             },
                             output,
@@ -404,6 +409,26 @@ impl Vm {
                                     }
                                 }
                             }
+                            if matches!(builtin, Builtin::GetAttr) && args.count() == 2 {
+                                match self.heap.attr(owner, &name) {
+                                    Ok(value) => {
+                                        self.registers[destination] = value;
+                                        return Ok(());
+                                    }
+                                    Err(error) if error.kind == "AttributeError" => {
+                                        if self.invoke_getattr_fallback(
+                                            p,
+                                            owner,
+                                            &name,
+                                            destination,
+                                            output,
+                                        )? {
+                                            return Ok(());
+                                        }
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
                         }
                         if matches!(builtin, Builtin::SetAttr) && args.count() == 3 {
                             if let Some(setter) = self.heap.property_setter(owner, &name)? {
@@ -439,7 +464,7 @@ impl Vm {
                                     destination,
                                     Arguments::Inline {
                                         receiver: setter.receiver,
-                                        positional: [owner, value],
+                                        positional: [owner, value, Value::UNBOUND],
                                         count: 2,
                                     },
                                     output,
@@ -501,6 +526,34 @@ impl Vm {
         }
         Ok(())
     }
+    pub(super) fn invoke_getattr_fallback(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        destination: usize,
+        output: &mut dyn Write,
+    ) -> Result<bool> {
+        let call = if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            self.heap.metaclass_method_call(owner, "__getattr__")?
+        } else {
+            self.heap.special_method_call(owner, "__getattr__")?
+        };
+        let Some(call) = call else { return Ok(false) };
+        let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [name, Value::UNBOUND, Value::UNBOUND],
+                count: 1,
+            },
+            output,
+        )?;
+        Ok(true)
+    }
     pub(super) fn invoke_truth(
         &mut self,
         p: &Program,
@@ -528,7 +581,7 @@ impl Vm {
             destination,
             Arguments::Inline {
                 receiver: call.receiver,
-                positional: [Value::UNBOUND; 2],
+                positional: [Value::UNBOUND; 3],
                 count: 0,
             },
             output,
@@ -560,6 +613,7 @@ impl Vm {
     fn apply_truth(&mut self, destination: usize, truth: bool, action: super::TruthAction) {
         match action {
             super::TruthAction::Not => self.registers[destination] = Value::bool(!truth),
+            super::TruthAction::Return => self.registers[destination] = Value::bool(truth),
             super::TruthAction::Jump {
                 when,
                 target,
@@ -601,6 +655,63 @@ impl Vm {
         args: Arguments<'_>,
         output: &mut dyn Write,
     ) -> Result<()> {
+        if class == self.type_class {
+            if args.keyword_count() == 0 && args.count() == 3 {
+                let name = args.positional(&self.registers, 0);
+                let bases = args.positional(&self.registers, 1);
+                let namespace = args.positional(&self.registers, 2);
+                return self.invoke_dynamic_type(p, destination, name, bases, namespace, output);
+            }
+            if args.keyword_count() != 0 || args.count() != 1 {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "type expects one or three positional arguments",
+                ));
+            }
+            let value = args.positional(&self.registers, 0);
+            self.registers[destination] = self.runtime_class(value)?;
+            return Ok(());
+        }
+        if let Some(kind) = self.builtin_type_kind(class) {
+            return self.invoke_builtin_type(p, class, destination, kind, args, output);
+        }
+        if self.instance_check(class, self.runtime_types.base_exception, true, 0)? {
+            let mut arguments = args.owned(p, &self.registers);
+            if arguments.receiver.take().is_some() {
+                return Err(Diagnostic::new(
+                    "BytecodeError",
+                    "bound exception class call",
+                ));
+            }
+            let message = self.heap.exception_message(&arguments.positional)?;
+            let instance = self.heap.alloc(Object::Exception {
+                class,
+                message,
+                arguments: arguments.positional.clone(),
+                attributes: Default::default(),
+                cause: None,
+                context: None,
+                suppress_context: false,
+                traceback: None,
+            })?;
+            if self.heap.class_lookup(class, "__init__")?.is_none() {
+                if !arguments.keywords.is_empty() {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "exception classes do not accept keyword arguments without __init__",
+                    ));
+                }
+                self.registers[destination] = instance;
+                return Ok(());
+            }
+            return self.finish_new(p, destination, class, instance, arguments, output);
+        }
+        if self.instance_check(class, self.type_class, true, 0)? {
+            return Err(Diagnostic::new(
+                "UnsupportedFeature",
+                "direct custom metaclass calls require metaclass __new__/__init__ support",
+            ));
+        }
         let mut arguments = args.owned(p, &self.registers);
         if arguments.receiver.take().is_some() {
             return Err(Diagnostic::new("BytecodeError", "bound class call"));
@@ -635,6 +746,238 @@ impl Vm {
         }
         Ok(())
     }
+    fn invoke_builtin_type(
+        &mut self,
+        p: &Program,
+        class: Value,
+        destination: usize,
+        kind: super::RuntimeTypeKind,
+        args: Arguments<'_>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if kind == super::RuntimeTypeKind::Range {
+            if args.keyword_count() != 0 || !(1..=3).contains(&args.count()) {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "range expects 1 to 3 positional arguments",
+                ));
+            }
+            let first = self.heap.to_i64(args.positional(&self.registers, 0))?;
+            let (start, stop) = if args.count() == 1 {
+                (0, first)
+            } else {
+                (
+                    first,
+                    self.heap.to_i64(args.positional(&self.registers, 1))?,
+                )
+            };
+            let step = if args.count() == 3 {
+                self.heap.to_i64(args.positional(&self.registers, 2))?
+            } else {
+                1
+            };
+            if step == 0 {
+                return Err(Diagnostic::new("ValueError", "range step must not be zero"));
+            }
+            self.registers[destination] = self.heap.alloc(Object::Range { start, stop, step })?;
+            return Ok(());
+        }
+        if kind == super::RuntimeTypeKind::Int {
+            if args.count() > 2 || args.keyword_count() > 1 {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "int expects at most two arguments",
+                ));
+            }
+            let mut base = (args.count() == 2)
+                .then(|| self.heap.to_i64(args.positional(&self.registers, 1)))
+                .transpose()?;
+            if args.keyword_count() == 1 {
+                let (name, value) = args.keyword(p, &self.registers, 0);
+                if name != "base" {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("int got unexpected keyword '{name}'"),
+                    ));
+                }
+                if base.is_some() {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "int got multiple values for base",
+                    ));
+                }
+                base = Some(self.heap.to_i64(value)?);
+            }
+            let argument = (args.count() >= 1).then(|| args.positional(&self.registers, 0));
+            if base.is_some() && argument.is_none() {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "int missing string argument when base is given",
+                ));
+            }
+            self.registers[destination] = match argument {
+                None => Value::int(0).expect("zero is immediate"),
+                Some(value) if base.is_none() && value.as_bool().is_some() => {
+                    Value::int(i64::from(value.as_bool().expect("checked bool")))
+                        .expect("bool integer is immediate")
+                }
+                Some(value) if base.is_none() && self.heap.is_integer(value) => value,
+                Some(value) => match self.heap.get(value)? {
+                    Object::Float(value) if base.is_none() => {
+                        self.heap
+                            .int(BigInt::from_f64(value.trunc()).ok_or_else(|| {
+                                Diagnostic::new("OverflowError", "cannot convert float to integer")
+                            })?)?
+                    }
+                    Object::Str(value) => {
+                        let base = validate_int_base(base.unwrap_or(10))?;
+                        self.heap
+                            .int(parse_int_literal(value, base).ok_or_else(|| {
+                                Diagnostic::new("ValueError", "invalid literal for int")
+                            })?)?
+                    }
+                    _ if base.is_some() => {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "int with explicit base requires a string",
+                        ))
+                    }
+                    _ => return Err(Diagnostic::new("TypeError", "cannot convert value to int")),
+                },
+            };
+            return Ok(());
+        }
+        if kind == super::RuntimeTypeKind::Dict {
+            if args.count() > 1 {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "dict expects at most one positional argument",
+                ));
+            }
+            let result = self.heap.alloc(Object::Dict(Dict::default()))?;
+            if args.count() == 1 {
+                let source = args.positional(&self.registers, 0);
+                if matches!(self.heap.get(source)?, Object::Dict(_)) {
+                    self.heap.dict_merge(result, source)?;
+                } else {
+                    for item in self.materialize_builtin_iterable(source)? {
+                        let pair = self.materialize_builtin_iterable(item)?;
+                        if pair.len() != 2 {
+                            return Err(Diagnostic::new(
+                                "ValueError",
+                                "dictionary update sequence element has length other than 2",
+                            ));
+                        }
+                        self.heap.dict_set(result, pair[0], pair[1])?;
+                    }
+                }
+            }
+            for index in 0..args.keyword_count() {
+                let (name, value) = args.keyword(p, &self.registers, index);
+                let key = self.heap.alloc(Object::Str(name.to_owned()))?;
+                self.heap.dict_set(result, key, value)?;
+            }
+            self.registers[destination] = result;
+            return Ok(());
+        }
+        if kind == super::RuntimeTypeKind::Exception {
+            if args.keyword_count() != 0 {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "exception types do not accept keyword arguments",
+                ));
+            }
+            let arguments = (0..args.count())
+                .map(|index| args.positional(&self.registers, index))
+                .collect::<Vec<_>>();
+            let message = self.heap.exception_message(&arguments)?;
+            self.registers[destination] = self.heap.alloc(Object::Exception {
+                class,
+                message,
+                arguments,
+                attributes: Default::default(),
+                cause: None,
+                context: None,
+                suppress_context: false,
+                traceback: None,
+            })?;
+            return Ok(());
+        }
+        if args.keyword_count() != 0 || args.count() > 1 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "builtin type accepts at most one positional argument",
+            ));
+        }
+        let argument = (args.count() == 1).then(|| args.positional(&self.registers, 0));
+        use super::RuntimeTypeKind;
+        self.registers[destination] = match kind {
+            RuntimeTypeKind::Bool => {
+                let Some(value) = argument else {
+                    return {
+                        self.registers[destination] = Value::bool(false);
+                        Ok(())
+                    };
+                };
+                return self.invoke_truth(
+                    p,
+                    value,
+                    destination,
+                    super::TruthAction::Return,
+                    output,
+                );
+            }
+            RuntimeTypeKind::Int => unreachable!("int handled before unary constructors"),
+            RuntimeTypeKind::Float => {
+                let value = match argument {
+                    None => 0.0,
+                    Some(value) => match self.heap.get(value) {
+                        Ok(Object::Str(value)) => value.parse::<f64>().map_err(|_| {
+                            Diagnostic::new("ValueError", "could not convert string to float")
+                        })?,
+                        _ => self.heap.float(value)?,
+                    },
+                };
+                self.heap.alloc(Object::Float(value))?
+            }
+            RuntimeTypeKind::Str => {
+                let value = argument
+                    .map(|value| self.heap.format(value, false))
+                    .transpose()?
+                    .unwrap_or_default();
+                self.heap.alloc(Object::Str(value))?
+            }
+            RuntimeTypeKind::List | RuntimeTypeKind::Tuple => {
+                let values = match argument {
+                    None => Vec::new(),
+                    Some(value) => self.materialize_builtin_iterable(value)?,
+                };
+                self.heap.alloc(if kind == RuntimeTypeKind::List {
+                    Object::List(values)
+                } else {
+                    Object::Tuple(values)
+                })?
+            }
+            RuntimeTypeKind::Dict => unreachable!("dict handled before unary constructors"),
+            RuntimeTypeKind::Range => unreachable!("range handled before unary constructors"),
+            RuntimeTypeKind::Exception => unreachable!("exceptions handled before unary types"),
+        };
+        Ok(())
+    }
+    fn materialize_builtin_iterable(&mut self, value: Value) -> Result<Vec<Value>> {
+        let iterator = self.heap.iterator(value).map_err(|error| {
+            if error.kind == "TypeError" {
+                Diagnostic::new("TypeError", "value is not iterable")
+            } else {
+                error
+            }
+        })?;
+        let mut values = Vec::new();
+        while let Some(value) = self.heap.next(iterator)? {
+            values.push(value);
+        }
+        Ok(values)
+    }
     pub(super) fn finish_new(
         &mut self,
         p: &Program,
@@ -644,7 +987,7 @@ impl Vm {
         arguments: ExpandedArgs,
         output: &mut dyn Write,
     ) -> Result<()> {
-        if !self.heap.instance_check(instance, class, false, 0)? {
+        if !self.instance_check(instance, class, false, 0)? {
             self.registers[destination] = instance;
             return Ok(());
         }
@@ -804,7 +1147,10 @@ impl Vm {
             base,
             destination,
             cell_base,
+            argument_base: self.arguments.len(),
+            pending_class_base: self.pending_classes.len(),
             callable,
+            exception_stack: Vec::new(),
             namespace: None,
             action: super::ReturnAction::Value,
             jit_attempted: matches!(self.jit_cache.get(code), Some(super::JitEntry::Unsupported)),
@@ -829,6 +1175,7 @@ impl Vm {
         }
         let count = args.count();
         match builtin {
+            Builtin::TypeNew => unreachable!("type.__new__ has a suspending call path"),
             Builtin::ObjectNew => {
                 if count != 1 {
                     return Err(Diagnostic::new(
@@ -925,7 +1272,7 @@ impl Vm {
                         "type check expects two arguments",
                     ));
                 }
-                let result = self.heap.instance_check(
+                let result = self.instance_check(
                     args.positional(&self.registers, 0),
                     args.positional(&self.registers, 1),
                     matches!(builtin, Builtin::IsSubclass),
@@ -1016,29 +1363,6 @@ impl Vm {
                 }
                 output.write_all(end.as_bytes()).map_err(io_error)?;
                 Ok(Value::NONE)
-            }
-            Builtin::Range => {
-                if !(1..=3).contains(&count) {
-                    return Err(Diagnostic::new(
-                        "TypeError",
-                        "range expects 1 to 3 arguments",
-                    ));
-                }
-                let x = self.heap.to_i64(args.positional(&self.registers, 0))?;
-                let (start, stop) = if count == 1 {
-                    (0, x)
-                } else {
-                    (x, self.heap.to_i64(args.positional(&self.registers, 1))?)
-                };
-                let step = if count == 3 {
-                    self.heap.to_i64(args.positional(&self.registers, 2))?
-                } else {
-                    1
-                };
-                if step == 0 {
-                    return Err(Diagnostic::new("ValueError", "range step must not be zero"));
-                }
-                self.heap.alloc(Object::Range { start, stop, step })
             }
             Builtin::Len | Builtin::Abs => {
                 if count != 1 {
@@ -1152,4 +1476,66 @@ impl Vm {
 }
 fn io_error(error: std::io::Error) -> Diagnostic {
     Diagnostic::new("OSError", error.to_string())
+}
+
+fn validate_int_base(base: i64) -> Result<u32> {
+    if base == 0 || (2..=36).contains(&base) {
+        Ok(base as u32)
+    } else {
+        Err(Diagnostic::new(
+            "ValueError",
+            "int base must be 0 or between 2 and 36",
+        ))
+    }
+}
+
+fn parse_int_literal(text: &str, requested_base: u32) -> Option<BigInt> {
+    let text = text.trim();
+    let (negative, mut digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let prefixed = digits.len() >= 2 && digits.as_bytes()[0] == b'0';
+    let prefix_base = if prefixed {
+        match digits.as_bytes()[1] {
+            b'x' | b'X' => 16,
+            b'o' | b'O' => 8,
+            b'b' | b'B' => 2,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let mut base = requested_base;
+    if prefix_base != 0 && (base == 0 || base == prefix_base) {
+        base = prefix_base;
+        digits = &digits[2..];
+        if let Some(rest) = digits.strip_prefix('_') {
+            digits = rest;
+        }
+    } else if base == 0 {
+        base = 10;
+    }
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return None;
+    }
+    let normalized = digits.replace('_', "");
+    if requested_base == 0
+        && prefix_base == 0
+        && normalized.len() > 1
+        && normalized.starts_with('0')
+        && normalized.bytes().any(|byte| byte != b'0')
+    {
+        return None;
+    }
+    let value = BigInt::parse_bytes(normalized.as_bytes(), base)?;
+    Some(if negative { -value } else { value })
 }

@@ -19,6 +19,148 @@ fn fib() {
     );
 }
 #[test]
+fn exception_objects_and_explicit_raise() {
+    assert_eq!(
+        output("print(type(ValueError('x')).__name__,isinstance(ValueError(),Exception),issubclass(TypeError,BaseException),str(RuntimeError('bad')))"),
+        "ValueError True True bad\n"
+    );
+    for (source, kind, message) in [
+        ("raise ValueError('boom')", "ValueError", "boom"),
+        ("raise 1", "TypeError", "exceptions must derive"),
+        ("raise", "RuntimeError", "no active exception"),
+        (
+            "class MyError(Exception):\n    pass\nraise MyError()",
+            "MyError",
+            "",
+        ),
+    ] {
+        let error = error(source);
+        assert_eq!(error.kind, kind);
+        assert!(error.message.contains(message));
+        assert!(error.span.is_some());
+        assert_eq!(error.trace[0].0, "<module>");
+    }
+    let program = compile(
+        "def maybe(flag):\n    if flag:\n        raise ValueError('jit-safe')\n    return 1\ni=0\nwhile i<20:\n    maybe(False)\n    i+=1\nmaybe(True)",
+        "raise-jit",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let error = vm.run(&program, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.kind, "ValueError");
+    assert!(vm.stats.jit_compile_attempts >= 1);
+    assert_eq!(vm.stats.jit_compiled, 0);
+
+    let program = compile(
+        "def divide(a,b):\n    return a/b\ni=0\nwhile i<20:\n    divide(20,2)\n    i+=1\ntry:\n    divide(1,0)\nexcept ZeroDivisionError as error:\n    print(type(error).__name__)",
+        "jit-exception-unwind",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"ZeroDivisionError\n");
+    assert!(vm.stats.jit_compiled >= 1);
+    assert!(vm.stats.jit_runtime_errors >= 1);
+}
+#[test]
+fn try_except_matches_unwinds_reraises_and_clears_binding() {
+    assert_eq!(
+        output(
+            "def fail(kind):\n    scratch=0.0\n    for i in range(20):\n        scratch+=0.5\n    if kind==0:\n        int('bad')\n    if kind==1:\n        return 1//0\n    raise KeyError('key')\ntry:\n    fail(0)\nexcept TypeError:\n    print('wrong')\nexcept (ValueError, LookupError) as error:\n    print('caught',type(error).__name__,isinstance(error,Exception))\ntry:\n    print(error)\nexcept NameError:\n    print('cleared')\ntry:\n    try:\n        fail(1)\n    except ArithmeticError:\n        raise\nexcept ZeroDivisionError:\n    print('reraised')\ntry:\n    print('body')\nexcept Exception:\n    print('bad')\nelse:\n    print('else')\ntry:\n    fail(2)\nexcept:\n    print('bare')"
+        ),
+        "caught ValueError True\ncleared\nreraised\nbody\nelse\nbare\n"
+    );
+    let error = error("try:\n    int('bad')\nexcept 1:\n    pass");
+    assert_eq!(error.kind, "TypeError");
+
+    let program = compile(
+        "def guarded(value):\n    try:\n        if value:\n            raise ValueError('guarded')\n        return 1\n    except ValueError:\n        return 2\ni=0\nwhile i<20:\n    guarded(False)\n    i+=1\nprint(guarded(True))",
+        "try-jit",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"2\n");
+    assert!(vm.stats.jit_compile_attempts >= 1);
+    assert_eq!(vm.stats.jit_compiled, 0);
+}
+
+#[test]
+fn exception_context_survives_nesting_and_cleans_every_exit_path() {
+    assert_eq!(
+        output(
+            "try:\n    raise ValueError('outer')\nexcept ValueError as outer:\n    try:\n        raise TypeError('inner')\n    except TypeError as inner:\n        pass\n    try:\n        print(inner)\n    except NameError:\n        print('inner-cleared')\n    try:\n        raise\n    except ValueError:\n        print('outer-restored')\ntry:\n    print(outer)\nexcept NameError:\n    print('outer-cleared')\ntry:\n    try:\n        raise ValueError('first')\n    except ValueError as failed:\n        raise TypeError('second')\nexcept TypeError:\n    print('handler-error')\ntry:\n    print(failed)\nexcept NameError:\n    print('failed-cleared')\nfor mode in range(2):\n    try:\n        raise LookupError('loop')\n    except LookupError as loop_error:\n        if mode==0:\n            continue\n        break\ntry:\n    print(loop_error)\nexcept NameError:\n    print('loop-cleared')\ndef leave():\n    try:\n        raise ValueError('return')\n    except ValueError as returned:\n        return 7\nprint(leave())\ntry:\n    raise\nexcept RuntimeError:\n    print('no-active')"
+        ),
+        "inner-cleared\nouter-restored\nouter-cleared\nhandler-error\nfailed-cleared\nloop-cleared\n7\nno-active\n"
+    );
+}
+
+#[test]
+fn exception_chaining_exposes_cause_context_and_suppression() {
+    assert_eq!(
+        output(
+            "class PlainError(Exception):\n    pass\nprint(PlainError(1,'two').args,str(PlainError(1,'two')))\nclass MyError(Exception):\n    def __init__(self,message):\n        self.label=message\ntry:\n    try:\n        raise KeyError('context')\n    except KeyError:\n        raise MyError('outer') from ValueError('cause')\nexcept MyError as error:\n    print(error.label,error.args,error.__traceback__==None)\n    print(type(error.__cause__).__name__,type(error.__context__).__name__,error.__suppress_context__)\ntry:\n    try:\n        raise ValueError('implicit')\n    except ValueError:\n        raise TypeError('replacement')\nexcept TypeError as error:\n    print(error.__cause__,type(error.__context__).__name__,error.__suppress_context__)\ntry:\n    try:\n        raise LookupError('hidden')\n    except LookupError:\n        raise RuntimeError('clean') from None\nexcept RuntimeError as error:\n    print(error.__cause__,type(error.__context__).__name__,error.__suppress_context__)\nclass Manager:\n    def __enter__(self):\n        return self\n    def __exit__(self,kind,value,traceback):\n        print(type(value).__name__,traceback==None)\ntry:\n    with Manager():\n        raise ValueError('managed')\nexcept ValueError:\n    pass"
+        ),
+        "(1, 'two') (1, 'two')\nouter ('outer',) False\nValueError KeyError True\nNone ValueError False\nNone LookupError True\nValueError False\n"
+    );
+    let error = error("raise TypeError('outer') from 1");
+    assert_eq!(error.kind, "TypeError");
+    assert!(error.message.contains("exception causes must derive"));
+}
+
+#[test]
+fn finally_runs_once_for_normal_exception_and_structural_exits() {
+    assert_eq!(
+        output(
+            "try:\n    print('body')\nfinally:\n    print('normal-final')\ntry:\n    try:\n        raise ValueError('boom')\n    finally:\n        print('exception-final')\nexcept ValueError:\n    print('exception-kept')\ntry:\n    raise ValueError('handled')\nexcept ValueError:\n    print('handled')\nelse:\n    print('bad-else')\nfinally:\n    print('handler-final')\ndef leave(mode):\n    try:\n        if mode==0:\n            return 10\n        return 20\n    finally:\n        print('return-final',mode)\nprint(leave(0),leave(1))\ndef override():\n    try:\n        return 1\n    finally:\n        return 2\nprint('override',override())\nfor i in range(3):\n    try:\n        if i==0:\n            continue\n        break\n    finally:\n        print('loop-final',i)\ntry:\n    def fail_return():\n        try:\n            return 1\n        finally:\n            print('raising-final')\n            raise TypeError('override')\n    fail_return()\nexcept TypeError:\n    print('return-overridden')\ntry:\n    try:\n        raise ValueError('active')\n    finally:\n        try:\n            raise\n        except ValueError:\n            print('active-in-final')\nexcept ValueError:\n    print('reraised-after-final')\ntry:\n    try:\n        raise ValueError('old')\n    finally:\n        raise TypeError('new')\nexcept TypeError:\n    print('exception-overridden')"
+        ),
+        "body\nnormal-final\nexception-final\nexception-kept\nhandled\nhandler-final\nreturn-final 0\nreturn-final 1\n10 20\noverride 2\nloop-final 0\nloop-final 1\nraising-final\nreturn-overridden\nactive-in-final\nreraised-after-final\nexception-overridden\n"
+    );
+}
+
+#[test]
+fn with_calls_captured_exit_in_nested_unwind_order() {
+    assert_eq!(
+        output(
+            "class Manager:\n    def __init__(self,name,suppress=False):\n        self.name=name\n        self.suppress=suppress\n    def __enter__(self):\n        print('enter',self.name)\n        return self.name+'-value'\n    def __exit__(self,kind,value,traceback):\n        print('exit',self.name,kind.__name__ if kind else 'None')\n        return self.suppress\nwith Manager('normal') as value:\n    print(value)\nwith Manager('outer') as outer, Manager('inner') as inner:\n    print(outer,inner)\ntry:\n    with Manager('propagate'):\n        raise ValueError('boom')\nexcept ValueError:\n    print('propagated')\nwith Manager('suppress',True):\n    raise LookupError('hidden')\nprint('suppressed')\ndef leave():\n    with Manager('return'):\n        return 7\nprint(leave())\nfor i in range(2):\n    with Manager('loop'+str(i)):\n        if i==0:\n            continue\n        break\nclass Truth:\n    def __bool__(self):\n        print('truth')\n        return True\nclass TruthManager(Manager):\n    def __exit__(self,kind,value,traceback):\n        print('truth-exit',kind.__name__)\n        return Truth()\nwith TruthManager('truth-manager'):\n    raise TypeError('hidden')\ndef old_exit(self,kind,value,traceback):\n    print('captured-old')\nclass Mutating:\n    __exit__=old_exit\n    def __enter__(self):\n        Mutating.__exit__=lambda self,kind,value,traceback: print('new')\n        return self\nwith Mutating():\n    pass\nclass TargetManager(Manager):\n    def __enter__(self):\n        return [1]\ntry:\n    with TargetManager('target') as (a,b):\n        pass\nexcept ValueError:\n    print('target-error')\nclass Meta(type):\n    def __enter__(cls):\n        print('meta-enter')\n        return cls.__name__\n    def __exit__(cls,kind,value,traceback):\n        print('meta-exit',kind.__name__ if kind else 'None')\nclass ManagedClass(metaclass=Meta):\n    pass\nwith ManagedClass as class_name:\n    print(class_name)\nclass Reraising(Manager):\n    def __exit__(self,kind,value,traceback):\n        print('bare-exit')\n        raise\ntry:\n    with Reraising('reraising'):\n        raise KeyError('same')\nexcept KeyError:\n    print('bare-reraised')\nclass RaisingExit(Manager):\n    def __exit__(self,kind,value,traceback):\n        print('raising-exit',kind.__name__ if kind else 'None')\n        raise TypeError('new')\ntry:\n    with Manager('exit-outer'):\n        with RaisingExit('exit-inner'):\n            pass\nexcept TypeError:\n    print('exit-replaced')"
+        ),
+        "enter normal\nnormal-value\nexit normal None\nenter outer\nenter inner\nouter-value inner-value\nexit inner None\nexit outer None\nenter propagate\nexit propagate ValueError\npropagated\nenter suppress\nexit suppress LookupError\nsuppressed\nenter return\nexit return None\n7\nenter loop0\nexit loop0 None\nenter loop1\nexit loop1 None\nenter truth-manager\ntruth-exit TypeError\ntruth\ncaptured-old\nexit target ValueError\ntarget-error\nmeta-enter\nManagedClass\nmeta-exit None\nenter reraising\nbare-exit\nbare-reraised\nenter exit-outer\nenter exit-inner\nraising-exit None\nexit exit-outer TypeError\nexit-replaced\n"
+    );
+    for source in [
+        "class MissingEnter:\n    def __exit__(self,a,b,c):\n        pass\nwith MissingEnter():\n    pass",
+        "class MissingExit:\n    def __enter__(self):\n        pass\nwith MissingExit():\n    pass",
+    ] {
+        assert_eq!(error(source).kind, "TypeError");
+    }
+}
+
+#[test]
+fn custom_iteration_consumes_only_escaping_stop_iteration() {
+    assert_eq!(
+        output(
+            "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        scratch=0.0\n        for i in range(20):\n            scratch+=0.5\n        if self.i>=self.n:\n            self.stop()\n        value=self.i\n        self.i+=1\n        return value\nfor value in Counter(4):\n    print(value)\nelse:\n    print('done')\nclass Recover:\n    def __init__(self):\n        self.first=True\n    def __iter__(self):\n        return self\n    def __next__(self):\n        if self.first:\n            self.first=False\n            try:\n                raise StopIteration\n            except StopIteration:\n                return 9\n        raise StopIteration\nfor value in Recover():\n    print('recovered',value)\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\ntry:\n    for value in Failing():\n        pass\nexcept ValueError as error:\n    print(type(error).__name__)"
+        ),
+        "0\n1\n2\n3\ndone\nrecovered 9\nValueError\n"
+    );
+    for source in [
+        "class Bad:\n    def __iter__(self):\n        return 1\nfor value in Bad():\n    pass",
+        "class Bad:\n    def __iter__(self):\n        return self\nfor value in Bad():\n    pass",
+    ] {
+        assert_eq!(error(source).kind, "TypeError");
+    }
+}
+#[test]
 fn native_module() {
     assert_eq!(
         output(include_str!("../../../examples/fastmath.tonic")),
@@ -828,6 +970,25 @@ fn tiny_leaf_function_stays_in_profitable_adaptive_tier() {
     assert_eq!(vm.stats.jit_unprofitable, 1);
     assert_eq!(vm.stats.jit_fallbacks, 0);
     assert_eq!(vm.stats.call_quickened, 1);
+}
+
+#[test]
+fn jit_code_budget_rejects_native_code_and_preserves_interpreter_execution() {
+    let source = "def add(a,b):\n    x=a+b\n    return x\ni=0\ns=0\nwhile i<20:\n    s=add(s,1)\n    i+=1\nprint(s)";
+    let program = compile(source, "jit-code-budget").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    vm.jit_max_code_bytes = 0;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"20\n");
+    assert_eq!(vm.stats.jit_compile_attempts, 1);
+    assert_eq!(vm.stats.jit_compiled, 0);
+    assert_eq!(vm.stats.jit_code_budget_rejections, 1);
+    assert_eq!(vm.stats.jit_fallbacks, 1);
+    assert_eq!(vm.stats.jit_calls, 0);
 }
 
 #[test]

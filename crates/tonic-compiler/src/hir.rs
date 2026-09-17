@@ -268,13 +268,49 @@ impl<'a> Scan<'a> {
                     self.target(target);
                     self.expr(e);
                 }
-                StmtKind::DeleteAttributes(targets) => {
-                    for (owner, _) in targets {
-                        self.expr(owner);
+                StmtKind::DeleteTargets(targets) => {
+                    for target in targets {
+                        self.target(target);
                     }
                 }
                 StmtKind::Expr(e) => self.expr(e),
                 StmtKind::Return(Some(e)) => self.expr(e),
+                StmtKind::Raise { value, cause } => {
+                    if let Some(value) = value {
+                        self.expr(value);
+                    }
+                    if let Some(cause) = cause {
+                        self.expr(cause);
+                    }
+                }
+                StmtKind::Try {
+                    body,
+                    handlers,
+                    otherwise,
+                    finalbody,
+                } => {
+                    self.block(body)?;
+                    for handler in handlers {
+                        if let Some(type_) = &handler.type_ {
+                            self.expr(type_);
+                        }
+                        if let Some(name) = handler.name {
+                            self.bind(name);
+                        }
+                        self.block(&handler.body)?;
+                    }
+                    self.block(otherwise)?;
+                    self.block(finalbody)?;
+                }
+                StmtKind::With { items, body } => {
+                    for item in items {
+                        self.expr(&item.context);
+                        if let Some(target) = &item.target {
+                            self.target(target);
+                        }
+                    }
+                    self.block(body)?;
+                }
                 StmtKind::If(e, a, b) | StmtKind::While(e, a, b) => {
                     self.expr(e);
                     self.block(a)?;
@@ -308,6 +344,7 @@ impl<'a> Scan<'a> {
                     class_cell,
                     decorators,
                     bases,
+                    metaclass,
                     body,
                     ..
                 } => {
@@ -316,6 +353,9 @@ impl<'a> Scan<'a> {
                     }
                     for base in bases {
                         self.expr(base);
+                    }
+                    if let Some((_, metaclass)) = metaclass {
+                        self.expr(metaclass);
                     }
                     self.bind(*name);
                     self.children
@@ -380,6 +420,29 @@ impl<'a> Scan<'a> {
                         Self::declaration_span(a, name).or_else(|| Self::declaration_span(b, name))
                     {
                         return Some(s);
+                    }
+                }
+                StmtKind::Try {
+                    body,
+                    handlers,
+                    otherwise,
+                    finalbody,
+                } => {
+                    if let Some(span) = Self::declaration_span(body, name)
+                        .or_else(|| Self::declaration_span(otherwise, name))
+                        .or_else(|| Self::declaration_span(finalbody, name))
+                        .or_else(|| {
+                            handlers
+                                .iter()
+                                .find_map(|handler| Self::declaration_span(&handler.body, name))
+                        })
+                    {
+                        return Some(span);
+                    }
+                }
+                StmtKind::With { body, .. } => {
+                    if let Some(span) = Self::declaration_span(body, name) {
+                        return Some(span);
                     }
                 }
                 _ => {}

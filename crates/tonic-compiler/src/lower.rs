@@ -75,6 +75,7 @@ fn build(
             .collect(),
         free_vars: scope.free.clone(),
         functions: Vec::new(),
+        exception_regions: Vec::new(),
     };
     // Reserve identity before recursively compiling functions.
     program.code.push(code.clone());
@@ -85,7 +86,32 @@ fn build(
         next,
         high: next,
         loops: Vec::new(),
+        cleanups: Vec::new(),
+        finally_bypasses: Vec::new(),
+        with_bypasses: Vec::new(),
     };
+    if lower.scope.class_body {
+        let span = body
+            .first()
+            .map(|statement| statement.span)
+            .unwrap_or_default();
+        let module = lower.constant(Constant::Str("__main__".into()), span)?;
+        let qualname = lower.constant(Constant::Str(lower.code.name.clone()), span)?;
+        let doc = lower.constant(Constant::None, span)?;
+        for (name, value) in [
+            ("__module__", module),
+            ("__qualname__", qualname),
+            ("__doc__", doc),
+        ] {
+            let symbol = lower
+                .program
+                .symbols
+                .iter()
+                .position(|candidate| candidate == name)
+                .ok_or_else(|| Diagnostic::new("BytecodeError", "missing class symbol"))?;
+            lower.emit(Op::StoreName, value, index(symbol)?, 0, span)?;
+        }
+    }
     lower.block(body)?;
     let r = lower.constant(Constant::None, Span::default())?;
     lower.emit(Op::Return, r, 0, 0, Span::default())?;
@@ -96,6 +122,32 @@ fn build(
 struct Loop {
     start: u16,
     breaks: Vec<usize>,
+    cleanup_depth: usize,
+}
+#[derive(Clone, Copy)]
+struct ExceptionCleanup {
+    name: Option<SymbolId>,
+    span: Span,
+}
+#[derive(Clone)]
+enum ControlCleanup {
+    Exception(ExceptionCleanup),
+    Finally {
+        id: usize,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    With {
+        id: usize,
+        token: u16,
+        span: Span,
+    },
+}
+struct FinallyBypass {
+    start: u16,
+    end: u16,
+    exception: u16,
+    span: Span,
 }
 struct Lower<'a> {
     program: &'a mut Program,
@@ -104,6 +156,9 @@ struct Lower<'a> {
     next: u16,
     high: u16,
     loops: Vec<Loop>,
+    cleanups: Vec<ControlCleanup>,
+    finally_bypasses: Vec<Vec<FinallyBypass>>,
+    with_bypasses: Vec<Vec<FinallyBypass>>,
 }
 impl Lower<'_> {
     fn apply_decorators(&mut self, mut value: u16, decorators: &[(u16, Span)]) -> Result<u16> {
@@ -216,6 +271,220 @@ impl Lower<'_> {
         }
         Ok(())
     }
+    fn clear(&mut self, n: SymbolId, s: Span) -> Result<()> {
+        if self.scope.globals.contains(&n) {
+            self.emit(Op::ClearBinding, 1, n.0, 0, s)?;
+        } else if self.scope.class_body && !self.scope.nonlocals.contains(&n) {
+            self.emit(Op::ClearBinding, 3, n.0, 0, s)?;
+        } else if let Some(cell) = self.scope.cell(n) {
+            self.emit(Op::ClearBinding, 2, cell, 0, s)?;
+        } else if let Some(local) = self.scope.local(n) {
+            self.emit(Op::ClearBinding, 0, local, 0, s)?;
+        } else {
+            self.emit(Op::ClearBinding, 1, n.0, 0, s)?;
+        }
+        Ok(())
+    }
+    fn emit_exception_cleanup(&mut self, cleanup: ExceptionCleanup) -> Result<()> {
+        if let Some(name) = cleanup.name {
+            self.clear(name, cleanup.span)?;
+        }
+        self.emit(Op::ClearException, 0, 0, 0, cleanup.span)?;
+        Ok(())
+    }
+    fn emit_cleanups_from(&mut self, depth: usize) -> Result<()> {
+        let saved = self.cleanups.clone();
+        for index in (depth..saved.len()).rev() {
+            self.cleanups.truncate(index);
+            match saved[index].clone() {
+                ControlCleanup::Exception(cleanup) => {
+                    self.emit_exception_cleanup(cleanup)?;
+                }
+                ControlCleanup::Finally { id, body, span } => {
+                    let exception = self.alloc(1)?;
+                    let start = self.pc()?;
+                    self.block(&body)?;
+                    let end = self.pc()?;
+                    if start != end {
+                        self.finally_bypasses[id].push(FinallyBypass {
+                            start,
+                            end,
+                            exception,
+                            span,
+                        });
+                    }
+                }
+                ControlCleanup::With { id, token, span } => {
+                    let failure = self.alloc(1)?;
+                    let result = self.alloc(1)?;
+                    let none = self.constant(Constant::None, span)?;
+                    let start = self.pc()?;
+                    self.emit(Op::ContextExit, result, token, none, span)?;
+                    let end = self.pc()?;
+                    self.with_bypasses[id].push(FinallyBypass {
+                        start,
+                        end,
+                        exception: failure,
+                        span,
+                    });
+                }
+            }
+        }
+        self.cleanups = saved;
+        Ok(())
+    }
+    fn lower_try_except(
+        &mut self,
+        body: &[Stmt],
+        handlers: &[ExceptHandler],
+        otherwise: &[Stmt],
+        span: Span,
+    ) -> Result<()> {
+        let exception = self.alloc(1)?;
+        let start = self.pc()?;
+        self.block(body)?;
+        let end = self.pc()?;
+        self.block(otherwise)?;
+        let skip_handlers = self.emit(Op::Jump, 0, 0, 0, span)?;
+        let target = self.pc()?;
+        if start != end {
+            self.code.exception_regions.push(ExceptionRegion {
+                start,
+                end,
+                target,
+                exception,
+            });
+        }
+        let mut completed = Vec::new();
+        for handler in handlers {
+            let mismatch = if let Some(type_) = &handler.type_ {
+                let class = self.expr(type_)?;
+                let matched = self.alloc(1)?;
+                self.emit(Op::ExceptionMatch, matched, exception, class, handler.span)?;
+                Some(self.emit(Op::JumpFalse, matched, 0, 0, handler.span)?)
+            } else {
+                None
+            };
+            self.emit(Op::PushException, exception, 0, 0, handler.span)?;
+            if let Some(name) = handler.name {
+                self.store(name, exception, handler.span)?;
+            }
+            let cleanup = ExceptionCleanup {
+                name: handler.name,
+                span: handler.span,
+            };
+            let body_start = self.pc()?;
+            self.cleanups.push(ControlCleanup::Exception(cleanup));
+            self.block(&handler.body)?;
+            self.cleanups.pop();
+            let body_end = self.pc()?;
+            self.emit_exception_cleanup(cleanup)?;
+            completed.push(self.emit(Op::Jump, 0, 0, 0, handler.span)?);
+            let cleanup_target = self.pc()?;
+            if body_start != body_end {
+                self.code.exception_regions.push(ExceptionRegion {
+                    start: body_start,
+                    end: body_end,
+                    target: cleanup_target,
+                    exception,
+                });
+            }
+            self.emit_exception_cleanup(cleanup)?;
+            self.emit(Op::Raise, exception, 0, 0, handler.span)?;
+            if let Some(mismatch) = mismatch {
+                self.patch(mismatch, self.pc()?);
+            }
+        }
+        self.emit(Op::Raise, exception, 0, 0, span)?;
+        let done = self.pc()?;
+        self.patch(skip_handlers, done);
+        for jump in completed {
+            self.patch(jump, done);
+        }
+        Ok(())
+    }
+    fn lower_with(&mut self, items: &[WithItem], body: &[Stmt], span: Span) -> Result<()> {
+        let Some((item, remaining)) = items.split_first() else {
+            return self.block(body);
+        };
+        let manager = self.expr(&item.context)?;
+        let token = self.alloc(1)?;
+        let entered = self.alloc(1)?;
+        self.emit(Op::ContextEnter, entered, token, manager, item.context.span)?;
+
+        let id = self.with_bypasses.len();
+        self.with_bypasses.push(Vec::new());
+        let cleanup = ControlCleanup::With {
+            id,
+            token,
+            span: item.context.span,
+        };
+        let start = self.pc()?;
+        self.cleanups.push(cleanup);
+        if let Some(target) = &item.target {
+            self.target(target, entered, item.context.span)?;
+        }
+        self.lower_with(remaining, body, span)?;
+        self.cleanups.pop();
+        let end = self.pc()?;
+
+        let none = self.constant(Constant::None, span)?;
+        let normal_result = self.alloc(1)?;
+        self.emit(Op::ContextExit, normal_result, token, none, span)?;
+        let skip_exception_paths = self.emit(Op::Jump, 0, 0, 0, span)?;
+
+        let exception = self.alloc(1)?;
+        let target = self.pc()?;
+        if start != end {
+            self.code.exception_regions.push(ExceptionRegion {
+                start,
+                end,
+                target,
+                exception,
+            });
+        }
+        self.emit(Op::PushException, exception, 0, 0, span)?;
+        let exit_result = self.alloc(1)?;
+        let replacement = self.alloc(1)?;
+        let exit_start = self.pc()?;
+        self.emit(Op::ContextExit, exit_result, token, exception, span)?;
+        let suppressed = self.emit(Op::JumpTrue, exit_result, 0, 0, span)?;
+        let exit_end = self.pc()?;
+        self.emit(Op::ClearException, 0, 0, 0, span)?;
+        self.emit(Op::Raise, exception, 0, 0, span)?;
+
+        let suppressed_target = self.pc()?;
+        self.patch(suppressed, suppressed_target);
+        self.emit(Op::ClearException, 0, 0, 0, span)?;
+        let suppressed_done = self.emit(Op::Jump, 0, 0, 0, span)?;
+
+        let cleanup_target = self.pc()?;
+        if exit_start != exit_end {
+            self.code.exception_regions.push(ExceptionRegion {
+                start: exit_start,
+                end: exit_end,
+                target: cleanup_target,
+                exception: replacement,
+            });
+        }
+        self.emit(Op::ClearException, 0, 0, 0, span)?;
+        self.emit(Op::Raise, replacement, 0, 0, span)?;
+
+        for bypass in std::mem::take(&mut self.with_bypasses[id]) {
+            let target = self.pc()?;
+            self.code.exception_regions.push(ExceptionRegion {
+                start: bypass.start,
+                end: bypass.end,
+                target,
+                exception: bypass.exception,
+            });
+            self.emit(Op::Raise, bypass.exception, 0, 0, bypass.span)?;
+        }
+        let done = self.pc()?;
+        self.patch(skip_exception_paths, done);
+        self.patch(suppressed_done, done);
+        Ok(())
+    }
     fn target(&mut self, t: &Target, r: u16, s: Span) -> Result<()> {
         match t {
             Target::Attribute(owner, name) => {
@@ -315,10 +584,22 @@ impl Lower<'_> {
                     self.store(*n, r, s)?;
                 }
             }
-            StmtKind::DeleteAttributes(targets) => {
-                for (owner, name) in targets {
-                    let owner = self.expr(owner)?;
-                    self.emit(Op::DelAttr, owner, name.0, 0, s)?;
+            StmtKind::DeleteTargets(targets) => {
+                for target in targets {
+                    match target {
+                        Target::Attribute(owner, name) => {
+                            let owner = self.expr(owner)?;
+                            self.emit(Op::DelAttr, owner, name.0, 0, s)?;
+                        }
+                        Target::Item(owner, key) => {
+                            let owner = self.expr(owner)?;
+                            let key = self.expr(key)?;
+                            self.emit(Op::DelItem, owner, key, 0, s)?;
+                        }
+                        Target::Name(_) | Target::Tuple(_) => {
+                            unreachable!("parser rejects this delete target")
+                        }
+                    }
                 }
             }
             StmtKind::Expr(e) => {
@@ -330,6 +611,7 @@ impl Lower<'_> {
                 label,
                 decorators,
                 bases,
+                metaclass,
                 body,
             } => {
                 let decorators = decorators
@@ -352,12 +634,25 @@ impl Lower<'_> {
                 });
                 let function = self.alloc(1)?;
                 self.emit(Op::Function, function, site, 0, s)?;
-                let (first, count) = self.window(bases)?;
+                let count = index(bases.len())?;
+                let keyword_count = u16::from(metaclass.is_some());
+                let first = self.alloc(count.checked_add(keyword_count).ok_or_else(limit)?)?;
+                for (offset, base) in bases.iter().enumerate() {
+                    let value = self.expr(base)?;
+                    self.emit(Op::Move, first + offset as u16, value, 0, base.span)?;
+                }
+                let keywords = if let Some((name, metaclass)) = metaclass {
+                    let value = self.expr(metaclass)?;
+                    self.emit(Op::Move, first + count, value, 0, metaclass.span)?;
+                    vec![*name]
+                } else {
+                    Vec::new()
+                };
                 let site = index(self.code.calls.len())?;
                 self.code.calls.push(CallSite {
                     first,
                     count,
-                    keywords: Vec::new(),
+                    keywords,
                 });
                 let result = self.alloc(1)?;
                 self.emit(Op::Class, result, function, site, s)?;
@@ -370,7 +665,28 @@ impl Lower<'_> {
                 } else {
                     self.constant(Constant::None, s)?
                 };
+                self.emit_cleanups_from(0)?;
                 self.emit(Op::Return, r, 0, 0, s)?;
+            }
+            StmtKind::Raise { value, cause } => {
+                if let Some(value) = value {
+                    let value = self.expr(value)?;
+                    if let Some(cause) = cause {
+                        let cause = self.expr(cause)?;
+                        self.emit(Op::Raise, value, 2, cause, s)?;
+                    } else {
+                        self.emit(Op::Raise, value, 0, 0, s)?;
+                    }
+                } else {
+                    if cause.is_some() {
+                        return Err(Diagnostic::new(
+                            "SyntaxError",
+                            "bare raise cannot specify a cause",
+                        )
+                        .at(s));
+                    }
+                    self.emit(Op::Raise, 0, 1, 0, s)?;
+                }
             }
             StmtKind::Function {
                 name,
@@ -406,6 +722,84 @@ impl Lower<'_> {
                 let r = self.apply_decorators(r, &decorators)?;
                 self.store(*name, r, s)?;
             }
+            StmtKind::Try {
+                body,
+                handlers,
+                otherwise,
+                finalbody,
+            } => {
+                if finalbody.is_empty() {
+                    self.lower_try_except(body, handlers, otherwise, s)?;
+                } else {
+                    let id = self.finally_bypasses.len();
+                    self.finally_bypasses.push(Vec::new());
+                    let cleanup = ControlCleanup::Finally {
+                        id,
+                        body: finalbody.clone(),
+                        span: s,
+                    };
+                    let start = self.pc()?;
+                    self.cleanups.push(cleanup);
+                    if handlers.is_empty() {
+                        self.block(body)?;
+                    } else {
+                        self.lower_try_except(body, handlers, otherwise, s)?;
+                    }
+                    self.cleanups.pop();
+                    let end = self.pc()?;
+
+                    self.block(finalbody)?;
+                    let skip_exception_paths = self.emit(Op::Jump, 0, 0, 0, s)?;
+
+                    let exception = self.alloc(1)?;
+                    let target = self.pc()?;
+                    if start != end {
+                        self.code.exception_regions.push(ExceptionRegion {
+                            start,
+                            end,
+                            target,
+                            exception,
+                        });
+                    }
+                    self.emit(Op::PushException, exception, 0, 0, s)?;
+                    let final_start = self.pc()?;
+                    let exception_cleanup = ExceptionCleanup {
+                        name: None,
+                        span: s,
+                    };
+                    self.cleanups
+                        .push(ControlCleanup::Exception(exception_cleanup));
+                    self.block(finalbody)?;
+                    self.cleanups.pop();
+                    let final_end = self.pc()?;
+                    self.emit_exception_cleanup(exception_cleanup)?;
+                    self.emit(Op::Raise, exception, 0, 0, s)?;
+                    let cleanup_target = self.pc()?;
+                    if final_start != final_end {
+                        self.code.exception_regions.push(ExceptionRegion {
+                            start: final_start,
+                            end: final_end,
+                            target: cleanup_target,
+                            exception,
+                        });
+                    }
+                    self.emit_exception_cleanup(exception_cleanup)?;
+                    self.emit(Op::Raise, exception, 0, 0, s)?;
+
+                    for bypass in std::mem::take(&mut self.finally_bypasses[id]) {
+                        let target = self.pc()?;
+                        self.code.exception_regions.push(ExceptionRegion {
+                            start: bypass.start,
+                            end: bypass.end,
+                            target,
+                            exception: bypass.exception,
+                        });
+                        self.emit(Op::Raise, bypass.exception, 0, 0, bypass.span)?;
+                    }
+                    self.patch(skip_exception_paths, self.pc()?);
+                }
+            }
+            StmtKind::With { items, body } => self.lower_with(items, body, s)?,
             StmtKind::If(test, yes, no) => {
                 let r = self.expr(test)?;
                 let branch = self.emit(Op::JumpFalse, r, 0, 0, s)?;
@@ -422,6 +816,7 @@ impl Lower<'_> {
                 self.loops.push(Loop {
                     start,
                     breaks: Vec::new(),
+                    cleanup_depth: self.cleanups.len(),
                 });
                 self.block(body)?;
                 self.emit(Op::Jump, start, 0, 0, s)?;
@@ -444,6 +839,7 @@ impl Lower<'_> {
                 self.loops.push(Loop {
                     start,
                     breaks: Vec::new(),
+                    cleanup_depth: self.cleanups.len(),
                 });
                 self.block(body)?;
                 self.emit(Op::Jump, start, 0, 0, s)?;
@@ -459,15 +855,18 @@ impl Lower<'_> {
                 if self.loops.is_empty() {
                     return Err(Diagnostic::new("SyntaxError", "break outside loop").at(s));
                 }
+                let cleanup_depth = self.loops.last().expect("active loop").cleanup_depth;
+                self.emit_cleanups_from(cleanup_depth)?;
                 let pc = self.emit(Op::Jump, 0, 0, 0, s)?;
                 self.loops.last_mut().expect("active loop").breaks.push(pc);
             }
             StmtKind::Continue => {
-                let start = self
+                let (start, cleanup_depth) = self
                     .loops
                     .last()
-                    .ok_or_else(|| Diagnostic::new("SyntaxError", "continue outside loop").at(s))?
-                    .start;
+                    .map(|loop_| (loop_.start, loop_.cleanup_depth))
+                    .ok_or_else(|| Diagnostic::new("SyntaxError", "continue outside loop").at(s))?;
+                self.emit_cleanups_from(cleanup_depth)?;
                 self.emit(Op::Jump, start, 0, 0, s)?;
             }
             StmtKind::Import(names) => {

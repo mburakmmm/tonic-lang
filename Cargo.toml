@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/tonic-core", "crates/tonic-compiler", "crates/tonic-jit", "crates/tonic-runtime", "crates/tonic-cli", "crates/tonic-cpython"]
+members = ["crates/tonic-core", "crates/tonic-compiler", "crates/tonic-jit", "crates/tonic-runtime", "crates/tonic-cli", "crates/tonic-cpython", "crates/tonic-hpy"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
@@ -14,6 +15,7 @@ tonic-compiler = { path = "crates/tonic-compiler" }
 tonic-runtime = { path = "crates/tonic-runtime" }
 tonic-jit = { path = "crates/tonic-jit" }
 tonic-cpython = { path = "crates/tonic-cpython" }
+tonic-hpy = { path = "crates/tonic-hpy" }
 rustpython-parser = { version = "=0.4.0", default-features = false, features = ["num-bigint"] }
 num-bigint = "=0.4.6"
 num-traits = "=0.2.19"

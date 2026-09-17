@@ -2,9 +2,10 @@
 
 ## Durum
 
-Kabul edildi; ilk JIT dilimi, hotness tiering, allocation üreten ilk runtime helper
-ve resumable Tonic call uygulanmıştır. Doğrudan hızlı call, invalidation, OSR ve
-machine stack map ayrı açık işlerdir.
+Kabul edildi ve genişletildi. İlk leaf dilimi, hotness tiering, runtime helper,
+resumable Tonic call, doğrudan hızlı call, dependency invalidation, OSR, native
+backedge safepoint'i ve unboxed float deopt map'leri uygulanmıştır. Kalan üretim
+kapıları coverage-guided JIT fuzzing ile x86-64/AArch64 release matrisidir.
 
 ## Karar
 
@@ -23,7 +24,7 @@ extern "C" fn(
 ) -> u64
 ```
 
-Register sayısı verified `CodeObject` metadata'sından gelir. Runtime tam bu
+Register sayısı `CodeObject` metadata'sından gelir. Runtime tam bu
 uzunlukta geçici bir raw register dizisi verir. Status'un üst biti native dönüşü,
 ikinci üst biti helper hatasını, üçüncü üst biti resumable side exit'i; kalan bitleri dönüş/deopt/hata bytecode PC'sini
 gösterir. Dönüş değeri register
@@ -63,6 +64,13 @@ Bu explicit root ABI mevcut boxed değerler için stack map gerektirmez. Gelecek
 yalnız machine register/stack'te tutulan unboxed managed değerler, Tonic calls ve
 backedge safepoint'leri kesin stack map gerektirir.
 
+Public JIT API'si VM dışındaki embedder'ların ham `CodeObject` verebilmesi nedeniyle
+register, constant, jump, call window ve profil indekslerini Cranelift'ten önce
+bağımsız olarak doğrular. Bozuk giriş `InvalidBytecode` olur; Rust panic'i veya
+unchecked erişim olmaz. Runtime ayrıca yürütme başına varsayılan 64 MiB üretilmiş
+kod bütçesi uygular. Bütçeyi aşan derleme sonucu hemen bırakılır ve fonksiyon
+interpreter'da devam eder.
+
 `unsafe`, `tonic-jit` crate'i içinde finalized code pointer dönüşümü ile trampoline'ın
 senkron çağrı bağlamı/register/output pointer erişimlerine sınırlıdır. Her blok
 invariant'ını açıklar. Trampoline `catch_unwind` ile Rust panic'inin native FFI
@@ -81,9 +89,11 @@ sayaçlarının yanında helper call, safepoint, helper-triggered collection ve 
 error sayaçlarını raporlar. Aynı code object sekiz guard failure ürettiğinde native
 girdi bırakılır ve sonraki çağrılar generic interpreter'da kalır. Aynı differential corpus
 interpreter ve `TONIC_JIT=1` ile, normal ve stress GC altında çalıştırılır.
-Production-ready kabulü için doğrudan hızlı Tonic call, invalidation, OSR,
-native backedge safepoint'leri, gerekli machine stack map'leri ve daha geniş deopt
-state testleri tamamlanmalıdır.
+Production-ready kabulü için kalan kapılar public API mutasyon corpus'unun
+coverage-guided fuzzing'e taşınması ve desteklenen x86-64/AArch64 hedeflerinde
+debug/release sanitizer matrisidir. Bunlar tamamlanana kadar `--jit` güvenli
+fallback'li kullanılabilir bir opt-in tier'dır; proje bütünü için nihai üretim
+hazır etiketi verilmez.
 
 Exact-callee/arity yan etkisiz integer leaf alt kümesi daha sonra
 [ADR 0026](0026-jit-direct-leaf-call.md) ile native caller gövdesine alınmıştır;

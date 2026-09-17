@@ -132,6 +132,14 @@ buffer ve module/type registration sözleşmelerini sunmalıdır.
 - Unload mümkün değilse açıkça pinle; canlı function/type/payload varken library
   kapatma.
 
+H0, `tonic-hpy` crate'indeki typed envanter ve
+`abi/hpy-0.9.0-universal.toml` ile tamamlanmıştır. Envanter HPy `0.9.0`
+tag'ini, `hpy0` ABI/context slot düzenini, PyPI source hash'ini ve aHPy
+`880d46d7d348df759ef062711ab3b4876bd648b8` revision'ını sabitler. H0'da bütün
+çalıştırma capability'leri `unavailable` kalır; bilinmeyen capability ve yanlış
+module/suffix sözleşmeleri fail-closed reddedilir. Bu kayıt loader veya context
+uygulandığı anlamına gelmez.
+
 İlk uçtan uca kanıt:
 
 ```text
@@ -260,6 +268,8 @@ raporlanır. İki handle tablosu kullanılırsa ek indirection ölçülmeden kor
   Universal binary adlandırması ve `hpy0` yükleme örneği.
 - [HPy debug mode](https://docs.hpyproject.org/en/stable/debug-mode.html): context
   decoration ile runtime'da leak ve invalid-handle denetimi.
+- [HPy 0.9.0 PyPI kaydı](https://pypi.org/project/hpy/0.9.0/): sabitlenen
+  source distribution ve SHA-256 kaydı.
 - aHPy değerlendirmesi: `mburakmmm/aHPy` revision
   `880d46d7d348df759ef062711ab3b4876bd648b8`; proje sözleşmesi,
   `support-matrix.md` ve pinned pilot matrisi incelendi.

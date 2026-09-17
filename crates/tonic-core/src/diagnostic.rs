@@ -9,15 +9,15 @@ pub struct Span {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
-    pub kind: &'static str,
+    pub kind: String,
     pub message: String,
     pub span: Option<Span>,
     pub trace: Vec<(String, Span)>,
 }
 impl Diagnostic {
-    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            kind,
+            kind: kind.into(),
             message: message.into(),
             span: None,
             trace: Vec::new(),

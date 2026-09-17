@@ -71,7 +71,7 @@ pub enum RuntimeOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeFailure {
-    pub kind: &'static str,
+    pub kind: String,
     pub message: String,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,9 +80,9 @@ pub struct MethodLookup {
     pub receiver: u64,
 }
 impl RuntimeFailure {
-    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            kind,
+            kind: kind.into(),
             message: message.into(),
         }
     }
@@ -210,6 +210,7 @@ pub struct Unsupported {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Unsupported(Unsupported),
+    InvalidBytecode { pc: Option<usize>, message: String },
     Backend(String),
     RegisterCount { expected: usize, actual: usize },
     Runtime { pc: usize, failure: RuntimeFailure },
@@ -219,6 +220,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(u) => write!(f, "unsupported JIT bytecode at {}: {}", u.pc, u.reason),
+            Self::InvalidBytecode { pc, message } => match pc {
+                Some(pc) => write!(f, "invalid JIT bytecode at {pc}: {message}"),
+                None => write!(f, "invalid JIT bytecode: {message}"),
+            },
             Self::Backend(message) => write!(f, "Cranelift backend error: {message}"),
             Self::RegisterCount { expected, actual } => {
                 write!(f, "JIT expected {expected} registers, got {actual}")
@@ -740,6 +745,22 @@ pub fn compile_with_execution_profile(
     materialized_constants: &[MaterializedConstant],
     exact_float_parameters: &[u16],
 ) -> Result<CompiledFunction, Error> {
+    validate_structural_safety(code)?;
+    for direct in direct_calls {
+        validate_structural_safety(direct.target)?;
+    }
+    if exact_float_parameters
+        .iter()
+        .enumerate()
+        .any(|(index, register)| {
+            *register >= code.registers || exact_float_parameters[..index].contains(register)
+        })
+    {
+        return Err(Error::InvalidBytecode {
+            pc: None,
+            message: "invalid exact-float parameter profile".into(),
+        });
+    }
     validate_direct_calls(code, direct_calls)?;
     validate_materialized_constants(code, materialized_constants)?;
     validate_supported(code, direct_calls, materialized_constants)?;
@@ -1645,6 +1666,218 @@ pub fn compile_with_execution_profile(
     })
 }
 
+/// Validate every operand that the JIT compiler may index before control reaches
+/// Cranelift. The runtime normally supplies a `VerifiedProgram`, but the public
+/// crate API accepts a `CodeObject`; keeping this check here makes malformed
+/// embedder input a normal error instead of a host panic or unchecked access.
+fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
+    let invalid = |pc, message: &str| Error::InvalidBytecode {
+        pc,
+        message: message.into(),
+    };
+    if code.instructions.is_empty() || code.registers == 0 || code.params > code.registers {
+        return Err(invalid(None, "invalid code metadata"));
+    }
+    let register = |pc, value: u16| {
+        if value < code.registers {
+            Ok(())
+        } else {
+            Err(invalid(Some(pc), "register out of bounds"))
+        }
+    };
+    let jump = |pc, target: u16| {
+        if usize::from(target) < code.instructions.len() {
+            Ok(())
+        } else {
+            Err(invalid(Some(pc), "jump out of bounds"))
+        }
+    };
+    for region in &code.exception_regions {
+        if region.start >= region.end
+            || usize::from(region.end) > code.instructions.len()
+            || usize::from(region.target) >= code.instructions.len()
+            || region.exception >= code.registers
+        {
+            return Err(invalid(None, "invalid exception region"));
+        }
+    }
+    for (index, left) in code.exception_regions.iter().enumerate() {
+        for right in &code.exception_regions[index + 1..] {
+            let overlaps = left.start < right.end && right.start < left.end;
+            let nested = (left.start <= right.start && right.end <= left.end)
+                || (right.start <= left.start && left.end <= right.end);
+            if overlaps && !nested {
+                return Err(invalid(None, "partially overlapping exception regions"));
+            }
+        }
+    }
+    for (pc, instruction) in code.instructions.iter().enumerate() {
+        let op =
+            Op::try_from(instruction.opcode).map_err(|_| invalid(Some(pc), "unknown opcode"))?;
+        match op {
+            Op::Const => {
+                register(pc, instruction.a)?;
+                if usize::from(instruction.b) >= code.constants.len() {
+                    return Err(invalid(Some(pc), "constant out of bounds"));
+                }
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Move | Op::Neg | Op::Pos | Op::Not => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::LoadGlobal => {
+                register(pc, instruction.a)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Add
+            | Op::InplaceAdd
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::FloorDiv
+            | Op::Mod
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                register(pc, instruction.c)?;
+            }
+            Op::Jump => {
+                jump(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::JumpFalse | Op::JumpTrue => {
+                register(pc, instruction.a)?;
+                jump(pc, instruction.b)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Call => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                let Some(site) = code.calls.get(usize::from(instruction.c)) else {
+                    return Err(invalid(Some(pc), "call site out of bounds"));
+                };
+                let width = usize::from(site.count)
+                    .checked_add(site.keywords.len())
+                    .ok_or_else(|| invalid(Some(pc), "call window overflow"))?;
+                if usize::from(site.first)
+                    .checked_add(width)
+                    .is_none_or(|end| end > usize::from(code.registers))
+                {
+                    return Err(invalid(Some(pc), "call window out of bounds"));
+                }
+            }
+            Op::Attr => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+            }
+            Op::BeginArgs => {
+                if instruction.a != 0 || instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::ArgStar => {
+                register(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c > 1 {
+                    return Err(invalid(Some(pc), "invalid star argument operands"));
+                }
+            }
+            Op::ArgPos | Op::ArgMapping => {
+                register(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::ArgNamed => {
+                register(pc, instruction.a)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::CallExpanded => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Return => {
+                register(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Raise => {
+                if instruction.b > 2 || (instruction.b != 2 && instruction.c != 0) {
+                    return Err(invalid(Some(pc), "invalid raise operand"));
+                }
+                match instruction.b {
+                    0 => register(pc, instruction.a)?,
+                    1 if instruction.a != 0 => {
+                        return Err(invalid(Some(pc), "nonzero bare raise operand"));
+                    }
+                    1 => {}
+                    2 => {
+                        register(pc, instruction.a)?;
+                        register(pc, instruction.c)?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Op::ExceptionMatch => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                register(pc, instruction.c)?;
+            }
+            Op::ClearException => {
+                if instruction.a != 0 || instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::PushException => {
+                register(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::ContextEnter | Op::ContextExit => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                register(pc, instruction.c)?;
+            }
+            Op::ClearBinding => {
+                if instruction.a > 3 || instruction.c != 0 {
+                    return Err(invalid(Some(pc), "invalid clear-binding operand"));
+                }
+                if instruction.a == 0 {
+                    register(pc, instruction.b)?;
+                }
+            }
+            _ => {}
+        }
+        if pc + 1 == code.instructions.len() && !matches!(op, Op::Jump | Op::Return | Op::Raise) {
+            return Err(invalid(Some(pc), "code can fall off end"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> Result<(), Error> {
     for (index, direct) in direct_calls.iter().enumerate() {
         if direct_calls[..index]
@@ -1866,6 +2099,9 @@ fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> 
 /// A deliberately small, side-effect-free subset can be re-executed from the
 /// caller's CALL PC if a guard fails, which makes deoptimization atomic.
 pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
+    if validate_structural_safety(code).is_err() {
+        return false;
+    }
     let mut returned = false;
     for instruction in &code.instructions {
         let Ok(op) = Op::try_from(instruction.opcode) else {
@@ -1892,6 +2128,9 @@ pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
 /// unboxed as F64 for the complete direct leaf. This dataflow check prevents a
 /// generic or uninitialized value from reaching native float arithmetic.
 pub fn is_direct_float_leaf_inlineable(code: &CodeObject) -> bool {
+    if validate_structural_safety(code).is_err() {
+        return false;
+    }
     let mut floats = vec![false; code.registers as usize];
     for slot in floats.iter_mut().take(code.params as usize) {
         *slot = true;
@@ -3300,6 +3539,68 @@ mod tests {
 
     fn function(source: &str) -> tonic_core::bytecode::VerifiedProgram {
         tonic_compiler::compile(source, "jit-test").unwrap()
+    }
+
+    #[test]
+    fn malformed_public_code_objects_fail_before_codegen() {
+        let program = function("def value():\n    return 1");
+        let original = &program.program().code[1];
+
+        let mut bad_constant = original.clone();
+        bad_constant.instructions[0].b = u16::MAX;
+        assert!(matches!(
+            compile(&bad_constant),
+            Err(Error::InvalidBytecode {
+                pc: Some(0),
+                ref message
+            }) if message == "constant out of bounds"
+        ));
+        assert!(!is_direct_call_inlineable(&bad_constant));
+        assert!(!is_direct_float_leaf_inlineable(&bad_constant));
+
+        let mut bad_register = original.clone();
+        bad_register.instructions[1].a = bad_register.registers;
+        assert!(matches!(
+            compile(&bad_register),
+            Err(Error::InvalidBytecode {
+                pc: Some(1),
+                ref message
+            }) if message == "register out of bounds"
+        ));
+
+        let program = function("def choose(x):\n    if x:\n        return 1\n    return 2");
+        let mut bad_jump = program.program().code[1].clone();
+        let (pc, instruction) = bad_jump
+            .instructions
+            .iter_mut()
+            .enumerate()
+            .find(|(_, instruction)| {
+                matches!(
+                    Op::try_from(instruction.opcode),
+                    Ok(Op::Jump | Op::JumpFalse | Op::JumpTrue)
+                )
+            })
+            .expect("conditional has a jump");
+        if Op::try_from(instruction.opcode) == Ok(Op::Jump) {
+            instruction.a = u16::MAX;
+        } else {
+            instruction.b = u16::MAX;
+        }
+        assert!(matches!(
+            compile(&bad_jump),
+            Err(Error::InvalidBytecode {
+                pc: Some(error_pc),
+                ref message
+            }) if error_pc == pc && message == "jump out of bounds"
+        ));
+
+        assert!(matches!(
+            compile_with_execution_profile(original, &[], &[], &[original.registers]),
+            Err(Error::InvalidBytecode {
+                pc: None,
+                ref message
+            }) if message == "invalid exact-float parameter profile"
+        ));
     }
 
     #[test]

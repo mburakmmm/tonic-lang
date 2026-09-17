@@ -120,10 +120,16 @@ fn allocation_loop_has_bounded_live_heap() {
     vm.run(&p, &mut out).unwrap();
     assert_eq!(out, b"5000.0\n");
     assert!(vm.stats.gc_reclaimed > 9900);
-    // Dead temporary registers can retain one nursery cohort until the next
-    // scheduled major collection; the bound includes that deliberate window.
+    // Establish the fully collected reachable state with the same program.
+    // Dead temporary registers in the automatically collected run may retain
+    // a bounded promoted cohort plus the current nursery until the next
+    // scheduled major collection.
+    let mut baseline_vm = Vm::new().unwrap();
+    baseline_vm.run(&p, &mut Vec::new()).unwrap();
+    baseline_vm.collect_garbage().unwrap();
+    let bound = baseline_vm.live_objects() + 64;
     assert!(
-        vm.live_objects() < 80,
+        vm.live_objects() <= bound,
         "live objects: {}",
         vm.live_objects()
     );

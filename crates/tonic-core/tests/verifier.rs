@@ -13,6 +13,7 @@ fn program() -> Program {
             cell_locals: vec![],
             free_vars: vec![],
             functions: vec![],
+            exception_regions: vec![],
             instructions: vec![
                 Instr::new(Op::Const, 0, 0, 0),
                 Instr::new(Op::Return, 0, 0, 0),
@@ -33,6 +34,14 @@ fn explicit_encoding_roundtrip() {
 #[test]
 fn valid_program() {
     program().verify().unwrap();
+    let mut raised = program();
+    raised.code[0].instructions = vec![Instr::new(Op::Raise, 0, 0, 0)];
+    raised.code[0].spans = vec![Span::default()];
+    raised.verify().unwrap();
+    let mut chained = program();
+    chained.code[0].instructions = vec![Instr::new(Op::Raise, 0, 2, 1)];
+    chained.code[0].spans = vec![Span::default()];
+    chained.verify().unwrap();
 }
 #[test]
 fn rejects_opcode_operands_and_metadata() {
@@ -89,6 +98,15 @@ fn rejects_opcode_operands_and_metadata() {
     variants.push(p);
     let mut p = program();
     p.code[0].instructions[0] = Instr::new(Op::DelAttr, 0, 1, 0);
+    variants.push(p);
+    let mut p = program();
+    p.code[0].instructions[0] = Instr::new(Op::Raise, 0, 2, 2);
+    variants.push(p);
+    let mut p = program();
+    p.code[0].instructions[0] = Instr::new(Op::Raise, 1, 1, 0);
+    variants.push(p);
+    let mut p = program();
+    p.code[0].instructions[0] = Instr::new(Op::ContextEnter, 0, 1, 2);
     variants.push(p);
     for p in variants {
         assert!(p.verify().is_err());
@@ -240,8 +258,32 @@ fn class_namespace_opcodes_and_metadata_are_checked() {
         keywords: vec![tonic_core::ast::SymbolId(0)],
     });
     bad.code[1].instructions[0] = Instr::new(Op::Class, 0, 1, 0);
-    assert!(bad.verify().is_err());
+    assert!(bad.verify().is_err()); // symbol zero is not named `metaclass`
     valid.code[1].free_vars.push(tonic_core::ast::SymbolId(0));
     valid.code[1].instructions[0] = Instr::new(Op::ClassDeref, 0, 0, 0);
     valid.verify().unwrap();
+}
+
+#[test]
+fn exception_regions_and_handler_operands_are_checked() {
+    let mut valid = program();
+    valid.code[0].exception_regions.push(ExceptionRegion {
+        start: 0,
+        end: 1,
+        target: 1,
+        exception: 1,
+    });
+    valid.clone().verify().unwrap();
+    let mut bad = valid.clone();
+    bad.code[0].exception_regions[0].end = 3;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].exception_regions[0].exception = 2;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].instructions[0] = Instr::new(Op::ExceptionMatch, 0, 1, 2);
+    assert!(bad.verify().is_err());
+    let mut bad = valid;
+    bad.code[0].instructions[0] = Instr::new(Op::ClearException, 1, 0, 0);
+    assert!(bad.verify().is_err());
 }
