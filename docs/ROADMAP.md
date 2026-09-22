@@ -35,7 +35,7 @@ sonra alınır.
 - [x] `object.__new__`, custom/inherited `__new__`, static binding ve init continuation.
 - [x] Callable instance `__call__` ve `len(instance)`/`__len__`; MRO lookup, dönüş doğrulama.
 - [x] Truthiness `__bool__` → `__len__` fallback; branch/not continuation ve operand koruma.
-- [ ] Metaclass ve class namespace customization.
+- [x] Metaclass ve class namespace customization.
   - [x] Canlı, salt okunur class `__dict__` mappingproxy; index/len/iteration ve
     GC izleme.
   - [x] `type` bootstrap nesnesi, explicit metaclass seçimi, kalıtım ve en türemiş
@@ -69,7 +69,7 @@ sonra alınır.
     unpack/star yollarında genel user iterable tüketimi, `__getattribute__`/
     attribute mutation ve kalan numeric/comparison protokolleri.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
-- [ ] Exception objects/handlers/traceback state, try/raise/finally/with.
+- [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/
     StopIteration type nesneleri, managed exception instance'ı, user subclass,
     bytecode v9 `RAISE`, uncaught traceback ve JIT-safe interpreter fallback.
@@ -181,8 +181,10 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler kalan iterator tüketicileri, managed traceback/chaining
-ve HPy H1 shared-library loader/handle yüzeyidir.
+Sıradaki çekirdek işler kalan builtin protokolleri, module/import hattı,
+generator/coroutine state machine'leri ve HPy H1 shared-library loader/handle
+yüzeyidir. JIT'in son üretim kapısı CI'da x86-64/AArch64 debug-release ile
+iki mimaride AddressSanitizer fuzz matrisinin yeşil doğrulanmasıdır.
 HPy/aHPy kararının ayrıntıları
 [HPY_AHPY_STRATEGY.md](HPY_AHPY_STRATEGY.md) ve
 [ADR 0049](adr/0049-hpy-universal-host.md) içindedir. M5'in

@@ -14,6 +14,12 @@
 - `TONIC_JIT=1 TONIC_GC_EVERY=1 python3 tests/differential/run.py`
 - `TONIC_JIT=1 python3 tests/differential/run.py target/release/tonic`
 - `TONIC_JIT=1 TONIC_GC_EVERY=1 python3 tests/differential/run.py target/release/tonic`
+
+GitHub Actions ayrıca Linux x86-64 ve macOS AArch64 üzerinde debug/release JIT
+crate testlerini ve normal/stress-GC differential corpus'unu çalıştırır. Ayrı
+iki-mimarili gece derleyicisi işi parser ile public JIT girişini varsayılan
+AddressSanitizer altında 10.000'er coverage-guided koşuyla denetler; sanitizer
+kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `cargo bench -p tonic-runtime --bench interpreter --locked --offline`
 - `cargo bench -p tonic-runtime --bench jit --locked --offline`
 - `cargo bench -p tonic-runtime --bench jit_direct_call --locked --offline`

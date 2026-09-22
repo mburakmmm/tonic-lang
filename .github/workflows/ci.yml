@@ -86,3 +86,90 @@ jobs:
           TONIC_JIT: ${{ matrix.jit }}
           TONIC_GC_EVERY: '1'
         run: python3 tests/differential/run.py target/debug/tonic
+
+  jit-portability:
+    name: JIT ${{ matrix.arch }} (${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86-64
+            profile: debug
+            binary: target/debug/tonic
+          - os: ubuntu-24.04
+            arch: x86-64
+            profile: release
+            binary: target/release/tonic
+          - os: macos-14
+            arch: AArch64
+            profile: debug
+            binary: target/debug/tonic
+          - os: macos-14
+            arch: AArch64
+            profile: release
+            binary: target/release/tonic
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install CPython development files
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes python3-dev
+      - name: Verify runner architecture
+        shell: bash
+        run: |
+          case "${{ matrix.arch }}:$(uname -m)" in
+            x86-64:x86_64|AArch64:arm64) ;;
+            *) echo "unexpected runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+      - name: Test JIT crate (debug)
+        if: matrix.profile == 'debug'
+        run: cargo test --locked -p tonic-jit
+      - name: Test JIT crate (release)
+        if: matrix.profile == 'release'
+        run: cargo test --release --locked -p tonic-jit
+      - name: Build CLI (debug)
+        if: matrix.profile == 'debug'
+        run: cargo build --locked -p tonic-cli
+      - name: Build CLI (release)
+        if: matrix.profile == 'release'
+        run: cargo build --release --locked -p tonic-cli
+      - name: Run JIT differential corpus
+        env:
+          TONIC_JIT: '1'
+        run: python3 tests/differential/run.py ${{ matrix.binary }}
+      - name: Run JIT differential corpus with stress GC
+        env:
+          TONIC_JIT: '1'
+          TONIC_GC_EVERY: '1'
+        run: python3 tests/differential/run.py ${{ matrix.binary }}
+
+  sanitizer:
+    name: ASan fuzz (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86-64
+          - os: macos-14
+            arch: AArch64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz parser under AddressSanitizer
+        run: cargo +nightly fuzz run parser -- -runs=10000 -max_len=4096
+      - name: Fuzz public JIT ingress under AddressSanitizer
+        run: cargo +nightly fuzz run jit_code_object -- -runs=10000 -max_len=4096
