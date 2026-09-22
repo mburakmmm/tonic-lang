@@ -124,10 +124,14 @@ Coverage-guided katmanda `fuzz/parser` ve `fuzz/jit_code_object` libFuzzer
 hedefleri vardır. 15 Eylül 2026 yerel koşusunda her hedef 10.000 mutation'ı
 crash/timeout olmadan tamamladı. Parser koşusu 440 corpus girdisi, 2.022 edge ve
 3.946 feature; JIT koşusu 60 corpus girdisi, 187 edge ve 193 feature buldu.
-macOS 26.6 ile mevcut nightly AddressSanitizer, uygulama `main`inden önce
-`AsanInitFromRtl` içindeki recursive malloc kilidinde kaldığı için bu iki koşu
-coverage instrumentation açık, `--sanitizer none` ile yapıldı. ASan sonucu diye
-sunulmaz; Linux x86-64 ve macOS AArch64 sanitizer matrisi açık kabul kapısıdır.
+macOS 26.6 yerel nightly AddressSanitizer, uygulama `main`inden önce
+`AsanInitFromRtl` içindeki recursive malloc kilidinde kaldığı için bu ilk yerel
+koşular coverage instrumentation açık, `--sanitizer none` ile yapılmıştı ve ASan
+sonucu sayılmadı. 22 Eylül 2026 tarihli GitHub Actions run 35772128579 bu açığı
+kapattı: Linux x86-64 ve macOS AArch64 işlerinin ikisi de parser ile public JIT
+girişi için 10.000'er gerçek AddressSanitizer koşusunu geçti. Aynı run her iki
+mimaride debug/release JIT testlerini ve normal/stress-GC differential corpus'unu
+da başarıyla tamamladı.
 
 Handle testleri stale reuse, cross-runtime, local Drop, explicit persistent
 release/double release ve borrowed string lifetime kontrol eder. Collector

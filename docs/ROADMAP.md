@@ -127,9 +127,9 @@ sonra alınır.
   derlenmiş giriş bırakılır, sayaçlanır ve interpreter güvenle devam eder.
 - [x] Parser ve public JIT `CodeObject` girişi için libFuzzer hedefleri; her
   hedefte ilk 10.000 coverage-guided mutation koşusu crash'siz tamamlandı.
-- [ ] Sanitizer kapısı ve x86-64/AArch64 debug-release platform matrisi. Yerel
-  macOS 26.6 nightly ASan runtime'ı Tonic `main`inden önce init kilidinde kalıyor;
-  coverage koşusu `--sanitizer none` ile doğrulandı.
+- [x] Linux x86-64 ve macOS AArch64 debug/release JIT platform matrisi; iki
+  mimaride parser ve public JIT girişi için 10.000'er gerçek AddressSanitizer
+  libFuzzer koşusu. CI run 35772128579 ile doğrulandı.
 - [x] Native C function-table ABI/version/capability, exception status ve panic guard.
 - [x] Buffer descriptor, dtype/shape/stride, owner, mutability; fastmath.sum zero-copy örneği.
 - [x] Thread attach, persistent callback, reentry, shutdown/finalization.
@@ -183,8 +183,9 @@ sonra alınır.
 
 Sıradaki çekirdek işler kalan builtin protokolleri, module/import hattı,
 generator/coroutine state machine'leri ve HPy H1 shared-library loader/handle
-yüzeyidir. JIT'in son üretim kapısı CI'da x86-64/AArch64 debug-release ile
-iki mimaride AddressSanitizer fuzz matrisinin yeşil doğrulanmasıdır.
+yüzeyidir. JIT'in desteklenen tier'ı x86-64/AArch64 debug-release, normal/stress
+GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;
+desteklenmeyen bytecode generic interpreter fallback'inde kalır.
 HPy/aHPy kararının ayrıntıları
 [HPY_AHPY_STRATEGY.md](HPY_AHPY_STRATEGY.md) ve
 [ADR 0049](adr/0049-hpy-universal-host.md) içindedir. M5'in

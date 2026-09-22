@@ -2,10 +2,11 @@
 
 ## Durum
 
-Kabul edildi ve genişletildi. İlk leaf dilimi, hotness tiering, runtime helper,
+Kabul edildi ve üretim kapıları tamamlandı. İlk leaf dilimi, hotness tiering, runtime helper,
 resumable Tonic call, doğrudan hızlı call, dependency invalidation, OSR, native
-backedge safepoint'i ve unboxed float deopt map'leri uygulanmıştır. Kalan üretim
-kapıları coverage-guided JIT fuzzing ile x86-64/AArch64 release matrisidir.
+backedge safepoint'i ve unboxed float deopt map'leri uygulanmıştır. Desteklenen
+tier x86-64/AArch64 debug-release, normal/stress GC differential ve iki mimaride
+AddressSanitizer fuzz matrisini geçmiştir.
 
 ## Karar
 
@@ -89,11 +90,14 @@ sayaçlarının yanında helper call, safepoint, helper-triggered collection ve 
 error sayaçlarını raporlar. Aynı code object sekiz guard failure ürettiğinde native
 girdi bırakılır ve sonraki çağrılar generic interpreter'da kalır. Aynı differential corpus
 interpreter ve `TONIC_JIT=1` ile, normal ve stress GC altında çalıştırılır.
-Production-ready kabulü için kalan kapılar public API mutasyon corpus'unun
-coverage-guided fuzzing'e taşınması ve desteklenen x86-64/AArch64 hedeflerinde
-debug/release sanitizer matrisidir. Bunlar tamamlanana kadar `--jit` güvenli
-fallback'li kullanılabilir bir opt-in tier'dır; proje bütünü için nihai üretim
-hazır etiketi verilmez.
+Public API mutasyon corpus'u coverage-guided fuzzing'e taşınmıştır. CI run
+35772128579, Linux x86-64 ve macOS AArch64 üzerinde debug/release JIT crate
+testlerini, normal/stress-GC differential corpus'unu ve iki mimaride parser ile
+public JIT girişi için 10.000'er AddressSanitizer libFuzzer koşusunu geçmiştir.
+Bu kanıtla `--jit`, desteklediği bytecode ve profilli call yolları için üretime
+hazır opt-in tier'dır. Desteklenmeyen opcode'lar doğrulanmış generic interpreter
+fallback'inde kalır; bu karar Tonic'in tüm roadmap'inin veya bütün Python
+programlarının native derlendiği anlamına gelmez.
 
 Exact-callee/arity yan etkisiz integer leaf alt kümesi daha sonra
 [ADR 0026](0026-jit-direct-leaf-call.md) ile native caller gövdesine alınmıştır;

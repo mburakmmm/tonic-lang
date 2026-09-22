@@ -94,7 +94,9 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 Güncel yerel matris 266 Rust testi ile 284 stdout ve 109 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
-modlarında çalıştırır.
+modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
+debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
+kapılar.
 
 ```sh
 cargo fmt --all --check
