@@ -161,6 +161,26 @@ fn custom_iteration_consumes_only_escaping_stop_iteration() {
     }
 }
 #[test]
+fn list_and_tuple_constructors_consume_custom_iterators() {
+    let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";
+    let program = compile(source, "custom-constructor-iteration").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "['0', '1', '2', '3']\n('0', '1', '2')\n['0', '1']\n0 1\nnot enough values to unpack (expected 2, got 1)\ntoo many values to unpack (expected 2)\n('0', '1', '2') single\n('0', '0', '1') multiple\nValueError\nValueError\n"
+    );
+
+    for source in [
+        "class Bad:\n    def __iter__(self):\n        return 1\nlist(Bad())",
+        "class Bad:\n    def __iter__(self):\n        return self\ntuple(Bad())",
+    ] {
+        assert_eq!(error(source).kind, "TypeError");
+    }
+}
+#[test]
 fn native_module() {
     assert_eq!(
         output(include_str!("../../../examples/fastmath.tonic")),

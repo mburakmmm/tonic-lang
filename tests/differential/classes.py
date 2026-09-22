@@ -970,6 +970,51 @@ try:
 except ValueError as error:
     print(type(error).__name__)
 ''',
+'''class Counter:
+    def __init__(self,n):
+        self.i=0
+        self.n=n
+    def __iter__(self):
+        return self
+    def stop(self):
+        raise StopIteration
+    def __next__(self):
+        if self.i>=self.n:
+            self.stop()
+        value=str(self.i)
+        self.i+=1
+        return value
+class Fresh:
+    def __iter__(self):
+        return Counter(2)
+print(list(Counter(4)))
+print(tuple(Counter(3)))
+print(list(Fresh()))
+a,b=Fresh()
+print(a,b)
+for count in [1,3]:
+    try:
+        a,b=Counter(count)
+    except ValueError as error:
+        print(str(error))
+def collect(*values,marker):
+    print(values,marker)
+collect(*Counter(3),marker='single')
+collect(*Counter(1),*Counter(2),marker='multiple')
+class Failing:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise ValueError('iteration failed')
+for operation in [0,1]:
+    try:
+        if operation==0:
+            list(Failing())
+        else:
+            collect(*Failing(),marker='failure')
+    except ValueError as error:
+        print(type(error).__name__)
+''',
 '''class PlainError(Exception):
     pass
 print(PlainError(1,'two').args,str(PlainError(1,'two')))

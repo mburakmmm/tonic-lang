@@ -65,9 +65,12 @@ sonra alınır.
     sonrası suspending call, iki argümanlı `getattr` ve stress-GC roots.
   - [x] `for` için user-defined `__iter__`/`__next__`; suspending çağrı zinciri,
     yalnız iterator sınırından kaçan `StopIteration` tüketimi ve hata yayılımı.
-  - [ ] Builtin type alt sınıflarının native storage kurucuları, constructor/
-    unpack/star yollarında genel user iterable tüketimi, `__getattribute__`/
-    attribute mutation ve kalan numeric/comparison protokolleri.
+  - [x] `list`/`tuple` constructor'ları, exact unpack ve `*args` için genel user
+    iterable tüketimi; suspending `__iter__`/`__next__`, precise GC roots,
+    protokol-sınırı `StopIteration` ve CPython uyumlu unpack tanıları.
+  - [ ] Builtin type alt sınıflarının native storage kurucuları, `dict` için genel
+    iterable-pair tüketimi, `__getattribute__`/attribute mutation ve kalan
+    numeric/comparison protokolleri.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

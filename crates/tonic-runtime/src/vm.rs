@@ -597,6 +597,10 @@ enum ReturnAction {
         target: usize,
         pc: usize,
     },
+    CollectIterableStart(IterableCollectionKind),
+    CollectIterableNext(IterableCollection),
+    ExpandIterableStart(Option<usize>),
+    ExpandIterableNext(ArgumentExpansion),
     Length,
     Truth {
         protocol: TruthProtocol,
@@ -622,6 +626,23 @@ enum ReturnAction {
         cell: Option<Value>,
     },
     Setter,
+}
+#[derive(Clone, Copy)]
+pub(super) enum IterableCollectionKind {
+    List,
+    Tuple,
+    Unpack { first: usize, count: usize },
+}
+#[derive(Clone)]
+pub(super) struct IterableCollection {
+    kind: IterableCollectionKind,
+    iterator: Value,
+    items: Vec<Value>,
+}
+#[derive(Clone, Copy)]
+pub(super) struct ArgumentExpansion {
+    iterator: Value,
+    resume_pc: Option<usize>,
 }
 #[derive(Clone, Copy)]
 enum TruthProtocol {
@@ -762,12 +783,19 @@ impl ReturnAction {
             Self::Value
             | Self::Iterator
             | Self::IteratorNext { .. }
+            | Self::CollectIterableStart(_)
+            | Self::ExpandIterableStart(_)
             | Self::Length
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
+            Self::CollectIterableNext(state) => {
+                visit(state.iterator);
+                state.items.iter().copied().for_each(visit);
+            }
+            Self::ExpandIterableNext(state) => visit(state.iterator),
             Self::Truth {
                 action: TruthAction::Jump { original, .. },
                 ..
@@ -2049,6 +2077,69 @@ impl Vm {
                 }
             }
             if stop_iteration {
+                if let ReturnAction::CollectIterableNext(state) = &frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "iterable collection continuation has no destination",
+                        )
+                    })?;
+                    let state = state.clone();
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    if let Err(error) =
+                        self.finish_iterable_collection(destination, state.kind, state.items)
+                    {
+                        let caller = self.frames.last().ok_or_else(|| {
+                            Diagnostic::new(
+                                "BytecodeError",
+                                "iterable collection lost caller frame",
+                            )
+                        })?;
+                        return self.dispatch_exception(
+                            program,
+                            &error,
+                            minimum_depth,
+                            caller.code,
+                            caller.ip.saturating_sub(1),
+                        );
+                    }
+                    return Ok(true);
+                }
+                if let ReturnAction::ExpandIterableNext(state) = frame.action {
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    if let Some(resume_pc) = state.resume_pc {
+                        self.frames
+                            .last_mut()
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "argument expansion lost caller frame",
+                                )
+                            })?
+                            .ip = resume_pc;
+                    }
+                    return Ok(true);
+                }
                 if let ReturnAction::IteratorNext { target, pc } = frame.action {
                     let unwind = (
                         frame.base,
@@ -2287,10 +2378,27 @@ impl Vm {
                         let mut finish_truth = None;
                         let mut class_prepare = None;
                         let mut class_body = None;
+                        let mut iterable_start = None;
+                        let mut iterable_next = None;
+                        let mut expansion_start = None;
+                        let mut expansion_next = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
                             ReturnAction::IteratorNext { .. } => {}
+                            ReturnAction::CollectIterableStart(kind) => {
+                                iterable_start = Some((kind, value));
+                            }
+                            ReturnAction::CollectIterableNext(mut state) => {
+                                state.items.push(value);
+                                iterable_next = Some(state);
+                            }
+                            ReturnAction::ExpandIterableStart(resume_pc) => {
+                                expansion_start = Some((value, resume_pc));
+                            }
+                            ReturnAction::ExpandIterableNext(state) => {
+                                expansion_next = Some((state, value));
+                            }
                             ReturnAction::Length => value = self.validate_length(value)?,
                             ReturnAction::Truth { protocol, action } => {
                                 finish_truth = Some((protocol, action));
@@ -2355,7 +2463,11 @@ impl Vm {
                             || finish_metaclass_init.is_some()
                             || finish_truth.is_some()
                             || class_prepare.is_some()
-                            || class_body.is_some();
+                            || class_body.is_some()
+                            || iterable_start.is_some()
+                            || iterable_next.is_some()
+                            || expansion_start.is_some()
+                            || expansion_next.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
@@ -2372,6 +2484,34 @@ impl Vm {
                                 self.registers[dest] = value;
                             } else if let Some((class, pending, after)) = set_names {
                                 self.invoke_set_names(p, dest, class, pending, after, output)?;
+                            } else if let Some((kind, iterator)) = iterable_start {
+                                self.validate_iterator(iterator)?;
+                                self.continue_iterable_collection(
+                                    p,
+                                    dest,
+                                    IterableCollection {
+                                        kind,
+                                        iterator,
+                                        items: Vec::new(),
+                                    },
+                                    output,
+                                )?;
+                            } else if let Some(state) = iterable_next {
+                                self.continue_iterable_collection(p, dest, state, output)?;
+                            } else if let Some((iterator, resume_pc)) = expansion_start {
+                                self.validate_iterator(iterator)?;
+                                self.continue_argument_expansion(
+                                    p,
+                                    dest,
+                                    ArgumentExpansion {
+                                        iterator,
+                                        resume_pc,
+                                    },
+                                    output,
+                                )?;
+                            } else if let Some((state, item)) = expansion_next {
+                                self.push_expanded_positional(item)?;
+                                self.continue_argument_expansion(p, dest, state, output)?;
                             }
                         } else if continuation_required {
                             return Err(Diagnostic::new(
@@ -2845,7 +2985,11 @@ impl Vm {
                         if self.adaptive_specialization && op == Op::ArgMapping {
                             self.observe_mapping(p, code_id, pc, value);
                         }
-                        self.append_argument(p, op, value, i.b, i.c)?
+                        if op == Op::ArgStar && i.c != 1 {
+                            self.expand_star_argument(p, a, value, None, output)?;
+                        } else {
+                            self.append_argument(p, op, value, i.b, i.c)?;
+                        }
                     }
                     Op::CallExpanded => {
                         let callee = self.read(b)?;
@@ -2859,7 +3003,9 @@ impl Vm {
                             .deferred_star
                             .take()
                         {
-                            self.append_argument(p, Op::ArgStar, value, 0, 0)?;
+                            if self.expand_star_argument(p, a, value, Some(pc), output)? {
+                                return Ok(());
+                            }
                         }
                         let args = self.arguments.pop().expect("verified argument stack");
                         let resume = self
@@ -2969,18 +3115,13 @@ impl Vm {
                     Op::Unpack => {
                         let source = self.read(b)?;
                         let count = i.c as usize;
-                        // Generic iterable unpack validates length before assigning targets.
-                        // Values stay in the caller register window; no temporary guest tuple.
-                        let iterator = self.heap.iterator(source)?;
-                        for n in 0..count {
-                            let value = self.heap.next(iterator)?.ok_or_else(|| {
-                                Diagnostic::new("ValueError", "not enough values to unpack")
-                            })?;
-                            self.registers[a + n] = value;
-                        }
-                        if self.heap.next(iterator)?.is_some() {
-                            return Err(Diagnostic::new("ValueError", "too many values to unpack"));
-                        }
+                        self.invoke_iterable_collection(
+                            p,
+                            a,
+                            IterableCollectionKind::Unpack { first: a, count },
+                            source,
+                            output,
+                        )?;
                     }
                     Op::Iter => {
                         let source = self.read(b)?;

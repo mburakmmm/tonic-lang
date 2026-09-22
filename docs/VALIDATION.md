@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-17 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+22 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -43,9 +43,9 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
 call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 36,
-native handles 5, language/runtime 68, CPython bridge 15 ve HPy manifest 5; toplam 266 test.
+native handles 5, language/runtime 69, CPython bridge 15 ve HPy manifest 5; toplam 267 test.
 
-Differential corpus: 284 stdout vakası ve 109 exception türü vakası. Seed 42.
+Differential corpus: 285 stdout vakası ve 109 exception türü vakası. Seed 42.
 Exception handler/finally/with/custom iterator değişikliğinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -99,7 +99,10 @@ restoration'ı, bare reraise'ı, `except as` bağının normal/hata/return/break
 çıkışlarında temizlenmesini ve invalid handler tipini kapsar. Custom iterator
 corpus'u suspending `__iter__`/`__next__`, iç çağrıdan kaçan `StopIteration`,
 iterator içinde yakalanan `StopIteration`, normal hata yayılımı ve geçersiz
-iterator dönüşlerini CPython ile karşılaştırır.
+iterator dönüşlerini CPython ile karşılaştırır. Aynı suspending protokol
+`list`/`tuple` constructor'ları, exact unpack ve tek/çoklu `*args` genişletmesinde
+de sınanır; unpack uzunluk tanıları ile `StopIteration` dışındaki hatalar CPython
+çıktısıyla eşleşir.
 `finally` corpus'u normal, handled/unhandled exception, `return`, `break`,
 `continue`, nested active exception, return/exception override ve finalizer
 içinden yükselen yeni hata yollarında exactly-once çalışma sırasını kapsar.

@@ -92,7 +92,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 266 Rust testi ile 284 stdout ve 109 exception türü
+Güncel yerel matris 267 Rust testi ile 285 stdout ve 109 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile

@@ -1,6 +1,8 @@
 //! Call binding: ordinary calls read a register window; only actual expansion
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
-use super::{Frame, Vm};
+use super::{
+    ArgumentExpansion, Frame, IterableCollection, IterableCollectionKind, ReturnAction, Vm,
+};
 use crate::{
     dict::Dict,
     heap::{Builtin, Object},
@@ -911,6 +913,23 @@ impl Vm {
         }
         let argument = (args.count() == 1).then(|| args.positional(&self.registers, 0));
         use super::RuntimeTypeKind;
+        if matches!(kind, RuntimeTypeKind::List | RuntimeTypeKind::Tuple) {
+            let collection_kind = if kind == RuntimeTypeKind::List {
+                IterableCollectionKind::List
+            } else {
+                IterableCollectionKind::Tuple
+            };
+            let Some(source) = argument else {
+                return self.finish_iterable_collection(destination, collection_kind, Vec::new());
+            };
+            return self.invoke_iterable_collection(
+                p,
+                destination,
+                collection_kind,
+                source,
+                output,
+            );
+        }
         self.registers[destination] = match kind {
             RuntimeTypeKind::Bool => {
                 let Some(value) = argument else {
@@ -948,20 +967,140 @@ impl Vm {
                 self.heap.alloc(Object::Str(value))?
             }
             RuntimeTypeKind::List | RuntimeTypeKind::Tuple => {
-                let values = match argument {
-                    None => Vec::new(),
-                    Some(value) => self.materialize_builtin_iterable(value)?,
-                };
-                self.heap.alloc(if kind == RuntimeTypeKind::List {
-                    Object::List(values)
-                } else {
-                    Object::Tuple(values)
-                })?
+                unreachable!("list and tuple handled before scalar constructors")
             }
             RuntimeTypeKind::Dict => unreachable!("dict handled before unary constructors"),
             RuntimeTypeKind::Range => unreachable!("range handled before unary constructors"),
             RuntimeTypeKind::Exception => unreachable!("exceptions handled before unary types"),
         };
+        Ok(())
+    }
+    pub(super) fn invoke_iterable_collection(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        kind: IterableCollectionKind,
+        source: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => {
+                let mut items = Vec::new();
+                while let Some(item) = self.heap.next(iterator)? {
+                    items.push(item);
+                }
+                self.finish_iterable_collection(destination, kind, items)
+            }
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("__iter__ frame").action =
+                        ReturnAction::CollectIterableStart(kind);
+                    Ok(())
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_iterable_collection(
+                        p,
+                        destination,
+                        IterableCollection {
+                            kind,
+                            iterator,
+                            items: Vec::new(),
+                        },
+                        output,
+                    )
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(super) fn continue_iterable_collection(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: IterableCollection,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if self.heap.is_iterator(state.iterator) {
+            while let Some(item) = self.heap.next(state.iterator)? {
+                state.items.push(item);
+            }
+            return self.finish_iterable_collection(destination, state.kind, state.items);
+        }
+        loop {
+            let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+            };
+            let depth = self.frames.len();
+            match self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [Value::UNBOUND; 3],
+                    count: 0,
+                },
+                output,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind == "StopIteration" => {
+                    return self.finish_iterable_collection(destination, state.kind, state.items)
+                }
+                Err(error) => return Err(error),
+            }
+            if self.frames.len() > depth {
+                self.frames.last_mut().expect("__next__ frame").action =
+                    ReturnAction::CollectIterableNext(state);
+                return Ok(());
+            }
+            state.items.push(self.registers[destination]);
+        }
+    }
+    pub(super) fn finish_iterable_collection(
+        &mut self,
+        destination: usize,
+        kind: IterableCollectionKind,
+        items: Vec<Value>,
+    ) -> Result<()> {
+        self.registers[destination] = self.heap.alloc(match kind {
+            IterableCollectionKind::List => Object::List(items),
+            IterableCollectionKind::Tuple => Object::Tuple(items),
+            IterableCollectionKind::Unpack { first, count } => {
+                if items.len() < count {
+                    return Err(Diagnostic::new(
+                        "ValueError",
+                        format!(
+                            "not enough values to unpack (expected {count}, got {})",
+                            items.len()
+                        ),
+                    ));
+                }
+                if items.len() > count {
+                    return Err(Diagnostic::new(
+                        "ValueError",
+                        format!("too many values to unpack (expected {count})"),
+                    ));
+                }
+                self.registers[first..first + count].copy_from_slice(&items);
+                return Ok(());
+            }
+        })?;
         Ok(())
     }
     fn materialize_builtin_iterable(&mut self, value: Value) -> Result<Vec<Value>> {
@@ -1415,9 +1554,7 @@ impl Vm {
         };
         match op {
             Op::ArgPos => {
-                let args = self.arguments.last_mut().expect("verified argument stack");
-                room(args)?;
-                args.positional.push(value);
+                self.push_expanded_positional(value)?;
             }
             Op::ArgStar if flags == 1 => {
                 // A lone star expression is evaluated now, but materialized at
@@ -1434,9 +1571,7 @@ impl Vm {
             Op::ArgStar => {
                 let iter = self.heap.iterator(value)?;
                 while let Some(value) = self.heap.next(iter)? {
-                    let args = self.arguments.last_mut().expect("verified argument stack");
-                    room(args)?;
-                    args.positional.push(value);
+                    self.push_expanded_positional(value)?;
                 }
             }
             Op::ArgNamed => {
@@ -1470,6 +1605,125 @@ impl Vm {
                 }
             }
             _ => unreachable!(),
+        }
+        Ok(())
+    }
+    pub(super) fn push_expanded_positional(&mut self, value: Value) -> Result<()> {
+        let args = self.arguments.last_mut().expect("verified argument stack");
+        if args.count() >= self.limits.arguments {
+            return Err(Diagnostic::new(
+                "ResourceError",
+                "expanded argument budget exceeded",
+            ));
+        }
+        args.positional.push(value);
+        Ok(())
+    }
+    pub(super) fn expand_star_argument(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        source: Value,
+        resume_pc: Option<usize>,
+        output: &mut dyn Write,
+    ) -> Result<bool> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => {
+                while let Some(item) = self.heap.next(iterator)? {
+                    self.push_expanded_positional(item)?;
+                }
+                Ok(false)
+            }
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("__iter__ frame").action =
+                        ReturnAction::ExpandIterableStart(resume_pc);
+                    Ok(true)
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_argument_expansion(
+                        p,
+                        destination,
+                        ArgumentExpansion {
+                            iterator,
+                            resume_pc: None,
+                        },
+                        output,
+                    )?;
+                    Ok(self.frames.len() > depth)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(super) fn continue_argument_expansion(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: ArgumentExpansion,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if self.heap.is_iterator(state.iterator) {
+            while let Some(item) = self.heap.next(state.iterator)? {
+                self.push_expanded_positional(item)?;
+            }
+            if let Some(resume_pc) = state.resume_pc {
+                self.frames
+                    .last_mut()
+                    .expect("argument expansion caller")
+                    .ip = resume_pc;
+            }
+            return Ok(());
+        }
+        let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+        };
+        let depth = self.frames.len();
+        match self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            },
+            output,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.kind == "StopIteration" => {
+                if let Some(resume_pc) = state.resume_pc {
+                    self.frames
+                        .last_mut()
+                        .expect("argument expansion caller")
+                        .ip = resume_pc;
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+        if self.frames.len() > depth {
+            self.frames.last_mut().expect("__next__ frame").action =
+                ReturnAction::ExpandIterableNext(state);
+        } else {
+            self.push_expanded_positional(self.registers[destination])?;
+            self.continue_argument_expansion(p, destination, state, output)?;
         }
         Ok(())
     }
