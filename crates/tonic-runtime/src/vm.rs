@@ -630,7 +630,26 @@ enum ReturnAction {
         symbol: u16,
         cell: Option<Value>,
     },
+    AttributeGet(AttributeGet),
     Setter,
+}
+#[derive(Clone)]
+pub(super) struct AttributeGet {
+    owner: Value,
+    name: String,
+    missing: AttributeMissing,
+    phase: AttributePhase,
+}
+#[derive(Clone, Copy)]
+pub(super) enum AttributeMissing {
+    Raise,
+    Default(Value),
+    HasAttr,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttributePhase {
+    Primary,
+    Fallback,
 }
 #[derive(Clone, Copy)]
 pub(super) enum IterableCollectionKind {
@@ -832,6 +851,12 @@ impl ReturnAction {
             | Self::Length
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
+            Self::AttributeGet(state) => {
+                visit(state.owner);
+                if let AttributeMissing::Default(value) = state.missing {
+                    visit(value);
+                }
+            }
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
@@ -1011,6 +1036,7 @@ impl Vm {
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
             ("setattr", Builtin::SetAttr),
+            ("delattr", Builtin::DelAttr),
             ("hasattr", Builtin::HasAttr),
             ("staticmethod", Builtin::StaticMethod),
             ("classmethod", Builtin::ClassMethod),
@@ -1024,9 +1050,28 @@ impl Vm {
         vm.register_native("fastmath", "array", 1, fastmath_array)?;
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
+        let object_getattribute = vm
+            .heap
+            .alloc(Object::Builtin(Builtin::ObjectGetAttribute))?;
+        let object_setattr = vm.heap.alloc(Object::Builtin(Builtin::ObjectSetAttr))?;
+        let object_delattr = vm.heap.alloc(Object::Builtin(Builtin::ObjectDelAttr))?;
         let type_new = vm.heap.alloc(Object::Builtin(Builtin::TypeNew))?;
-        vm.object_class = vm.heap.root_object_class(object_new)?;
-        vm.type_class = vm.heap.root_type_class(vm.object_class, type_new)?;
+        let type_getattribute = vm.heap.alloc(Object::Builtin(Builtin::TypeGetAttribute))?;
+        let type_setattr = vm.heap.alloc(Object::Builtin(Builtin::TypeSetAttr))?;
+        let type_delattr = vm.heap.alloc(Object::Builtin(Builtin::TypeDelAttr))?;
+        vm.object_class = vm.heap.root_object_class(
+            object_new,
+            object_getattribute,
+            object_setattr,
+            object_delattr,
+        )?;
+        vm.type_class = vm.heap.root_type_class(
+            vm.object_class,
+            type_new,
+            type_getattribute,
+            type_setattr,
+            type_delattr,
+        )?;
         let int = vm
             .heap
             .builtin_class("int", vec![vm.object_class], vm.type_class)?;
@@ -2057,6 +2102,16 @@ impl Vm {
             Some(class) => self.instance_check(exception, class, false, 0)?,
             None => false,
         };
+        let attribute_error_class = self
+            .runtime_types
+            .other_exceptions
+            .iter()
+            .find(|(name, _)| name == "AttributeError")
+            .map(|(_, class)| *class);
+        let attribute_error = match attribute_error_class {
+            Some(class) => self.instance_check(exception, class, false, 0)?,
+            None => false,
+        };
         let mut selected = None;
         let mut traceback = Vec::new();
         for frame_index in (minimum_depth..self.frames.len()).rev() {
@@ -2125,6 +2180,66 @@ impl Vm {
                         caller.code,
                         caller.ip.saturating_sub(1),
                     );
+                }
+            }
+            if attribute_error {
+                if let ReturnAction::AttributeGet(state) = &frame.action {
+                    let state = state.clone();
+                    let fallback = if state.phase == AttributePhase::Primary {
+                        if matches!(self.heap.get(state.owner), Ok(Object::Class(_))) {
+                            self.heap
+                                .metaclass_method_call(state.owner, "__getattr__")?
+                        } else {
+                            self.heap.special_method_call(state.owner, "__getattr__")?
+                        }
+                    } else {
+                        None
+                    };
+                    let consumable =
+                        fallback.is_some() || !matches!(state.missing, AttributeMissing::Raise);
+                    if consumable {
+                        let destination = frame.destination.ok_or_else(|| {
+                            Diagnostic::new(
+                                "BytecodeError",
+                                "attribute continuation has no destination",
+                            )
+                        })?;
+                        let unwind = (
+                            frame.base,
+                            frame.cell_base,
+                            frame.argument_base,
+                            frame.pending_class_base,
+                        );
+                        self.frames.truncate(frame_index);
+                        self.registers.truncate(unwind.0);
+                        self.cells.truncate(unwind.1);
+                        self.arguments.truncate(unwind.2);
+                        self.pending_classes.truncate(unwind.3);
+                        let result = self.continue_attribute_missing(
+                            program,
+                            destination,
+                            state,
+                            error.clone(),
+                            output,
+                        );
+                        if let Err(next_error) = result {
+                            let caller = self.frames.last().ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "attribute continuation lost caller frame",
+                                )
+                            })?;
+                            return self.dispatch_exception(
+                                program,
+                                output,
+                                &next_error,
+                                minimum_depth,
+                                caller.code,
+                                caller.ip.saturating_sub(1),
+                            );
+                        }
+                        return Ok(true);
+                    }
                 }
             }
             if stop_iteration {
@@ -2597,6 +2712,11 @@ impl Vm {
                                 set_names = Some((class, pending, after));
                             }
                             ReturnAction::NamespaceLookup { .. } => {}
+                            ReturnAction::AttributeGet(state) => {
+                                if matches!(state.missing, AttributeMissing::HasAttr) {
+                                    value = Value::bool(true);
+                                }
+                            }
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -3062,107 +3182,13 @@ impl Vm {
                     Op::SetAttr => {
                         let owner = self.read(a)?;
                         let value = self.read(b)?;
-                        if let Some(setter) =
-                            self.heap.property_setter(owner, &p.symbols[i.c as usize])?
-                        {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                setter,
-                                a,
-                                Arguments::Direct {
-                                    receiver: Some(owner),
-                                    first: b,
-                                    count: 1,
-                                    keywords: &[],
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames
-                                    .last_mut()
-                                    .expect("property setter frame")
-                                    .action = ReturnAction::Setter;
-                            } else {
-                                self.registers[a] = Value::NONE;
-                            }
-                        } else if let Some(setter) = self
-                            .heap
-                            .descriptor_setter(owner, &p.symbols[i.c as usize])?
-                        {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                setter.callable,
-                                a,
-                                Arguments::Inline {
-                                    receiver: setter.receiver,
-                                    positional: [owner, value, Value::UNBOUND],
-                                    count: 2,
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames
-                                    .last_mut()
-                                    .expect("descriptor setter frame")
-                                    .action = ReturnAction::Setter;
-                            } else {
-                                self.registers[a] = Value::NONE;
-                            }
-                        } else {
-                            self.heap.set_attr(owner, &p.symbols[i.c as usize], value)?;
-                        }
+                        let name = p.symbols[i.c as usize].clone();
+                        self.invoke_attribute_set(p, owner, &name, value, a, output)?;
                     }
                     Op::DelAttr => {
                         let owner = self.read(a)?;
-                        let name = &p.symbols[i.b as usize];
-                        if let Some(deleter) = self.heap.property_deleter(owner, name)? {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                deleter,
-                                a,
-                                Arguments::Direct {
-                                    receiver: Some(owner),
-                                    first: 0,
-                                    count: 0,
-                                    keywords: &[],
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames
-                                    .last_mut()
-                                    .expect("property deleter frame")
-                                    .action = ReturnAction::Setter;
-                            } else {
-                                self.registers[a] = Value::NONE;
-                            }
-                        } else if let Some(deleter) = self.heap.descriptor_deleter(owner, name)? {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                deleter.callable,
-                                a,
-                                Arguments::Inline {
-                                    receiver: deleter.receiver,
-                                    positional: [owner, Value::UNBOUND, Value::UNBOUND],
-                                    count: 1,
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames
-                                    .last_mut()
-                                    .expect("descriptor deleter frame")
-                                    .action = ReturnAction::Setter;
-                            } else {
-                                self.registers[a] = Value::NONE;
-                            }
-                        } else {
-                            self.heap.del_attr(owner, name)?;
-                        }
+                        let name = p.symbols[i.b as usize].clone();
+                        self.invoke_attribute_delete(p, owner, &name, a, output)?;
                     }
                     Op::BeginArgs => self.arguments.push(ExpandedArgs::default()),
                     Op::ArgPos | Op::ArgStar | Op::ArgNamed | Op::ArgMapping => {
@@ -3437,79 +3463,15 @@ impl Vm {
                                 _ => {}
                             }
                         }
-                        let mut cache = None;
-                        if let Some(access) = self.heap.super_getter(object, name)? {
-                            match access {
-                                crate::classes::DescriptorAccess::Value(value) => {
-                                    self.registers[a] = value
-                                }
-                                crate::classes::DescriptorAccess::Call {
-                                    callable,
-                                    receiver,
-                                    positional,
-                                    count,
-                                } => self.invoke(
-                                    p,
-                                    callable,
-                                    a,
-                                    Arguments::Inline {
-                                        receiver,
-                                        positional,
-                                        count,
-                                    },
-                                    output,
-                                )?,
-                            }
-                        } else if let Some(getter) = self.heap.property_getter(object, name)? {
-                            self.invoke(
-                                p,
-                                getter,
-                                a,
-                                Arguments::Direct {
-                                    receiver: Some(object),
-                                    first: 0,
-                                    count: 0,
-                                    keywords: &[],
-                                },
-                                output,
-                            )?;
-                        } else if let Some(access) = self.heap.descriptor_getter(object, name)? {
-                            match access {
-                                crate::classes::DescriptorAccess::Value(value) => {
-                                    self.registers[a] = value
-                                }
-                                crate::classes::DescriptorAccess::Call {
-                                    callable,
-                                    receiver,
-                                    positional,
-                                    count,
-                                } => self.invoke(
-                                    p,
-                                    callable,
-                                    a,
-                                    Arguments::Inline {
-                                        receiver,
-                                        positional,
-                                        count,
-                                    },
-                                    output,
-                                )?,
-                            }
-                        } else {
-                            match self.heap.attr(object, name) {
-                                Ok(value) => {
-                                    self.registers[a] = value;
-                                    cache = self.heap.instance_slot_cache(object, name);
-                                }
-                                Err(error) if error.kind == "AttributeError" => {
-                                    let name = name.clone();
-                                    if !self.invoke_getattr_fallback(p, object, &name, a, output)? {
-                                        return Err(error);
-                                    }
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
+                        self.invoke_attribute_get(
+                            p,
+                            object,
+                            name,
+                            a,
+                            AttributeMissing::Raise,
+                            output,
+                        )?;
+                        let cache = self.heap.instance_slot_cache(object, name);
                         if let Some((function, kind, _)) = method_candidate {
                             self.observe_method(code_id, pc, function, kind);
                         }

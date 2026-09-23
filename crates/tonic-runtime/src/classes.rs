@@ -1,6 +1,6 @@
 //! Generic class/attribute semantics. No persistent raw object pointers or caches.
 use crate::{
-    heap::{Heap, Object},
+    heap::{Builtin, Heap, Object},
     shapes::{Attributes, ShapeId},
     value::Value,
 };
@@ -122,6 +122,9 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__bool__"
                 | "__get__"
                 | "__getattr__"
+                | "__getattribute__"
+                | "__setattr__"
+                | "__delattr__"
                 | "__iter__"
                 | "__next__"
                 | "__enter__"
@@ -153,9 +156,18 @@ fn missing(name: &str) -> Diagnostic {
     )
 }
 impl Heap {
-    pub fn root_object_class(&mut self, object_new: Value) -> Result<Value> {
+    pub fn root_object_class(
+        &mut self,
+        object_new: Value,
+        object_getattribute: Value,
+        object_setattr: Value,
+        object_delattr: Value,
+    ) -> Result<Value> {
         let value = self.namespace("object", Vec::new())?;
         self.namespace_set(value, "__new__", object_new)?;
+        self.namespace_set(value, "__getattribute__", object_getattribute)?;
+        self.namespace_set(value, "__setattr__", object_setattr)?;
+        self.namespace_set(value, "__delattr__", object_delattr)?;
         self.finish_class(value)?;
         let module = self.alloc(Object::Str("builtins".into()))?;
         self.set_attr(value, "__module__", module)?;
@@ -165,8 +177,18 @@ impl Heap {
         class.root = true;
         Ok(value)
     }
-    pub fn root_type_class(&mut self, object_class: Value, type_new: Value) -> Result<Value> {
+    pub fn root_type_class(
+        &mut self,
+        object_class: Value,
+        type_new: Value,
+        type_getattribute: Value,
+        type_setattr: Value,
+        type_delattr: Value,
+    ) -> Result<Value> {
         let value = self.namespace("type", vec![object_class])?;
+        self.namespace_set(value, "__getattribute__", type_getattribute)?;
+        self.namespace_set(value, "__setattr__", type_setattr)?;
+        self.namespace_set(value, "__delattr__", type_delattr)?;
         self.finish_class(value)?;
         let module = self.alloc(Object::Str("builtins".into()))?;
         self.set_attr(value, "__module__", module)?;
@@ -664,6 +686,40 @@ impl Heap {
         self.descriptor_callable(callable, instance, class)
             .map(Some)
     }
+
+    fn is_default_attribute_method(&self, value: Value, expected: Builtin) -> bool {
+        matches!(self.get(value), Ok(Object::Builtin(actual)) if *actual == expected)
+    }
+
+    /// Resolve an attribute interception hook, excluding Tonic's canonical
+    /// `object` implementation. The receiver comparison distinguishes the
+    /// inherited method descriptor from static/classmethod wrappers around it.
+    pub fn custom_attribute_method(
+        &self,
+        owner: Value,
+        name: &str,
+        default: Builtin,
+    ) -> Result<Option<DescriptorCall>> {
+        let call = if matches!(self.get(owner), Ok(Object::Class(_))) {
+            self.metaclass_method_call(owner, name)?
+        } else {
+            self.special_method_call(owner, name)?
+        };
+        Ok(call.filter(|call| {
+            !(call.receiver == Some(owner)
+                && self.is_default_attribute_method(call.callable, default))
+        }))
+    }
+
+    pub fn has_custom_getattribute(&self, owner: Value) -> bool {
+        let default = if matches!(self.get(owner), Ok(Object::Class(_))) {
+            Builtin::TypeGetAttribute
+        } else {
+            Builtin::ObjectGetAttribute
+        };
+        self.custom_attribute_method(owner, "__getattribute__", default)
+            .is_ok_and(|call| call.is_some())
+    }
     /// Resolve a protocol implemented by a class object's metaclass, binding
     /// an ordinary function to the class object just as Python's type call path
     /// does for `__init__`.
@@ -902,6 +958,160 @@ impl Heap {
             count: 2,
         }))
     }
+    /// Resolve a descriptor stored on a class object's metaclass. Data
+    /// descriptors participate before the class dictionary; non-data
+    /// descriptors are consulted only after the class dictionary misses.
+    pub fn metaclass_getter(
+        &mut self,
+        owner: Value,
+        name: &str,
+        data_only: bool,
+    ) -> Result<Option<DescriptorAccess>> {
+        let metaclass = match self.get(owner) {
+            Ok(Object::Class(class)) if class.metaclass != Value::UNBOUND => class.metaclass,
+            _ => return Ok(None),
+        };
+        let Some(descriptor) = self.class_lookup(metaclass, name)? else {
+            return Ok(None);
+        };
+        if let Ok(Object::Property { getter, .. }) = self.get(descriptor) {
+            let getter = getter.ok_or_else(|| missing(name))?;
+            return Ok(Some(DescriptorAccess::Call {
+                callable: getter,
+                receiver: Some(owner),
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            }));
+        }
+        if let Ok(descriptor_object) = self.get(descriptor) {
+            if let Some(descriptor_class) = descriptor_object.instance_class() {
+                let setter = self.class_lookup(descriptor_class, "__set__")?;
+                let deleter = self.class_lookup(descriptor_class, "__delete__")?;
+                let data = setter.is_some() || deleter.is_some();
+                if data_only && !data {
+                    return Ok(None);
+                }
+                if let Some(getter) = self.class_lookup(descriptor_class, "__get__")? {
+                    let call = self.descriptor_callable(getter, descriptor, descriptor_class)?;
+                    return Ok(Some(DescriptorAccess::Call {
+                        callable: call.callable,
+                        receiver: call.receiver,
+                        positional: [owner, metaclass, Value::UNBOUND],
+                        count: 2,
+                    }));
+                }
+                if data {
+                    return Ok(Some(DescriptorAccess::Value(descriptor)));
+                }
+            }
+        }
+        if data_only {
+            return Ok(None);
+        }
+        Ok(Some(DescriptorAccess::Value(self.bind_descriptor(
+            descriptor,
+            Some(owner),
+            metaclass,
+        )?)))
+    }
+
+    pub fn metaclass_property_setter(&self, owner: Value, name: &str) -> Result<Option<Value>> {
+        let metaclass = match self.get(owner) {
+            Ok(Object::Class(class)) if class.metaclass != Value::UNBOUND => class.metaclass,
+            _ => return Ok(None),
+        };
+        let Some(descriptor) = self.class_lookup(metaclass, name)? else {
+            return Ok(None);
+        };
+        match self.get(descriptor) {
+            Ok(Object::Property {
+                setter: Some(setter),
+                ..
+            }) => Ok(Some(*setter)),
+            Ok(Object::Property { setter: None, .. }) => Err(Diagnostic::new(
+                "AttributeError",
+                format!("property '{name}' has no setter"),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn metaclass_property_deleter(&self, owner: Value, name: &str) -> Result<Option<Value>> {
+        let metaclass = match self.get(owner) {
+            Ok(Object::Class(class)) if class.metaclass != Value::UNBOUND => class.metaclass,
+            _ => return Ok(None),
+        };
+        let Some(descriptor) = self.class_lookup(metaclass, name)? else {
+            return Ok(None);
+        };
+        match self.get(descriptor) {
+            Ok(Object::Property {
+                deleter: Some(deleter),
+                ..
+            }) => Ok(Some(*deleter)),
+            Ok(Object::Property { deleter: None, .. }) => Err(Diagnostic::new(
+                "AttributeError",
+                format!("property '{name}' has no deleter"),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn metaclass_descriptor_setter(
+        &self,
+        owner: Value,
+        name: &str,
+    ) -> Result<Option<DescriptorCall>> {
+        let metaclass = match self.get(owner) {
+            Ok(Object::Class(class)) if class.metaclass != Value::UNBOUND => class.metaclass,
+            _ => return Ok(None),
+        };
+        let Some(descriptor) = self.class_lookup(metaclass, name)? else {
+            return Ok(None);
+        };
+        let descriptor_class = match self.get(descriptor) {
+            Ok(object) if object.instance_class().is_some() => {
+                object.instance_class().expect("guarded descriptor class")
+            }
+            _ => return Ok(None),
+        };
+        let Some(setter) = self.class_lookup(descriptor_class, "__set__")? else {
+            if self.class_lookup(descriptor_class, "__delete__")?.is_some() {
+                return Err(Diagnostic::new("AttributeError", "__set__"));
+            }
+            return Ok(None);
+        };
+        self.descriptor_callable(setter, descriptor, descriptor_class)
+            .map(Some)
+    }
+
+    pub fn metaclass_descriptor_deleter(
+        &self,
+        owner: Value,
+        name: &str,
+    ) -> Result<Option<DescriptorCall>> {
+        let metaclass = match self.get(owner) {
+            Ok(Object::Class(class)) if class.metaclass != Value::UNBOUND => class.metaclass,
+            _ => return Ok(None),
+        };
+        let Some(descriptor) = self.class_lookup(metaclass, name)? else {
+            return Ok(None);
+        };
+        let descriptor_class = match self.get(descriptor) {
+            Ok(object) if object.instance_class().is_some() => {
+                object.instance_class().expect("guarded descriptor class")
+            }
+            _ => return Ok(None),
+        };
+        let Some(deleter) = self.class_lookup(descriptor_class, "__delete__")? else {
+            if self.class_lookup(descriptor_class, "__set__")?.is_some() {
+                return Err(Diagnostic::new("AttributeError", "__delete__"));
+            }
+            return Ok(None);
+        };
+        self.descriptor_callable(deleter, descriptor, descriptor_class)
+            .map(Some)
+    }
     pub fn descriptor_setter(&self, owner: Value, name: &str) -> Result<Option<DescriptorCall>> {
         let Ok(object) = self.get(owner) else {
             return Ok(None);
@@ -990,6 +1200,17 @@ impl Heap {
                 callable: value,
                 receiver: Some(descriptor),
             },
+            Ok(Object::Builtin(
+                Builtin::ObjectGetAttribute
+                | Builtin::ObjectSetAttr
+                | Builtin::ObjectDelAttr
+                | Builtin::TypeGetAttribute
+                | Builtin::TypeSetAttr
+                | Builtin::TypeDelAttr,
+            )) => DescriptorCall {
+                callable: value,
+                receiver: Some(descriptor),
+            },
             _ => DescriptorCall {
                 callable: value,
                 receiver: None,
@@ -1012,6 +1233,14 @@ impl Heap {
             Ok(Object::StaticMethod(function)) => Binding::Static(*function),
             Ok(Object::ClassMethod(function)) => Binding::Class(*function),
             Ok(Object::Function { .. }) if instance.is_some() => Binding::Instance(value),
+            Ok(Object::Builtin(
+                Builtin::ObjectGetAttribute
+                | Builtin::ObjectSetAttr
+                | Builtin::ObjectDelAttr
+                | Builtin::TypeGetAttribute
+                | Builtin::TypeSetAttr
+                | Builtin::TypeDelAttr,
+            )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
         match binding {
@@ -1148,6 +1377,9 @@ impl Heap {
         owner: Value,
         name: &str,
     ) -> Option<(Value, DirectMethodKind, Option<Value>)> {
+        if self.has_custom_getattribute(owner) {
+            return None;
+        }
         let (class, instance) = match self.get(owner).ok()? {
             object if object.instance_parts().is_some() => {
                 let (class, attributes) = object.instance_parts().expect("guarded instance parts");
@@ -1183,6 +1415,9 @@ impl Heap {
         owner: Value,
         name: &str,
     ) -> Option<(Value, ShapeId, usize, u64)> {
+        if self.has_custom_getattribute(owner) {
+            return None;
+        }
         let (class, attributes) = self.get(owner).ok()?.instance_parts()?;
         if matches!(
             name,
@@ -1418,7 +1653,19 @@ mod tests {
     fn class_namespace_and_instance_write_barriers_retain_young_values() {
         let mut heap = Heap::default();
         let object_new = heap.alloc(Object::Builtin(Builtin::ObjectNew)).unwrap();
-        let object = heap.root_object_class(object_new).unwrap();
+        let object_getattribute = heap
+            .alloc(Object::Builtin(Builtin::ObjectGetAttribute))
+            .unwrap();
+        let object_setattr = heap.alloc(Object::Builtin(Builtin::ObjectSetAttr)).unwrap();
+        let object_delattr = heap.alloc(Object::Builtin(Builtin::ObjectDelAttr)).unwrap();
+        let object = heap
+            .root_object_class(
+                object_new,
+                object_getattribute,
+                object_setattr,
+                object_delattr,
+            )
+            .unwrap();
         let namespace = heap.namespace("C", vec![object]).unwrap();
         heap.collect_young([object, namespace]).unwrap();
         let namespace_value = heap.alloc(Object::Str("namespace".into())).unwrap();

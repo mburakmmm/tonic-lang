@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 36,
-native handles 5, language/runtime 70, CPython bridge 15 ve HPy manifest 5; toplam 268 test.
+call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 41,
+native handles 5, language/runtime 71, CPython bridge 15 ve HPy manifest 5; toplam 274 test.
 
-Differential corpus: 286 stdout vakası ve 109 exception türü vakası. Seed 42.
-Exception handler/finally/with/custom iterable değişikliğinden sonra debug/release × interpreter/JIT ×
+Differential corpus: 290 stdout vakası ve 116 exception türü vakası. Seed 42.
+Attribute interception değişikliğinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -59,6 +59,10 @@ sınırında collection yapar; native scope ortasında collection yapmaz.
 Class corpus'u constructor/defaults/variadic bound calls, class namespace ile
 closure ayrımı, private/qualified names, class docstrings, C3 diamond/invalid
 MRO, base mutation, attribute builtin'leri ve class predicates içerir.
+Instance ve metaclass `__getattribute__`/`__setattr__`/`__delattr__`, canonical
+`object`/`type` delegasyonu, metaclass data/non-data descriptor sırası,
+`AttributeError` sonrası `__getattr__`, `getattr` default, `hasattr`, `delattr`,
+hook rebinding ve JIT/cache bypass engeli stress GC altında kapsanır.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython
@@ -329,6 +333,12 @@ iner. Bu güncel generic interpreter'a göre 7,89×, adaptive interpreter'a gör
 7,54× hızlanmadır. Her-allocation GC testi sonuç root'unu; mixed float→int testi
 atomik CALL deopt'unu; `inf`, `nan`, `-0.0` testi IEEE gözlenebilirliğini interpreter
 eşitliğiyle doğrular.
+Attribute interception tamamlandıktan sonra 274 Rust testi ile 290 stdout ve 116
+exception differential vakası debug/release olarak geçirildi. Sekiz differential
+koşunun tamamı interpreter/JIT × normal/stress-GC matrisinde Python 3.14.6 ile
+eşleşti. Özel `__getattribute__` JIT testi direct-method profilinin hook'u
+atlamadığını, class version testi ise sonradan hook ekleme/silmenin quickened slot
+guard'ını düşürdüğünü doğrular.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; uzak CI bu

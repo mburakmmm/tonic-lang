@@ -71,9 +71,12 @@ sonra alınır.
   - [x] `dict` constructor'ı için genel iterable-pair tüketimi; dış/pair
     iterator'larında suspending çağrılar, CPython sıra/index tanıları, keyword
     override ve moving-GC continuation roots.
-  - [ ] Builtin type alt sınıflarının native storage kurucuları,
-    `__getattribute__`/attribute mutation ve kalan numeric/comparison
-    protokolleri.
+  - [x] Instance ve metaclass `__getattribute__`/`__setattr__`/`__delattr__`;
+    canonical `object`/`type` delegasyonu, data/non-data descriptor önceliği,
+    suspending `AttributeError`→`__getattr__`, `getattr` default/`hasattr`,
+    `delattr`, precise roots ve attribute/direct-method cache güvenliği.
+  - [ ] Builtin type alt sınıflarının native storage kurucuları ve kalan
+    numeric/comparison protokolleri.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

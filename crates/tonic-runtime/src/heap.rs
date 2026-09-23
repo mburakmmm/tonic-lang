@@ -13,7 +13,7 @@ pub(crate) struct TracebackEntry {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Builtin {
     Print,
     Len,
@@ -22,13 +22,20 @@ pub(crate) enum Builtin {
     IsSubclass,
     GetAttr,
     SetAttr,
+    DelAttr,
     HasAttr,
     StaticMethod,
     ClassMethod,
     Property,
     Super,
     ObjectNew,
+    ObjectGetAttribute,
+    ObjectSetAttr,
+    ObjectDelAttr,
     TypeNew,
+    TypeGetAttribute,
+    TypeSetAttr,
+    TypeDelAttr,
 }
 #[derive(Debug)]
 pub(crate) enum Object {

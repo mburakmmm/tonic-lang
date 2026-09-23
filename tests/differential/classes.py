@@ -1132,6 +1132,133 @@ try:
 except ValueError:
     pass
 ''',
+'''class Intercept:
+    def __init__(self):
+        object.__setattr__(self,'seen','')
+        self.value=7
+    def __getattribute__(self,name):
+        if name!='seen':
+            old=object.__getattribute__(self,'seen')
+            object.__setattr__(self,'seen',old+'get:'+name+',')
+        if name=='fallback':
+            raise AttributeError('from hook')
+        return object.__getattribute__(self,name)
+    def __getattr__(self,name):
+        return 'missing:'+name
+    def __setattr__(self,name,value):
+        old=object.__getattribute__(self,'seen')
+        object.__setattr__(self,'seen',old+'set:'+name+',')
+        object.__setattr__(self,name,value)
+        return 99
+    def __delattr__(self,name):
+        old=object.__getattribute__(self,'seen')
+        object.__setattr__(self,'seen',old+'del:'+name+',')
+        object.__delattr__(self,name)
+        return 99
+x=Intercept()
+print(x.value,x.fallback,getattr(x,'absent','default'),hasattr(x,'also_absent'))
+x.value=9
+print(setattr(x,'other',11),x.other)
+print(delattr(x,'other'),hasattr(x,'other'))
+print(x.seen)
+try:
+    x.__getattribute__('fallback')
+except AttributeError:
+    print('direct-error')
+class FailingProperty:
+    @property
+    def item(self):
+        raise AttributeError('property')
+    def __getattr__(self,name):
+        if name=='item':
+            raise AttributeError('fallback')
+        return 5
+f=FailingProperty()
+print(getattr(f,'item',42),hasattr(f,'item'),getattr(f,'other',42),hasattr(f,'other'))
+''',
+'''class Plain:
+    pass
+p=Plain()
+p.__setattr__('x',3)
+print(p.__getattribute__('x'))
+p.__delattr__('x')
+print(hasattr(p,'x'))
+class Meta(type):
+    def __getattribute__(cls,name):
+        if name=='virtual':
+            return 'virtual:'+type.__getattribute__(cls,'__name__')
+        return type.__getattribute__(cls,name)
+    def __setattr__(cls,name,value):
+        type.__setattr__(cls,name,value+1)
+        return 99
+    def __delattr__(cls,name):
+        print('meta-del',name)
+        type.__delattr__(cls,name)
+        return 99
+class C(metaclass=Meta):
+    base=2
+print(C.base,C.virtual,getattr(C,'missing',8),hasattr(C,'missing'))
+C.extra=4
+print(C.extra,setattr(C,'other',6),C.other)
+del C.extra
+print(delattr(C,'other'),hasattr(C,'extra'),hasattr(C,'other'))
+class Cached:
+    def __init__(self):
+        self.value=2
+c=Cached()
+total=0
+for i in range(20):
+    total+=c.value
+def hook(self,name):
+    if name=='value':
+        return 7
+    return object.__getattribute__(self,name)
+Cached.__getattribute__=hook
+print(total,c.value)
+del Cached.__getattribute__
+print(c.value)
+''',
+'''class Data:
+    def __get__(self,obj,owner):
+        return 'data:'+obj.__name__
+    def __set__(self,obj,value):
+        type.__setattr__(obj,'written',value)
+    def __delete__(self,obj):
+        type.__setattr__(obj,'deleted',True)
+class NonData:
+    def __get__(self,obj,owner):
+        return 'nondata:'+obj.__name__
+class Meta(type):
+    data=Data()
+    nondata=NonData()
+    @property
+    def prop(cls):
+        return 'prop:'+cls.__name__
+    @prop.setter
+    def prop(cls,value):
+        type.__setattr__(cls,'prop_value',value)
+    @prop.deleter
+    def prop(cls):
+        type.__setattr__(cls,'prop_deleted',True)
+class C(metaclass=Meta):
+    data='class-data'
+    nondata='class-nondata'
+print(C.data,C.nondata,C.prop)
+C.data=5
+C.prop=6
+print(C.written,C.prop_value,C.data)
+del C.data
+del C.prop
+print(C.deleted,C.prop_deleted,C.data)
+del C.nondata
+print(C.nondata)
+''',
+'''items=[]
+mapping={}
+text='x'
+print((1).__class__==int,items.__class__==list,mapping.__class__==dict,text.__class__==str,None.__class__.__name__)
+print(object.__getattribute__(1,'__class__')==int)
+''',
 ]
 ERRORS = [
     ('class C:\n    pass\nC(1)', 'TypeError'),
@@ -1199,6 +1326,13 @@ ERRORS = [
     ('int(10,2)', 'TypeError'),
     ('dict([(1,)])', 'ValueError'),
     ('class C:\n    __getattr__=1\nC().missing', 'TypeError'),
+    ('class C:\n    __getattribute__=1\nC().missing', 'TypeError'),
+    ('class C:\n    __setattr__=1\nC().x=1', 'TypeError'),
+    ('class C:\n    __delattr__=1\ndel C().x', 'TypeError'),
+    ("class C:\n    pass\nobject.__getattribute__(C(),1)", 'TypeError'),
+    ("class C:\n    pass\nobject.__setattr__(C,'x',1)", 'TypeError'),
+    ("class C:\n    pass\ntype.__getattribute__(C(),'x')", 'TypeError'),
+    ("class C:\n    pass\ntype.__setattr__(C(),'x',1)", 'TypeError'),
     ("try:\n    int('bad')\nexcept 1:\n    pass", 'TypeError'),
     ('raise', 'RuntimeError'),
     ("raise TypeError('outer') from 1", 'TypeError'),

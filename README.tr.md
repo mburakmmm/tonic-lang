@@ -92,7 +92,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 268 Rust testi ile 286 stdout ve 109 exception türü
+Güncel yerel matris 274 Rust testi ile 290 stdout ve 116 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -310,6 +310,7 @@ Unboxed loop deopt-map sözleşmesi: [ADR 0039](docs/adr/0039-jit-unboxed-loop-d
 Adaptive integer quickening sözleşmesi: [ADR 0015](docs/adr/0015-adaptive-integer-quickening.md).
 Monomorphic function-call cache sözleşmesi: [ADR 0016](docs/adr/0016-monomorphic-call-cache.md).
 Instance attribute cache sözleşmesi: [ADR 0017](docs/adr/0017-instance-attribute-cache.md).
+Attribute interception sözleşmesi: [ADR 0065](docs/adr/0065-attribute-interception.md).
 
 Kuralların analizi: [ANALYSIS.md](docs/ANALYSIS.md).
 Kararlar/riskler: [ADR 0001](docs/adr/0001-bootstrap.md).

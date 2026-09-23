@@ -302,188 +302,125 @@ impl Vm {
                 }
                 if matches!(
                     builtin,
-                    Builtin::GetAttr | Builtin::SetAttr | Builtin::HasAttr
-                ) && args.count() >= 2
-                {
-                    let owner = args.positional(&self.registers, 0);
-                    let name = args.positional(&self.registers, 1);
-                    if let Ok(Object::Str(name)) = self.heap.get(name) {
-                        let name = name.clone();
-                        if !matches!(builtin, Builtin::SetAttr) {
-                            match self.heap.super_getter(owner, &name) {
-                                Ok(Some(access)) => {
-                                    if !matches!(builtin, Builtin::GetAttr) || args.count() != 2 {
-                                        return Err(Diagnostic::new(
-                                            "UnsupportedFeature",
-                                            "hasattr/getattr(default) with descriptor is not implemented",
-                                        ));
-                                    }
-                                    match access {
-                                        crate::classes::DescriptorAccess::Value(value) => {
-                                            self.registers[destination] = value;
-                                            return Ok(());
-                                        }
-                                        crate::classes::DescriptorAccess::Call {
-                                            callable,
-                                            receiver,
-                                            positional,
-                                            count,
-                                        } => {
-                                            return self.invoke_target(
-                                                p,
-                                                callable,
-                                                destination,
-                                                Arguments::Inline {
-                                                    receiver,
-                                                    positional,
-                                                    count,
-                                                },
-                                                output,
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(error)
-                                    if error.kind == "AttributeError"
-                                        && matches!(builtin, Builtin::HasAttr) =>
-                                {
-                                    self.registers[destination] = Value::bool(false);
-                                    return Ok(());
-                                }
-                                Err(error)
-                                    if error.kind == "AttributeError" && args.count() == 3 =>
-                                {
-                                    self.registers[destination] =
-                                        args.positional(&self.registers, 2);
-                                    return Ok(());
-                                }
-                                Err(error) => return Err(error),
-                                Ok(None) => {}
-                            }
-                            if let Some(getter) = self.heap.property_getter(owner, &name)? {
-                                if !matches!(builtin, Builtin::GetAttr) || args.count() != 2 {
-                                    return Err(Diagnostic::new(
-                                        "UnsupportedFeature",
-                                        "hasattr/getattr(default) with property is not implemented",
-                                    ));
-                                }
-                                return self.invoke_target(
-                                    p,
-                                    getter,
-                                    destination,
-                                    Arguments::Direct {
-                                        receiver: Some(owner),
-                                        first: 0,
-                                        count: 0,
-                                        keywords: &[],
-                                    },
-                                    output,
-                                );
-                            }
-                            if let Some(access) = self.heap.descriptor_getter(owner, &name)? {
-                                if !matches!(builtin, Builtin::GetAttr) || args.count() != 2 {
-                                    return Err(Diagnostic::new(
-                                        "UnsupportedFeature",
-                                        "hasattr/getattr(default) with descriptor is not implemented",
-                                    ));
-                                }
-                                match access {
-                                    crate::classes::DescriptorAccess::Value(value) => {
-                                        self.registers[destination] = value;
-                                        return Ok(());
-                                    }
-                                    crate::classes::DescriptorAccess::Call {
-                                        callable,
-                                        receiver,
-                                        positional,
-                                        count,
-                                    } => {
-                                        return self.invoke_target(
-                                            p,
-                                            callable,
-                                            destination,
-                                            Arguments::Inline {
-                                                receiver,
-                                                positional,
-                                                count,
-                                            },
-                                            output,
-                                        );
-                                    }
-                                }
-                            }
-                            if matches!(builtin, Builtin::GetAttr) && args.count() == 2 {
-                                match self.heap.attr(owner, &name) {
-                                    Ok(value) => {
-                                        self.registers[destination] = value;
-                                        return Ok(());
-                                    }
-                                    Err(error) if error.kind == "AttributeError" => {
-                                        if self.invoke_getattr_fallback(
-                                            p,
-                                            owner,
-                                            &name,
-                                            destination,
-                                            output,
-                                        )? {
-                                            return Ok(());
-                                        }
-                                    }
-                                    Err(error) => return Err(error),
-                                }
-                            }
-                        }
-                        if matches!(builtin, Builtin::SetAttr) && args.count() == 3 {
-                            if let Some(setter) = self.heap.property_setter(owner, &name)? {
-                                let value = args.positional(&self.registers, 2);
-                                let depth = self.frames.len();
-                                self.invoke_target(
-                                    p,
-                                    setter,
-                                    destination,
-                                    Arguments::Expanded(ExpandedArgs {
-                                        receiver: Some(owner),
-                                        positional: vec![value],
-                                        ..ExpandedArgs::default()
-                                    }),
-                                    output,
-                                )?;
-                                if self.frames.len() > depth {
-                                    self.frames
-                                        .last_mut()
-                                        .expect("property setter frame")
-                                        .action = super::ReturnAction::Setter;
-                                } else {
-                                    self.registers[destination] = Value::NONE;
-                                }
-                                return Ok(());
-                            }
-                            if let Some(setter) = self.heap.descriptor_setter(owner, &name)? {
-                                let value = args.positional(&self.registers, 2);
-                                let depth = self.frames.len();
-                                self.invoke_target(
-                                    p,
-                                    setter.callable,
-                                    destination,
-                                    Arguments::Inline {
-                                        receiver: setter.receiver,
-                                        positional: [owner, value, Value::UNBOUND],
-                                        count: 2,
-                                    },
-                                    output,
-                                )?;
-                                if self.frames.len() > depth {
-                                    self.frames
-                                        .last_mut()
-                                        .expect("descriptor setter frame")
-                                        .action = super::ReturnAction::Setter;
-                                } else {
-                                    self.registers[destination] = Value::NONE;
-                                }
-                                return Ok(());
-                            }
-                        }
+                    Builtin::GetAttr
+                        | Builtin::SetAttr
+                        | Builtin::DelAttr
+                        | Builtin::HasAttr
+                        | Builtin::ObjectGetAttribute
+                        | Builtin::ObjectSetAttr
+                        | Builtin::ObjectDelAttr
+                        | Builtin::TypeGetAttribute
+                        | Builtin::TypeSetAttr
+                        | Builtin::TypeDelAttr
+                ) {
+                    if args.keyword_count() != 0 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "attribute builtin does not accept keyword arguments",
+                        ));
                     }
+                    let count = args.count();
+                    let valid = match builtin {
+                        Builtin::GetAttr => (2..=3).contains(&count),
+                        Builtin::SetAttr | Builtin::ObjectSetAttr | Builtin::TypeSetAttr => {
+                            count == 3
+                        }
+                        Builtin::DelAttr
+                        | Builtin::HasAttr
+                        | Builtin::ObjectGetAttribute
+                        | Builtin::ObjectDelAttr
+                        | Builtin::TypeGetAttribute
+                        | Builtin::TypeDelAttr => count == 2,
+                        _ => unreachable!(),
+                    };
+                    if !valid {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "invalid attribute builtin arity",
+                        ));
+                    }
+                    let owner = args.positional(&self.registers, 0);
+                    let class_owner = matches!(self.heap.get(owner), Ok(Object::Class(_)));
+                    if matches!(
+                        builtin,
+                        Builtin::TypeGetAttribute | Builtin::TypeSetAttr | Builtin::TypeDelAttr
+                    ) && !class_owner
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "type attribute descriptor requires a class object",
+                        ));
+                    }
+                    if matches!(builtin, Builtin::ObjectSetAttr | Builtin::ObjectDelAttr)
+                        && class_owner
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "object attribute mutation does not accept a class object",
+                        ));
+                    }
+                    let name_value = args.positional(&self.registers, 1);
+                    let name = match self.heap.get(name_value) {
+                        Ok(Object::Str(name)) => name.clone(),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "attribute name must be a string",
+                            ))
+                        }
+                    };
+                    return match builtin {
+                        Builtin::GetAttr => {
+                            let missing = if count == 3 {
+                                super::AttributeMissing::Default(
+                                    args.positional(&self.registers, 2),
+                                )
+                            } else {
+                                super::AttributeMissing::Raise
+                            };
+                            self.invoke_attribute_get(p, owner, &name, destination, missing, output)
+                        }
+                        Builtin::HasAttr => self.invoke_attribute_get(
+                            p,
+                            owner,
+                            &name,
+                            destination,
+                            super::AttributeMissing::HasAttr,
+                            output,
+                        ),
+                        Builtin::SetAttr => self.invoke_attribute_set(
+                            p,
+                            owner,
+                            &name,
+                            args.positional(&self.registers, 2),
+                            destination,
+                            output,
+                        ),
+                        Builtin::DelAttr => {
+                            self.invoke_attribute_delete(p, owner, &name, destination, output)
+                        }
+                        Builtin::ObjectGetAttribute | Builtin::TypeGetAttribute => self
+                            .invoke_default_attribute_get(
+                                p,
+                                owner,
+                                &name,
+                                destination,
+                                None,
+                                output,
+                            ),
+                        Builtin::ObjectSetAttr | Builtin::TypeSetAttr => self
+                            .invoke_default_attribute_set(
+                                p,
+                                owner,
+                                &name,
+                                args.positional(&self.registers, 2),
+                                destination,
+                                output,
+                            ),
+                        Builtin::ObjectDelAttr | Builtin::TypeDelAttr => self
+                            .invoke_default_attribute_delete(p, owner, &name, destination, output),
+                        _ => unreachable!(),
+                    };
                 }
                 self.registers[destination] = self.call_builtin(builtin, p, &args, output)?
             }
@@ -529,33 +466,505 @@ impl Vm {
         }
         Ok(())
     }
-    pub(super) fn invoke_getattr_fallback(
+    fn finish_attribute_success(&mut self, destination: usize, state: &super::AttributeGet) {
+        if matches!(state.missing, super::AttributeMissing::HasAttr) {
+            self.registers[destination] = Value::bool(true);
+        }
+    }
+
+    fn invoke_attribute_call(
         &mut self,
         p: &Program,
-        owner: Value,
-        name: &str,
+        call: crate::classes::DescriptorCall,
         destination: usize,
+        arguments: ([Value; 3], usize),
+        state: Option<super::AttributeGet>,
         output: &mut dyn Write,
-    ) -> Result<bool> {
-        let call = if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
-            self.heap.metaclass_method_call(owner, "__getattr__")?
-        } else {
-            self.heap.special_method_call(owner, "__getattr__")?
-        };
-        let Some(call) = call else { return Ok(false) };
-        let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+    ) -> Result<()> {
+        let (positional, count) = arguments;
+        let depth = self.frames.len();
         self.invoke_target(
             p,
             call.callable,
             destination,
             Arguments::Inline {
                 receiver: call.receiver,
-                positional: [name, Value::UNBOUND, Value::UNBOUND],
-                count: 1,
+                positional,
+                count,
             },
             output,
         )?;
-        Ok(true)
+        if let Some(state) = state {
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("attribute protocol frame")
+                    .action = super::ReturnAction::AttributeGet(state);
+            } else {
+                self.finish_attribute_success(destination, &state);
+            }
+        }
+        Ok(())
+    }
+
+    fn invoke_default_attribute_get(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        destination: usize,
+        state: Option<super::AttributeGet>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let class_owner = matches!(self.heap.get(owner), Ok(Object::Class(_)));
+        if let Some(access) = self.heap.super_getter(owner, name)? {
+            match access {
+                crate::classes::DescriptorAccess::Value(value) => {
+                    self.registers[destination] = value;
+                    if let Some(state) = state.as_ref() {
+                        self.finish_attribute_success(destination, state);
+                    }
+                    return Ok(());
+                }
+                crate::classes::DescriptorAccess::Call {
+                    callable,
+                    receiver,
+                    positional,
+                    count,
+                } => {
+                    return self.invoke_attribute_call(
+                        p,
+                        crate::classes::DescriptorCall { callable, receiver },
+                        destination,
+                        (positional, count),
+                        state,
+                        output,
+                    );
+                }
+            }
+        }
+        if class_owner {
+            if let Some(access) = self.heap.metaclass_getter(owner, name, true)? {
+                match access {
+                    crate::classes::DescriptorAccess::Value(value) => {
+                        self.registers[destination] = value;
+                        if let Some(state) = state.as_ref() {
+                            self.finish_attribute_success(destination, state);
+                        }
+                        return Ok(());
+                    }
+                    crate::classes::DescriptorAccess::Call {
+                        callable,
+                        receiver,
+                        positional,
+                        count,
+                    } => {
+                        return self.invoke_attribute_call(
+                            p,
+                            crate::classes::DescriptorCall { callable, receiver },
+                            destination,
+                            (positional, count),
+                            state,
+                            output,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(getter) = self.heap.property_getter(owner, name)? {
+            return self.invoke_attribute_call(
+                p,
+                crate::classes::DescriptorCall {
+                    callable: getter,
+                    receiver: Some(owner),
+                },
+                destination,
+                ([Value::UNBOUND; 3], 0),
+                state,
+                output,
+            );
+        }
+        if let Some(access) = self.heap.descriptor_getter(owner, name)? {
+            match access {
+                crate::classes::DescriptorAccess::Value(value) => {
+                    self.registers[destination] = value;
+                    if let Some(state) = state.as_ref() {
+                        self.finish_attribute_success(destination, state);
+                    }
+                    return Ok(());
+                }
+                crate::classes::DescriptorAccess::Call {
+                    callable,
+                    receiver,
+                    positional,
+                    count,
+                } => {
+                    return self.invoke_attribute_call(
+                        p,
+                        crate::classes::DescriptorCall { callable, receiver },
+                        destination,
+                        (positional, count),
+                        state,
+                        output,
+                    );
+                }
+            }
+        }
+        match self.heap.attr(owner, name) {
+            Ok(value) => self.registers[destination] = value,
+            Err(error) if name == "__class__" && error.kind == "AttributeError" => {
+                self.registers[destination] = self.runtime_class(owner)?;
+            }
+            Err(error) if class_owner && error.kind == "AttributeError" => {
+                let Some(access) = self.heap.metaclass_getter(owner, name, false)? else {
+                    return Err(error);
+                };
+                match access {
+                    crate::classes::DescriptorAccess::Value(value) => {
+                        self.registers[destination] = value;
+                    }
+                    crate::classes::DescriptorAccess::Call {
+                        callable,
+                        receiver,
+                        positional,
+                        count,
+                    } => {
+                        return self.invoke_attribute_call(
+                            p,
+                            crate::classes::DescriptorCall { callable, receiver },
+                            destination,
+                            (positional, count),
+                            state,
+                            output,
+                        );
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        if let Some(state) = state.as_ref() {
+            self.finish_attribute_success(destination, state);
+        }
+        Ok(())
+    }
+
+    pub(super) fn invoke_attribute_get(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        destination: usize,
+        missing: super::AttributeMissing,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let state = super::AttributeGet {
+            owner,
+            name: name.to_owned(),
+            missing,
+            phase: super::AttributePhase::Primary,
+        };
+        let default = if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            Builtin::TypeGetAttribute
+        } else {
+            Builtin::ObjectGetAttribute
+        };
+        let result = if let Some(call) =
+            self.heap
+                .custom_attribute_method(owner, "__getattribute__", default)?
+        {
+            let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+            self.invoke_attribute_call(
+                p,
+                call,
+                destination,
+                ([name, Value::UNBOUND, Value::UNBOUND], 1),
+                Some(state.clone()),
+                output,
+            )
+        } else {
+            self.invoke_default_attribute_get(
+                p,
+                owner,
+                name,
+                destination,
+                Some(state.clone()),
+                output,
+            )
+        };
+        match result {
+            Err(error) if error.kind == "AttributeError" => {
+                self.continue_attribute_missing(p, destination, state, error, output)
+            }
+            result => result,
+        }
+    }
+
+    pub(super) fn continue_attribute_missing(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: super::AttributeGet,
+        error: Diagnostic,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if state.phase == super::AttributePhase::Primary {
+            let call = if matches!(self.heap.get(state.owner), Ok(Object::Class(_))) {
+                self.heap
+                    .metaclass_method_call(state.owner, "__getattr__")?
+            } else {
+                self.heap.special_method_call(state.owner, "__getattr__")?
+            };
+            if let Some(call) = call {
+                state.phase = super::AttributePhase::Fallback;
+                let name = self.heap.alloc(Object::Str(state.name.clone()))?;
+                let result = self.invoke_attribute_call(
+                    p,
+                    call,
+                    destination,
+                    ([name, Value::UNBOUND, Value::UNBOUND], 1),
+                    Some(state.clone()),
+                    output,
+                );
+                return match result {
+                    Err(fallback_error) if fallback_error.kind == "AttributeError" => self
+                        .continue_attribute_missing(p, destination, state, fallback_error, output),
+                    result => result,
+                };
+            }
+        }
+        match state.missing {
+            super::AttributeMissing::Raise => Err(error),
+            super::AttributeMissing::Default(value) => {
+                self.registers[destination] = value;
+                Ok(())
+            }
+            super::AttributeMissing::HasAttr => {
+                self.registers[destination] = Value::bool(false);
+                Ok(())
+            }
+        }
+    }
+
+    fn invoke_setter_call(
+        &mut self,
+        p: &Program,
+        call: crate::classes::DescriptorCall,
+        destination: usize,
+        positional: [Value; 3],
+        count: usize,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let depth = self.frames.len();
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional,
+                count,
+            },
+            output,
+        )?;
+        if self.frames.len() > depth {
+            self.frames
+                .last_mut()
+                .expect("attribute mutation frame")
+                .action = super::ReturnAction::Setter;
+        } else {
+            self.registers[destination] = Value::NONE;
+        }
+        Ok(())
+    }
+
+    fn invoke_default_attribute_set(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        value: Value,
+        destination: usize,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            if let Some(setter) = self.heap.metaclass_property_setter(owner, name)? {
+                return self.invoke_setter_call(
+                    p,
+                    crate::classes::DescriptorCall {
+                        callable: setter,
+                        receiver: Some(owner),
+                    },
+                    destination,
+                    [value, Value::UNBOUND, Value::UNBOUND],
+                    1,
+                    output,
+                );
+            }
+            if let Some(setter) = self.heap.metaclass_descriptor_setter(owner, name)? {
+                return self.invoke_setter_call(
+                    p,
+                    setter,
+                    destination,
+                    [owner, value, Value::UNBOUND],
+                    2,
+                    output,
+                );
+            }
+            self.heap.set_attr(owner, name, value)?;
+            self.registers[destination] = Value::NONE;
+            return Ok(());
+        }
+        if let Some(setter) = self.heap.property_setter(owner, name)? {
+            return self.invoke_setter_call(
+                p,
+                crate::classes::DescriptorCall {
+                    callable: setter,
+                    receiver: Some(owner),
+                },
+                destination,
+                [value, Value::UNBOUND, Value::UNBOUND],
+                1,
+                output,
+            );
+        }
+        if let Some(setter) = self.heap.descriptor_setter(owner, name)? {
+            return self.invoke_setter_call(
+                p,
+                setter,
+                destination,
+                [owner, value, Value::UNBOUND],
+                2,
+                output,
+            );
+        }
+        self.heap.set_attr(owner, name, value)?;
+        self.registers[destination] = Value::NONE;
+        Ok(())
+    }
+
+    pub(super) fn invoke_attribute_set(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        value: Value,
+        destination: usize,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let default = if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            Builtin::TypeSetAttr
+        } else {
+            Builtin::ObjectSetAttr
+        };
+        if let Some(call) = self
+            .heap
+            .custom_attribute_method(owner, "__setattr__", default)?
+        {
+            let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+            return self.invoke_setter_call(
+                p,
+                call,
+                destination,
+                [name, value, Value::UNBOUND],
+                2,
+                output,
+            );
+        }
+        self.invoke_default_attribute_set(p, owner, name, value, destination, output)
+    }
+
+    fn invoke_default_attribute_delete(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        destination: usize,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            if let Some(deleter) = self.heap.metaclass_property_deleter(owner, name)? {
+                return self.invoke_setter_call(
+                    p,
+                    crate::classes::DescriptorCall {
+                        callable: deleter,
+                        receiver: Some(owner),
+                    },
+                    destination,
+                    [Value::UNBOUND; 3],
+                    0,
+                    output,
+                );
+            }
+            if let Some(deleter) = self.heap.metaclass_descriptor_deleter(owner, name)? {
+                return self.invoke_setter_call(
+                    p,
+                    deleter,
+                    destination,
+                    [owner, Value::UNBOUND, Value::UNBOUND],
+                    1,
+                    output,
+                );
+            }
+            self.heap.del_attr(owner, name)?;
+            self.registers[destination] = Value::NONE;
+            return Ok(());
+        }
+        if let Some(deleter) = self.heap.property_deleter(owner, name)? {
+            return self.invoke_setter_call(
+                p,
+                crate::classes::DescriptorCall {
+                    callable: deleter,
+                    receiver: Some(owner),
+                },
+                destination,
+                [Value::UNBOUND; 3],
+                0,
+                output,
+            );
+        }
+        if let Some(deleter) = self.heap.descriptor_deleter(owner, name)? {
+            return self.invoke_setter_call(
+                p,
+                deleter,
+                destination,
+                [owner, Value::UNBOUND, Value::UNBOUND],
+                1,
+                output,
+            );
+        }
+        self.heap.del_attr(owner, name)?;
+        self.registers[destination] = Value::NONE;
+        Ok(())
+    }
+
+    pub(super) fn invoke_attribute_delete(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        name: &str,
+        destination: usize,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let default = if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
+            Builtin::TypeDelAttr
+        } else {
+            Builtin::ObjectDelAttr
+        };
+        if let Some(call) = self
+            .heap
+            .custom_attribute_method(owner, "__delattr__", default)?
+        {
+            let name = self.heap.alloc(Object::Str(name.to_owned()))?;
+            return self.invoke_setter_call(
+                p,
+                call,
+                destination,
+                [name, Value::UNBOUND, Value::UNBOUND],
+                1,
+                output,
+            );
+        }
+        self.invoke_default_attribute_delete(p, owner, name, destination, output)
     }
     pub(super) fn invoke_truth(
         &mut self,
@@ -1684,46 +2093,17 @@ impl Vm {
                 )?;
                 Ok(Value::bool(result))
             }
-            Builtin::GetAttr | Builtin::SetAttr | Builtin::HasAttr => {
-                let valid = match builtin {
-                    Builtin::GetAttr => (2..=3).contains(&count),
-                    Builtin::SetAttr => count == 3,
-                    _ => count == 2,
-                };
-                if !valid {
-                    return Err(Diagnostic::new(
-                        "TypeError",
-                        "invalid attribute builtin arity",
-                    ));
-                }
-                let owner = args.positional(&self.registers, 0);
-                let name = args.positional(&self.registers, 1);
-                let Ok(Object::Str(name)) = self.heap.get(name) else {
-                    return Err(Diagnostic::new(
-                        "TypeError",
-                        "attribute name must be a string",
-                    ));
-                };
-                let name = name.clone();
-                if matches!(builtin, Builtin::SetAttr) {
-                    self.heap
-                        .set_attr(owner, &name, args.positional(&self.registers, 2))?;
-                    return Ok(Value::NONE);
-                }
-                match self.heap.attr(owner, &name) {
-                    Ok(value) => Ok(if matches!(builtin, Builtin::HasAttr) {
-                        Value::bool(true)
-                    } else {
-                        value
-                    }),
-                    Err(e) if e.kind == "AttributeError" && matches!(builtin, Builtin::HasAttr) => {
-                        Ok(Value::bool(false))
-                    }
-                    Err(e) if e.kind == "AttributeError" && count == 3 => {
-                        Ok(args.positional(&self.registers, 2))
-                    }
-                    Err(e) => Err(e),
-                }
+            Builtin::GetAttr
+            | Builtin::SetAttr
+            | Builtin::DelAttr
+            | Builtin::HasAttr
+            | Builtin::ObjectGetAttribute
+            | Builtin::ObjectSetAttr
+            | Builtin::ObjectDelAttr
+            | Builtin::TypeGetAttribute
+            | Builtin::TypeSetAttr
+            | Builtin::TypeDelAttr => {
+                unreachable!("attribute builtins use the suspending call path")
             }
             Builtin::Print => {
                 let (mut sep, mut end) = (" ".to_owned(), "\n".to_owned());

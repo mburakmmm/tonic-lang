@@ -127,6 +127,56 @@ fn getattr_fallback_uses_instance_class_and_metaclass_protocols() {
         .unwrap_err();
     assert_eq!(error.kind, "TypeError");
 }
+
+#[test]
+fn attribute_interception_delegates_and_preserves_missing_semantics() {
+    assert_eq!(
+        run(
+            "class Intercept:\n    def __init__(self):\n        object.__setattr__(self,'seen','')\n        self.value=7\n    def __getattribute__(self,name):\n        if name!='seen':\n            old=object.__getattribute__(self,'seen')\n            object.__setattr__(self,'seen',old+'get:'+name+',')\n        if name=='fallback':\n            raise AttributeError('from hook')\n        return object.__getattribute__(self,name)\n    def __getattr__(self,name):\n        return 'missing:'+name\n    def __setattr__(self,name,value):\n        old=object.__getattribute__(self,'seen')\n        object.__setattr__(self,'seen',old+'set:'+name+',')\n        object.__setattr__(self,name,value)\n        return 99\n    def __delattr__(self,name):\n        old=object.__getattribute__(self,'seen')\n        object.__setattr__(self,'seen',old+'del:'+name+',')\n        object.__delattr__(self,name)\n        return 99\nx=Intercept()\nprint(x.value,x.fallback,getattr(x,'absent','default'),hasattr(x,'also_absent'))\nx.value=9\nprint(setattr(x,'other',11),x.other)\nprint(delattr(x,'other'),hasattr(x,'other'))\nprint(x.seen)\ntry:\n    x.__getattribute__('fallback')\nexcept AttributeError:\n    print('direct-error')\nclass FailingProperty:\n    @property\n    def item(self):\n        raise AttributeError('property')\n    def __getattr__(self,name):\n        if name=='item':\n            raise AttributeError('fallback')\n        return 5\nf=FailingProperty()\nprint(getattr(f,'item',42),hasattr(f,'item'),getattr(f,'other',42),hasattr(f,'other'))"
+        ),
+        "7 missing:fallback missing:absent True\nNone 11\nNone True\nset:value,get:value,get:fallback,get:absent,get:also_absent,set:value,set:other,get:other,del:other,get:other,\ndirect-error\n42 False 5 True\n"
+    );
+}
+
+#[test]
+fn metaclass_attribute_interception_and_default_bound_methods_work() {
+    assert_eq!(
+        run(
+            "class Plain:\n    pass\np=Plain()\np.__setattr__('x',3)\nprint(p.__getattribute__('x'))\np.__delattr__('x')\nprint(hasattr(p,'x'))\nclass Meta(type):\n    def __getattribute__(cls,name):\n        if name=='virtual':\n            return 'virtual:'+type.__getattribute__(cls,'__name__')\n        return type.__getattribute__(cls,name)\n    def __setattr__(cls,name,value):\n        type.__setattr__(cls,name,value+1)\n        return 99\n    def __delattr__(cls,name):\n        print('meta-del',name)\n        type.__delattr__(cls,name)\n        return 99\nclass C(metaclass=Meta):\n    base=2\nprint(C.base,C.virtual,getattr(C,'missing',8),hasattr(C,'missing'))\nC.extra=4\nprint(C.extra,setattr(C,'other',6),C.other)\ndel C.extra\nprint(delattr(C,'other'),hasattr(C,'extra'),hasattr(C,'other'))"
+        ),
+        "3\nFalse\n2 virtual:C 8 False\n5 None 7\nmeta-del extra\nmeta-del other\nNone False False\n"
+    );
+}
+
+#[test]
+fn metaclass_descriptors_follow_type_attribute_precedence() {
+    assert_eq!(
+        run(
+            "class Data:\n    def __get__(self,obj,owner):\n        return 'data:'+obj.__name__\n    def __set__(self,obj,value):\n        type.__setattr__(obj,'written',value)\n    def __delete__(self,obj):\n        type.__setattr__(obj,'deleted',True)\nclass NonData:\n    def __get__(self,obj,owner):\n        return 'nondata:'+obj.__name__\nclass Meta(type):\n    data=Data()\n    nondata=NonData()\n    @property\n    def prop(cls):\n        return 'prop:'+cls.__name__\n    @prop.setter\n    def prop(cls,value):\n        type.__setattr__(cls,'prop_value',value)\n    @prop.deleter\n    def prop(cls):\n        type.__setattr__(cls,'prop_deleted',True)\nclass C(metaclass=Meta):\n    data='class-data'\n    nondata='class-nondata'\nprint(C.data,C.nondata,C.prop)\nC.data=5\nC.prop=6\nprint(C.written,C.prop_value,C.data)\ndel C.data\ndel C.prop\nprint(C.deleted,C.prop_deleted,C.data)\ndel C.nondata\nprint(C.nondata)"
+        ),
+        "data:C class-nondata prop:C\n5 6 data:C\nTrue True data:C\nnondata:C\n"
+    );
+}
+
+#[test]
+fn attribute_caches_follow_getattribute_rebinding_and_deletion() {
+    assert_eq!(
+        run(
+            "class Cached:\n    def __init__(self):\n        self.value=2\nc=Cached()\ntotal=0\nfor i in range(20):\n    total+=c.value\ndef hook(self,name):\n    if name=='value':\n        return 7\n    return object.__getattribute__(self,name)\nCached.__getattribute__=hook\nprint(total,c.value)\ndel Cached.__getattribute__\nprint(c.value)"
+        ),
+        "40 7\n2\n"
+    );
+}
+
+#[test]
+fn builtin_values_expose_canonical_class_through_default_getattribute() {
+    assert_eq!(
+        run(
+            "items=[]\nmapping={}\ntext='x'\nprint((1).__class__==int,items.__class__==list,mapping.__class__==dict,text.__class__==str,None.__class__.__name__)\nprint(object.__getattribute__(1,'__class__')==int)"
+        ),
+        "True True True True NoneType\nTrue\n"
+    );
+}
 #[test]
 fn metaclass_new_init_chain_preserves_namespace_and_order() {
     assert_eq!(

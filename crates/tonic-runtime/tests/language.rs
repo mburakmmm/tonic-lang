@@ -683,6 +683,20 @@ fn cranelift_direct_method_guard_observes_class_rebinding() {
 }
 
 #[test]
+fn cranelift_does_not_bypass_custom_getattribute_for_method_calls() {
+    let source = "class Counter:\n    def add(self,value):\n        return value+1\n    def __getattribute__(self,name):\n        if name=='add':\n            return lambda value:value+2\n        return object.__getattribute__(self,name)\ndef loop(counter,n):\n    i=0\n    total=0\n    while i<n:\n        total=counter.add(total)\n        i+=1\n    return total\nprint(loop(Counter(),5000))";
+    let program = compile(source, "jit-custom-getattribute").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"10000\n");
+    assert_eq!(vm.stats.jit_direct_method_sites, 0);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn cranelift_direct_method_binds_receiver_without_hot_bound_method_allocations() {
     let source = "class Token:\n    def identity(self):\n        return self\ndef loop(token,n):\n    i=0\n    result=None\n    while i<n:\n        result=token.identity()\n        i+=1\n    return result\ntoken=Token()\nprint(isinstance(loop(token,5000),Token))";
     let program = compile(source, "jit-direct-method-receiver").unwrap();
