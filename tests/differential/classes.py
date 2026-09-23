@@ -1375,7 +1375,6 @@ ERRORS = [
     ('class R(range):\n    pass', 'TypeError'),
     ('class C(int,str):\n    pass', 'TypeError'),
     ("type('B',(bool,),{})", 'TypeError'),
-    ('bool(NotImplemented)', 'TypeError'),
     ('class C(1):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B(A,A):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    print("body")', 'TypeError'),

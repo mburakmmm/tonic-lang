@@ -45,7 +45,7 @@ direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecyc
 call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 41,
 native handles 5, language/runtime 73, CPython bridge 15 ve HPy manifest 5; toplam 276 test.
 
-Differential corpus: 292 stdout vakası ve 121 exception türü vakası. Seed 42.
+Differential corpus: 292 stdout vakası ve 120 exception türü vakası. Seed 42.
 Attribute interception değişikliğinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -340,7 +340,7 @@ eşleşti. Özel `__getattribute__` JIT testi direct-method profilinin hook'u
 atlamadığını, class version testi ise sonradan hook ekleme/silmenin quickened slot
 guard'ını düşürdüğünü doğrular.
 Builtin alt sınıf ve operator protokol aşamasında toplam 276 Rust testi ile 292
-stdout ve 121 exception differential vakasına ulaşıldı. Native subclass testi
+stdout ve 120 exception differential vakasına ulaşıldı. Native subclass testi
 `int`/`float`/`str`/`list`/`tuple`/`dict` backing storage'ını, instance alanlarını,
 hash eşdeğerliğini, slice/iteration/mutation yollarını, custom iterable sırasında
 continuation root'larını ve immediate-int JIT guard miss'inde exact-PC deopt'u
