@@ -601,6 +601,11 @@ enum ReturnAction {
     CollectIterableNext(IterableCollection),
     ExpandIterableStart(Option<usize>),
     ExpandIterableNext(ArgumentExpansion),
+    DictIterableStart(DictConstructionStart),
+    DictIterableNext(DictConstruction),
+    DictPairStart(DictConstruction),
+    DictPairIteratorStart(DictConstruction),
+    DictPairNext(DictPairConstruction),
     Length,
     Truth {
         protocol: TruthProtocol,
@@ -643,6 +648,23 @@ pub(super) struct IterableCollection {
 pub(super) struct ArgumentExpansion {
     iterator: Value,
     resume_pc: Option<usize>,
+}
+#[derive(Clone)]
+pub(super) struct DictConstructionStart {
+    result: Value,
+    keywords: Vec<(Value, Value)>,
+}
+#[derive(Clone)]
+pub(super) struct DictConstruction {
+    start: DictConstructionStart,
+    iterator: Value,
+    index: usize,
+}
+#[derive(Clone)]
+pub(super) struct DictPairConstruction {
+    outer: DictConstruction,
+    iterator: Value,
+    items: Vec<Value>,
 }
 #[derive(Clone, Copy)]
 enum TruthProtocol {
@@ -777,6 +799,28 @@ impl ClassHookState {
         self.class_cell.iter().copied().for_each(visit);
     }
 }
+impl DictConstructionStart {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.result);
+        self.keywords.iter().for_each(|(key, value)| {
+            visit(*key);
+            visit(*value);
+        });
+    }
+}
+impl DictConstruction {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        self.start.trace(&mut visit);
+        visit(self.iterator);
+    }
+}
+impl DictPairConstruction {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        self.outer.trace(&mut visit);
+        visit(self.iterator);
+        self.items.iter().copied().for_each(visit);
+    }
+}
 impl ReturnAction {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
@@ -796,6 +840,11 @@ impl ReturnAction {
                 state.items.iter().copied().for_each(visit);
             }
             Self::ExpandIterableNext(state) => visit(state.iterator),
+            Self::DictIterableStart(state) => state.trace(visit),
+            Self::DictIterableNext(state)
+            | Self::DictPairStart(state)
+            | Self::DictPairIteratorStart(state) => state.trace(visit),
+            Self::DictPairNext(state) => state.trace(visit),
             Self::Truth {
                 action: TruthAction::Jump { original, .. },
                 ..
@@ -1974,6 +2023,7 @@ impl Vm {
     fn dispatch_exception(
         &mut self,
         program: &Program,
+        output: &mut dyn Write,
         error: &Diagnostic,
         minimum_depth: usize,
         current_code: usize,
@@ -2069,6 +2119,7 @@ impl Vm {
                     })?;
                     return self.dispatch_exception(
                         program,
+                        output,
                         &error,
                         minimum_depth,
                         caller.code,
@@ -2077,6 +2128,77 @@ impl Vm {
                 }
             }
             if stop_iteration {
+                if let ReturnAction::DictIterableNext(state) = &frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "dict iterable continuation has no destination",
+                        )
+                    })?;
+                    let state = state.clone();
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    if let Err(error) = self.finish_dict_construction(destination, state.start) {
+                        let caller = self.frames.last().ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "dict iterable lost caller frame")
+                        })?;
+                        return self.dispatch_exception(
+                            program,
+                            output,
+                            &error,
+                            minimum_depth,
+                            caller.code,
+                            caller.ip.saturating_sub(1),
+                        );
+                    }
+                    return Ok(true);
+                }
+                if let ReturnAction::DictPairNext(state) = &frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "dict pair continuation has no destination",
+                        )
+                    })?;
+                    let state = state.clone();
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    let result = self.finish_dict_pair(state).and_then(|outer| {
+                        self.continue_dict_construction(program, destination, outer, output)
+                    });
+                    if let Err(error) = result {
+                        let caller = self.frames.last().ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "dict pair lost caller frame")
+                        })?;
+                        return self.dispatch_exception(
+                            program,
+                            output,
+                            &error,
+                            minimum_depth,
+                            caller.code,
+                            caller.ip.saturating_sub(1),
+                        );
+                    }
+                    return Ok(true);
+                }
                 if let ReturnAction::CollectIterableNext(state) = &frame.action {
                     let destination = frame.destination.ok_or_else(|| {
                         Diagnostic::new(
@@ -2107,6 +2229,7 @@ impl Vm {
                         })?;
                         return self.dispatch_exception(
                             program,
+                            output,
                             &error,
                             minimum_depth,
                             caller.code,
@@ -2240,7 +2363,7 @@ impl Vm {
                         let frame = self.frames.last().expect("active JIT frame");
                         let code = frame.code;
                         let pc = frame.ip.saturating_sub(1);
-                        if self.dispatch_exception(p, &error, depth, code, pc)? {
+                        if self.dispatch_exception(p, output, &error, depth, code, pc)? {
                             continue;
                         }
                         return Err(error);
@@ -2382,6 +2505,11 @@ impl Vm {
                         let mut iterable_next = None;
                         let mut expansion_start = None;
                         let mut expansion_next = None;
+                        let mut dict_iterable_start = None;
+                        let mut dict_iterable_next = None;
+                        let mut dict_pair_start = None;
+                        let mut dict_pair_iterator_start = None;
+                        let mut dict_pair_next = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
@@ -2398,6 +2526,22 @@ impl Vm {
                             }
                             ReturnAction::ExpandIterableNext(state) => {
                                 expansion_next = Some((state, value));
+                            }
+                            ReturnAction::DictIterableStart(state) => {
+                                dict_iterable_start = Some((state, value));
+                            }
+                            ReturnAction::DictIterableNext(state) => {
+                                dict_iterable_next = Some((state, value));
+                            }
+                            ReturnAction::DictPairStart(state) => {
+                                dict_pair_start = Some((state, value));
+                            }
+                            ReturnAction::DictPairIteratorStart(state) => {
+                                dict_pair_iterator_start = Some((state, value));
+                            }
+                            ReturnAction::DictPairNext(mut state) => {
+                                state.items.push(value);
+                                dict_pair_next = Some(state);
                             }
                             ReturnAction::Length => value = self.validate_length(value)?,
                             ReturnAction::Truth { protocol, action } => {
@@ -2467,7 +2611,12 @@ impl Vm {
                             || iterable_start.is_some()
                             || iterable_next.is_some()
                             || expansion_start.is_some()
-                            || expansion_next.is_some();
+                            || expansion_next.is_some()
+                            || dict_iterable_start.is_some()
+                            || dict_iterable_next.is_some()
+                            || dict_pair_start.is_some()
+                            || dict_pair_iterator_start.is_some()
+                            || dict_pair_next.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
@@ -2512,6 +2661,51 @@ impl Vm {
                             } else if let Some((state, item)) = expansion_next {
                                 self.push_expanded_positional(item)?;
                                 self.continue_argument_expansion(p, dest, state, output)?;
+                            } else if let Some((start, iterator)) = dict_iterable_start {
+                                self.validate_iterator(iterator)?;
+                                self.continue_dict_construction(
+                                    p,
+                                    dest,
+                                    DictConstruction {
+                                        start,
+                                        iterator,
+                                        index: 0,
+                                    },
+                                    output,
+                                )?;
+                            } else if let Some((state, item)) = dict_iterable_next {
+                                if let Some(state) =
+                                    self.invoke_dict_pair(p, dest, state, item, output)?
+                                {
+                                    self.continue_dict_construction(p, dest, state, output)?;
+                                }
+                            } else if let Some((outer, iterator)) = dict_pair_start {
+                                self.validate_iterator(iterator)?;
+                                if let Some(state) = self
+                                    .invoke_dict_pair_iterator(p, dest, outer, iterator, output)?
+                                {
+                                    self.continue_dict_construction(p, dest, state, output)?;
+                                }
+                            } else if let Some((outer, iterator)) = dict_pair_iterator_start {
+                                self.validate_iterator(iterator)?;
+                                if let Some(state) = self.continue_dict_pair(
+                                    p,
+                                    dest,
+                                    DictPairConstruction {
+                                        outer,
+                                        iterator,
+                                        items: Vec::new(),
+                                    },
+                                    output,
+                                )? {
+                                    self.continue_dict_construction(p, dest, state, output)?;
+                                }
+                            } else if let Some(state) = dict_pair_next {
+                                if let Some(state) =
+                                    self.continue_dict_pair(p, dest, state, output)?
+                                {
+                                    self.continue_dict_construction(p, dest, state, output)?;
+                                }
                             }
                         } else if continuation_required {
                             return Err(Diagnostic::new(
@@ -3347,7 +3541,7 @@ impl Vm {
                 Ok(())
             })();
             if let Err(error) = step {
-                if self.dispatch_exception(p, &error, depth, code_id, pc)? {
+                if self.dispatch_exception(p, output, &error, depth, code_id, pc)? {
                     continue;
                 }
                 return Err(error);

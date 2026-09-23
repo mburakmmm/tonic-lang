@@ -1,7 +1,8 @@
 //! Call binding: ordinary calls read a register window; only actual expansion
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
-    ArgumentExpansion, Frame, IterableCollection, IterableCollectionKind, ReturnAction, Vm,
+    ArgumentExpansion, DictConstruction, DictConstructionStart, DictPairConstruction, Frame,
+    IterableCollection, IterableCollectionKind, ReturnAction, Vm,
 };
 use crate::{
     dict::Dict,
@@ -857,30 +858,22 @@ impl Vm {
                 ));
             }
             let result = self.heap.alloc(Object::Dict(Dict::default()))?;
+            let mut keywords = Vec::with_capacity(args.keyword_count());
+            for index in 0..args.keyword_count() {
+                let (name, value) = args.keyword(p, &self.registers, index);
+                let key = self.heap.alloc(Object::Str(name.to_owned()))?;
+                keywords.push((key, value));
+            }
+            let start = DictConstructionStart { result, keywords };
             if args.count() == 1 {
                 let source = args.positional(&self.registers, 0);
                 if matches!(self.heap.get(source)?, Object::Dict(_)) {
                     self.heap.dict_merge(result, source)?;
                 } else {
-                    for item in self.materialize_builtin_iterable(source)? {
-                        let pair = self.materialize_builtin_iterable(item)?;
-                        if pair.len() != 2 {
-                            return Err(Diagnostic::new(
-                                "ValueError",
-                                "dictionary update sequence element has length other than 2",
-                            ));
-                        }
-                        self.heap.dict_set(result, pair[0], pair[1])?;
-                    }
+                    return self.invoke_dict_construction(p, destination, start, source, output);
                 }
             }
-            for index in 0..args.keyword_count() {
-                let (name, value) = args.keyword(p, &self.registers, index);
-                let key = self.heap.alloc(Object::Str(name.to_owned()))?;
-                self.heap.dict_set(result, key, value)?;
-            }
-            self.registers[destination] = result;
-            return Ok(());
+            return self.finish_dict_construction(destination, start);
         }
         if kind == super::RuntimeTypeKind::Exception {
             if args.keyword_count() != 0 {
@@ -973,6 +966,292 @@ impl Vm {
             RuntimeTypeKind::Range => unreachable!("range handled before unary constructors"),
             RuntimeTypeKind::Exception => unreachable!("exceptions handled before unary types"),
         };
+        Ok(())
+    }
+    pub(super) fn invoke_dict_construction(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        start: DictConstructionStart,
+        source: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => self.continue_dict_construction(
+                p,
+                destination,
+                DictConstruction {
+                    start,
+                    iterator,
+                    index: 0,
+                },
+                output,
+            ),
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("dict __iter__ frame").action =
+                        ReturnAction::DictIterableStart(start);
+                    Ok(())
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_dict_construction(
+                        p,
+                        destination,
+                        DictConstruction {
+                            start,
+                            iterator,
+                            index: 0,
+                        },
+                        output,
+                    )
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(super) fn continue_dict_construction(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: DictConstruction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        loop {
+            let item = if self.heap.is_iterator(state.iterator) {
+                let Some(item) = self.heap.next(state.iterator)? else {
+                    return self.finish_dict_construction(destination, state.start);
+                };
+                item
+            } else {
+                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                };
+                let depth = self.frames.len();
+                match self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                ) {
+                    Ok(()) => {}
+                    Err(error) if error.kind == "StopIteration" => {
+                        return self.finish_dict_construction(destination, state.start)
+                    }
+                    Err(error) => return Err(error),
+                }
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("dict __next__ frame").action =
+                        ReturnAction::DictIterableNext(state);
+                    return Ok(());
+                }
+                self.registers[destination]
+            };
+            match self.invoke_dict_pair(p, destination, state, item, output)? {
+                Some(next) => state = next,
+                None => return Ok(()),
+            }
+        }
+    }
+    pub(super) fn invoke_dict_pair(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        outer: DictConstruction,
+        item: Value,
+        output: &mut dyn Write,
+    ) -> Result<Option<DictConstruction>> {
+        match self.heap.iterator(item) {
+            Ok(iterator) => self.invoke_dict_pair_iterator(p, destination, outer, iterator, output),
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(item, "__iter__")? else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!(
+                            "cannot convert dictionary update sequence element #{} to a sequence",
+                            outer.index
+                        ),
+                    ));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("dict pair __iter__ frame")
+                        .action = ReturnAction::DictPairStart(outer);
+                    Ok(None)
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.invoke_dict_pair_iterator(p, destination, outer, iterator, output)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(super) fn invoke_dict_pair_iterator(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        outer: DictConstruction,
+        iterator: Value,
+        output: &mut dyn Write,
+    ) -> Result<Option<DictConstruction>> {
+        match self.heap.iterator(iterator) {
+            Ok(iterator) => self.continue_dict_pair(
+                p,
+                destination,
+                DictPairConstruction {
+                    outer,
+                    iterator,
+                    items: Vec::new(),
+                },
+                output,
+            ),
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(iterator, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("dict pair iterator __iter__ frame")
+                        .action = ReturnAction::DictPairIteratorStart(outer);
+                    Ok(None)
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_dict_pair(
+                        p,
+                        destination,
+                        DictPairConstruction {
+                            outer,
+                            iterator,
+                            items: Vec::new(),
+                        },
+                        output,
+                    )
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub(super) fn continue_dict_pair(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: DictPairConstruction,
+        output: &mut dyn Write,
+    ) -> Result<Option<DictConstruction>> {
+        if self.heap.is_iterator(state.iterator) {
+            while let Some(item) = self.heap.next(state.iterator)? {
+                state.items.push(item);
+            }
+            return self.finish_dict_pair(state).map(Some);
+        }
+        loop {
+            let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+            };
+            let depth = self.frames.len();
+            match self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [Value::UNBOUND; 3],
+                    count: 0,
+                },
+                output,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind == "StopIteration" => {
+                    return self.finish_dict_pair(state).map(Some)
+                }
+                Err(error) => return Err(error),
+            }
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("dict pair __next__ frame")
+                    .action = ReturnAction::DictPairNext(state);
+                return Ok(None);
+            }
+            state.items.push(self.registers[destination]);
+        }
+    }
+    pub(super) fn finish_dict_pair(
+        &mut self,
+        mut state: DictPairConstruction,
+    ) -> Result<DictConstruction> {
+        if state.items.len() != 2 {
+            return Err(Diagnostic::new(
+                "ValueError",
+                format!(
+                    "dictionary update sequence element #{} has length {}; 2 is required",
+                    state.outer.index,
+                    state.items.len()
+                ),
+            ));
+        }
+        self.heap
+            .dict_set(state.outer.start.result, state.items[0], state.items[1])?;
+        state.outer.index += 1;
+        Ok(state.outer)
+    }
+    pub(super) fn finish_dict_construction(
+        &mut self,
+        destination: usize,
+        state: DictConstructionStart,
+    ) -> Result<()> {
+        for (key, value) in state.keywords {
+            self.heap.dict_set(state.result, key, value)?;
+        }
+        self.registers[destination] = state.result;
         Ok(())
     }
     pub(super) fn invoke_iterable_collection(
@@ -1102,20 +1381,6 @@ impl Vm {
             }
         })?;
         Ok(())
-    }
-    fn materialize_builtin_iterable(&mut self, value: Value) -> Result<Vec<Value>> {
-        let iterator = self.heap.iterator(value).map_err(|error| {
-            if error.kind == "TypeError" {
-                Diagnostic::new("TypeError", "value is not iterable")
-            } else {
-                error
-            }
-        })?;
-        let mut values = Vec::new();
-        while let Some(value) = self.heap.next(iterator)? {
-            values.push(value);
-        }
-        Ok(values)
     }
     pub(super) fn finish_new(
         &mut self,

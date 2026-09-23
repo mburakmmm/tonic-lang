@@ -1015,6 +1015,84 @@ for operation in [0,1]:
     except ValueError as error:
         print(type(error).__name__)
 ''',
+'''class Pair:
+    def __init__(self,key,value,count):
+        self.key=key
+        self.value=value
+        self.count=count
+        self.i=0
+    def __iter__(self):
+        print('pair-iter',self.key)
+        return self
+    def __next__(self):
+        if self.i>=self.count:
+            raise StopIteration
+        if self.i==0:
+            item=self.key
+        else:
+            item=self.value
+        self.i+=1
+        print('pair-next',item)
+        return item
+class Outer:
+    def __init__(self):
+        self.i=0
+    def __iter__(self):
+        print('outer-iter')
+        return self
+    def __next__(self):
+        if self.i>=2:
+            raise StopIteration
+        print('outer-next',self.i)
+        if self.i==0:
+            pair=Pair('a',1,2)
+        else:
+            pair=Pair('b',2,2)
+        self.i+=1
+        return pair
+print(dict(Outer(),a=9,c=3))
+print(dict([Pair('x',7,2)]))
+class PairFactory:
+    def __iter__(self):
+        print('factory-iter')
+        return Pair('z',8,2)
+print(dict([PairFactory()]))
+class TupleOuter:
+    def __init__(self):
+        self.done=False
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.done:
+            raise StopIteration
+        self.done=True
+        return ('d',4)
+print(dict(TupleOuter()))
+try:
+    dict([Pair('short',0,1)])
+except ValueError as error:
+    print(str(error))
+try:
+    dict([('ok',1),Pair('short2',0,1)])
+except ValueError as error:
+    print(str(error))
+class FailingPair:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise ValueError('pair failed')
+try:
+    dict([FailingPair()])
+except ValueError as error:
+    print(str(error))
+class StopAtIter:
+    def __iter__(self):
+        raise StopIteration
+try:
+    dict(StopAtIter())
+except StopIteration:
+    print('iter stop propagated')
+''',
 '''class PlainError(Exception):
     pass
 print(PlainError(1,'two').args,str(PlainError(1,'two')))

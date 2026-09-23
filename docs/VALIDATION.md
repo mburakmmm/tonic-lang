@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-22 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+23 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -43,10 +43,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
 call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 36,
-native handles 5, language/runtime 69, CPython bridge 15 ve HPy manifest 5; toplam 267 test.
+native handles 5, language/runtime 70, CPython bridge 15 ve HPy manifest 5; toplam 268 test.
 
-Differential corpus: 285 stdout vakası ve 109 exception türü vakası. Seed 42.
-Exception handler/finally/with/custom iterator değişikliğinden sonra debug/release × interpreter/JIT ×
+Differential corpus: 286 stdout vakası ve 109 exception türü vakası. Seed 42.
+Exception handler/finally/with/custom iterable değişikliğinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -102,7 +102,10 @@ iterator içinde yakalanan `StopIteration`, normal hata yayılımı ve geçersiz
 iterator dönüşlerini CPython ile karşılaştırır. Aynı suspending protokol
 `list`/`tuple` constructor'ları, exact unpack ve tek/çoklu `*args` genişletmesinde
 de sınanır; unpack uzunluk tanıları ile `StopIteration` dışındaki hatalar CPython
-çıktısıyla eşleşir.
+çıktısıyla eşleşir. `dict` constructor corpus'u hem dış iterable hem çift
+iterable'ında suspending protokolü, self/farklı iterator normalizasyonunu,
+source-before-keyword sırasını, çift indeksli uzunluk tanısını ve pair hatasının
+yayılımını aynı sekizli matris altında doğrular.
 `finally` corpus'u normal, handled/unhandled exception, `return`, `break`,
 `continue`, nested active exception, return/exception override ve finalizer
 içinden yükselen yeni hata yollarında exactly-once çalışma sırasını kapsar.

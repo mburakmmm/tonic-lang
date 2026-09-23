@@ -68,9 +68,12 @@ sonra alınır.
   - [x] `list`/`tuple` constructor'ları, exact unpack ve `*args` için genel user
     iterable tüketimi; suspending `__iter__`/`__next__`, precise GC roots,
     protokol-sınırı `StopIteration` ve CPython uyumlu unpack tanıları.
-  - [ ] Builtin type alt sınıflarının native storage kurucuları, `dict` için genel
-    iterable-pair tüketimi, `__getattribute__`/attribute mutation ve kalan
-    numeric/comparison protokolleri.
+  - [x] `dict` constructor'ı için genel iterable-pair tüketimi; dış/pair
+    iterator'larında suspending çağrılar, CPython sıra/index tanıları, keyword
+    override ve moving-GC continuation roots.
+  - [ ] Builtin type alt sınıflarının native storage kurucuları,
+    `__getattribute__`/attribute mutation ve kalan numeric/comparison
+    protokolleri.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

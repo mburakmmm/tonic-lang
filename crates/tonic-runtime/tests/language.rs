@@ -181,6 +181,100 @@ fn list_and_tuple_constructors_consume_custom_iterators() {
     }
 }
 #[test]
+fn dict_constructor_consumes_custom_pair_iterables() {
+    let source = r#"class Pair:
+    def __init__(self,key,value,count):
+        self.key=key
+        self.value=value
+        self.count=count
+        self.i=0
+    def __iter__(self):
+        print('pair-iter',self.key)
+        return self
+    def __next__(self):
+        if self.i>=self.count:
+            raise StopIteration
+        if self.i==0:
+            item=self.key
+        else:
+            item=self.value
+        self.i+=1
+        print('pair-next',item)
+        return item
+class Outer:
+    def __init__(self):
+        self.i=0
+    def __iter__(self):
+        print('outer-iter')
+        return self
+    def __next__(self):
+        if self.i>=2:
+            raise StopIteration
+        print('outer-next',self.i)
+        if self.i==0:
+            pair=Pair('a',1,2)
+        else:
+            pair=Pair('b',2,2)
+        self.i+=1
+        return pair
+print(dict(Outer(),a=9,c=3))
+print(dict([Pair('x',7,2)]))
+class PairFactory:
+    def __iter__(self):
+        print('factory-iter')
+        return Pair('z',8,2)
+print(dict([PairFactory()]))
+class TupleOuter:
+    def __init__(self):
+        self.done=False
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.done:
+            raise StopIteration
+        self.done=True
+        return ('d',4)
+print(dict(TupleOuter()))
+try:
+    dict([Pair('short',0,1)])
+except ValueError as error:
+    print(str(error))
+try:
+    dict([('ok',1),Pair('short2',0,1)])
+except ValueError as error:
+    print(str(error))
+class FailingPair:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise ValueError('pair failed')
+try:
+    dict([FailingPair()])
+except ValueError as error:
+    print(str(error))
+class StopAtIter:
+    def __iter__(self):
+        raise StopIteration
+try:
+    dict(StopAtIter())
+except StopIteration:
+    print('iter stop propagated')"#;
+    let program = compile(source, "custom-dict-iteration").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "outer-iter\nouter-next 0\npair-iter a\npair-iter a\npair-next a\npair-next 1\nouter-next 1\npair-iter b\npair-iter b\npair-next b\npair-next 2\n{'a': 9, 'b': 2, 'c': 3}\npair-iter x\npair-iter x\npair-next x\npair-next 7\n{'x': 7}\nfactory-iter\npair-iter z\npair-next z\npair-next 8\n{'z': 8}\n{'d': 4}\npair-iter short\npair-iter short\npair-next short\ndictionary update sequence element #0 has length 1; 2 is required\npair-iter short2\npair-iter short2\npair-next short2\ndictionary update sequence element #1 has length 1; 2 is required\npair failed\niter stop propagated\n"
+    );
+
+    assert_eq!(
+        error("class Bad:\n    def __iter__(self):\n        return 1\ndict(Bad())").kind,
+        "TypeError"
+    );
+}
+#[test]
 fn native_module() {
     assert_eq!(
         output(include_str!("../../../examples/fastmath.tonic")),
