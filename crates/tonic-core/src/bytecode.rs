@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 12;
+pub const BYTECODE_VERSION: u16 = 13;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -30,6 +30,24 @@ pub enum Op {
     Le = 23,
     Gt = 24,
     Ge = 25,
+    Pow = 80,
+    BitOr = 81,
+    BitXor = 82,
+    BitAnd = 83,
+    LeftShift = 84,
+    RightShift = 85,
+    Invert = 86,
+    InplaceSub = 87,
+    InplaceMul = 88,
+    InplaceDiv = 89,
+    InplaceFloorDiv = 90,
+    InplaceMod = 91,
+    InplacePow = 92,
+    InplaceBitOr = 93,
+    InplaceBitXor = 94,
+    InplaceBitAnd = 95,
+    InplaceLeftShift = 96,
+    InplaceRightShift = 97,
     Jump = 30,
     JumpFalse = 31,
     JumpTrue = 32,
@@ -95,6 +113,24 @@ impl TryFrom<u16> for Op {
             23 => Self::Le,
             24 => Self::Gt,
             25 => Self::Ge,
+            80 => Self::Pow,
+            81 => Self::BitOr,
+            82 => Self::BitXor,
+            83 => Self::BitAnd,
+            84 => Self::LeftShift,
+            85 => Self::RightShift,
+            86 => Self::Invert,
+            87 => Self::InplaceSub,
+            88 => Self::InplaceMul,
+            89 => Self::InplaceDiv,
+            90 => Self::InplaceFloorDiv,
+            91 => Self::InplaceMod,
+            92 => Self::InplacePow,
+            93 => Self::InplaceBitOr,
+            94 => Self::InplaceBitXor,
+            95 => Self::InplaceBitAnd,
+            96 => Self::InplaceLeftShift,
+            97 => Self::InplaceRightShift,
             30 => Self::Jump,
             31 => Self::JumpFalse,
             32 => Self::JumpTrue,
@@ -466,7 +502,7 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
-                    Op::Move | Op::Neg | Op::Pos | Op::Not | Op::Iter => {
+                    Op::Move | Op::Neg | Op::Pos | Op::Invert | Op::Not | Op::Iter => {
                         reg(i.a)?;
                         reg(i.b)?;
                         if i.c != 0 {
@@ -507,6 +543,23 @@ impl Program {
                     | Op::Le
                     | Op::Gt
                     | Op::Ge
+                    | Op::Pow
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::BitAnd
+                    | Op::LeftShift
+                    | Op::RightShift
+                    | Op::InplaceSub
+                    | Op::InplaceMul
+                    | Op::InplaceDiv
+                    | Op::InplaceFloorDiv
+                    | Op::InplaceMod
+                    | Op::InplacePow
+                    | Op::InplaceBitOr
+                    | Op::InplaceBitXor
+                    | Op::InplaceBitAnd
+                    | Op::InplaceLeftShift
+                    | Op::InplaceRightShift
                     | Op::Item
                     | Op::SetItem => {
                         reg(i.a)?;

@@ -1365,6 +1365,54 @@ class Meta(type):
 class C(metaclass=Meta): pass
 print(C*'!')
 ''',
+'''class Number:
+    def __init__(self,value): self.value=value
+    def __pow__(self,other): return self.value**other.value
+    def __or__(self,other): return self.value|other.value
+    def __xor__(self,other): return self.value^other.value
+    def __and__(self,other): return self.value&other.value
+    def __lshift__(self,other): return self.value<<other.value
+    def __rshift__(self,other): return self.value>>other.value
+    def __invert__(self): return ~self.value
+class Child(Number):
+    def __rpow__(self,other): return other.value**self.value+1000
+a=Number(10); b=Number(3); c=Child(2)
+print(2**10,2**-2,1<<65,-8>>2,~5,True&True,type(True&True).__name__)
+print(a**b,a**c,a|b,a^b,a&b,a<<b,a>>b,~a)
+class Maybe:
+    def __or__(self,other): return NotImplemented
+class Reverse:
+    def __ror__(self,other): return 77
+print(Maybe()|Reverse())
+class InPlace:
+    def __isub__(self,other): return 1
+    def __imul__(self,other): return 2
+    def __itruediv__(self,other): return 3
+    def __ifloordiv__(self,other): return 4
+    def __imod__(self,other): return 5
+    def __ipow__(self,other): return 6
+    def __ior__(self,other): return 7
+    def __ixor__(self,other): return 8
+    def __iand__(self,other): return 9
+    def __ilshift__(self,other): return 10
+    def __irshift__(self,other): return 11
+a=InPlace();a-=0
+b=InPlace();b*=0
+c=InPlace();c/=1
+d=InPlace();d//=1
+e=InPlace();e%=1
+f=InPlace();f**=1
+g=InPlace();g|=1
+h=InPlace();h^=1
+i=InPlace();i&=1
+j=InPlace();j<<=1
+k=InPlace();k>>=1
+print(a,b,c,d,e,f,g,h,i,j,k)
+class FallBack:
+    def __ior__(self,other): return NotImplemented
+    def __or__(self,other): return 99
+x=FallBack(); x|=1; print(x)
+''',
 ]
 ERRORS = [
     ('class C:\n    pass\nC(1)', 'TypeError'),
@@ -1375,6 +1423,9 @@ ERRORS = [
     ('class R(range):\n    pass', 'TypeError'),
     ('class C(int,str):\n    pass', 'TypeError'),
     ("type('B',(bool,),{})", 'TypeError'),
+    ('1 << -1', 'ValueError'),
+    ('1.0 | 2', 'TypeError'),
+    ('0 ** -1', 'ZeroDivisionError'),
     ('class C(1):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B(A,A):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    print("body")', 'TypeError'),

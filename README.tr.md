@@ -92,7 +92,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 276 Rust testi ile 292 stdout ve 120 exception türü
+Güncel yerel matris 278 Rust testi ile 293 stdout ve 123 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -230,10 +230,10 @@ dict tabanlı `__prepare__`, `__new__/__init__` zinciri, canlı salt okunur clas
 `__dict__` mappingproxy, `for` için custom `__iter__/__next__` ve dict dışı
 class namespace mapping'leri desteklenir. `int`/`float`/`str`/`list`/`tuple`/
 `dict` alt sınıfları class kimliği ve instance alanlarını koruyan native backing
-storage kullanır. Temel aritmetik, reflected/in-place dispatch, rich comparison,
-unary ve `abs` protokolleri `NotImplemented` ile strict-subclass sırasını uygular.
-Canonical builtin `__new__`/`__init__`, conversion/index/hash, power/bitwise ve
-container içi suspending comparison kapsamı hâlâ açıktır.
+storage kullanır. Aritmetik, power, bitwise, reflected/in-place dispatch, rich
+comparison, unary ve `abs` protokolleri `NotImplemented` ile strict-subclass
+sırasını uygular. Canonical builtin `__new__`/`__init__`, conversion/index/hash
+ve container içi suspending comparison kapsamı hâlâ açıktır.
 Senkron context manager `__enter__/__exit__` özel-metot lookup'u, nested unwind,
 exception suppression, managed traceback aktarımı ve return/break/continue
 temizliğiyle desteklenir. `raise ... from ...`, örtük `__context__`, explicit
@@ -317,6 +317,8 @@ Instance attribute cache sözleşmesi: [ADR 0017](docs/adr/0017-instance-attribu
 Attribute interception sözleşmesi: [ADR 0065](docs/adr/0065-attribute-interception.md).
 Native builtin alt sınıf ve operator protokol sözleşmesi:
 [ADR 0066](docs/adr/0066-native-subclasses-and-operator-protocols.md).
+Power, bitwise ve in-place protokol sözleşmesi:
+[ADR 0067](docs/adr/0067-power-bitwise-protocols.md).
 
 Kuralların analizi: [ANALYSIS.md](docs/ANALYSIS.md).
 Kararlar/riskler: [ADR 0001](docs/adr/0001-bootstrap.md).

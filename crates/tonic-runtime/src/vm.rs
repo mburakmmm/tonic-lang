@@ -655,6 +655,7 @@ pub(super) enum UnaryProtocolKind {
     Neg,
     Pos,
     Abs,
+    Invert,
 }
 #[derive(Clone, Copy)]
 pub(super) struct UnaryProtocol {
@@ -2698,13 +2699,33 @@ impl Vm {
                             };
                         }
                     }
-                    Op::FloorDiv | Op::Mod | Op::Div => {
+                    Op::FloorDiv
+                    | Op::Mod
+                    | Op::Div
+                    | Op::Pow
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::BitAnd
+                    | Op::LeftShift
+                    | Op::RightShift
+                    | Op::InplaceSub
+                    | Op::InplaceMul
+                    | Op::InplaceDiv
+                    | Op::InplaceFloorDiv
+                    | Op::InplaceMod
+                    | Op::InplacePow
+                    | Op::InplaceBitOr
+                    | Op::InplaceBitXor
+                    | Op::InplaceBitAnd
+                    | Op::InplaceLeftShift
+                    | Op::InplaceRightShift => {
                         let left = self.read(b)?;
                         let right = self.read(c)?;
                         if let Some(state) = self.binary_protocol(op, left, right)? {
                             self.continue_binary_protocol(p, a, state, output)?;
                         } else {
-                            self.registers[a] = self.heap.binary(op, left, right)?;
+                            self.registers[a] =
+                                self.heap.binary(base_binary_op(op), left, right)?;
                         }
                     }
                     Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
@@ -2716,11 +2737,12 @@ impl Vm {
                             self.registers[a] = self.heap.compare(op, left, right)?;
                         }
                     }
-                    Op::Neg | Op::Pos => {
-                        let kind = if op == Op::Neg {
-                            UnaryProtocolKind::Neg
-                        } else {
-                            UnaryProtocolKind::Pos
+                    Op::Neg | Op::Pos | Op::Invert => {
+                        let kind = match op {
+                            Op::Neg => UnaryProtocolKind::Neg,
+                            Op::Pos => UnaryProtocolKind::Pos,
+                            Op::Invert => UnaryProtocolKind::Invert,
+                            _ => unreachable!(),
                         };
                         let value = self.read(b)?;
                         self.invoke_unary_protocol(p, value, a, kind, output)?;
@@ -5352,4 +5374,22 @@ fn immediate_binary(op: Op, left: Value, right: Value) -> Option<Value> {
         _ => None,
     }?;
     Value::int(result)
+}
+
+pub(super) fn base_binary_op(op: Op) -> Op {
+    match op {
+        Op::InplaceAdd => Op::Add,
+        Op::InplaceSub => Op::Sub,
+        Op::InplaceMul => Op::Mul,
+        Op::InplaceDiv => Op::Div,
+        Op::InplaceFloorDiv => Op::FloorDiv,
+        Op::InplaceMod => Op::Mod,
+        Op::InplacePow => Op::Pow,
+        Op::InplaceBitOr => Op::BitOr,
+        Op::InplaceBitXor => Op::BitXor,
+        Op::InplaceBitAnd => Op::BitAnd,
+        Op::InplaceLeftShift => Op::LeftShift,
+        Op::InplaceRightShift => Op::RightShift,
+        op => op,
+    }
 }

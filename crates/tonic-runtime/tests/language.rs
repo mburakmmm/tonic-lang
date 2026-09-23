@@ -289,6 +289,43 @@ fn integers_promote_without_overflow() {
     );
 }
 #[test]
+fn power_bitwise_shift_and_invert_cover_bigints_errors_and_jit_fallback() {
+    assert_eq!(
+        output(
+            "print(2**10,2**-2,5|2,5^3,5&3,1<<65,-8>>2,~5)\nprint(True&True,type(True&True).__name__,True|2,True<<2)\na=3;a**=4\nb=5;b|=2\nc=5;c^=3\nd=5;d&=3\ne=1;e<<=6\nf=-8;f>>=2\nprint(a,b,c,d,e,f)\nprint(3**100)"
+        ),
+        "1024 0.25 7 6 1 36893488147419103232 -2 -6\nTrue bool 3 4\n81 7 6 1 64 -2\n515377520732011331036461129765621272702107522001\n"
+    );
+    for (source, kind) in [
+        ("1 << -1", "ValueError"),
+        ("1.0 | 2", "TypeError"),
+        ("0 ** -1", "ZeroDivisionError"),
+        ("1 << 100000000", "MemoryError"),
+        ("2 ** 100000000", "MemoryError"),
+    ] {
+        assert_eq!(error(source).kind, kind, "{source}");
+    }
+    assert_eq!(
+        output("print(1 ** 100000000000000000000, 0 ** 100000000000000000000, (-1) ** 100000000000000000001, 0 << 100000000000000000000)"),
+        "1 0 -1 0\n"
+    );
+
+    let program = compile(
+        "def transform(x):\n    return ((x**3)|2)^1\nfor i in range(20):\n    transform(i)\nprint(transform(5))",
+        "power-bitwise-jit-fallback",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"126\n");
+    assert!(vm.stats.jit_compile_attempts >= 1);
+    assert_eq!(vm.stats.jit_compiled, 0);
+}
+#[test]
 fn calls_recursion_and_scopes() {
     assert_eq!(output("def f(n):\n    if n <= 1:\n        return 1\n    return n*f(n-1)\nprint(f(20))\nx=1\ndef g():\n    return x\nx=8\nprint(g())\n"),"2432902008176640000\n8\n");
 }

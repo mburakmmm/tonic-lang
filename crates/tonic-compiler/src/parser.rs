@@ -440,8 +440,8 @@ impl Adapter {
                 match u.op {
                     py::UnaryOp::USub => UnaryOp::Negative,
                     py::UnaryOp::UAdd => UnaryOp::Positive,
+                    py::UnaryOp::Invert => UnaryOp::Invert,
                     py::UnaryOp::Not => UnaryOp::Not,
-                    _ => return Err(unsupported(s, "unary operator")),
                 },
                 Box::new(self.expr(*u.operand)?),
             ),
@@ -535,10 +535,16 @@ impl Adapter {
             py::Operator::Add => BinaryOp::Add,
             py::Operator::Sub => BinaryOp::Subtract,
             py::Operator::Mult => BinaryOp::Multiply,
+            py::Operator::Pow => BinaryOp::Power,
+            py::Operator::BitOr => BinaryOp::BitOr,
+            py::Operator::BitXor => BinaryOp::BitXor,
+            py::Operator::BitAnd => BinaryOp::BitAnd,
+            py::Operator::LShift => BinaryOp::LeftShift,
+            py::Operator::RShift => BinaryOp::RightShift,
             py::Operator::FloorDiv => BinaryOp::FloorDivide,
             py::Operator::Mod => BinaryOp::Modulo,
             py::Operator::Div => BinaryOp::Divide,
-            _ => return Err(unsupported(s, "binary operator")),
+            py::Operator::MatMult => return Err(unsupported(s, "matrix multiplication")),
         })
     }
     fn compare(op: py::CmpOp, s: Span) -> Result<CompareOp> {

@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 41,
-native handles 5, language/runtime 73, CPython bridge 15 ve HPy manifest 5; toplam 276 test.
+call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 44,
+native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 278 test.
 
-Differential corpus: 292 stdout vakası ve 120 exception türü vakası. Seed 42.
-Attribute interception değişikliğinden sonra debug/release × interpreter/JIT ×
+Differential corpus: 293 stdout vakası ve 123 exception türü vakası. Seed 42.
+Power/bitwise protokollerinden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -339,15 +339,18 @@ koşunun tamamı interpreter/JIT × normal/stress-GC matrisinde Python 3.14.6 il
 eşleşti. Özel `__getattribute__` JIT testi direct-method profilinin hook'u
 atlamadığını, class version testi ise sonradan hook ekleme/silmenin quickened slot
 guard'ını düşürdüğünü doğrular.
-Builtin alt sınıf ve operator protokol aşamasında toplam 276 Rust testi ile 292
-stdout ve 120 exception differential vakasına ulaşıldı. Native subclass testi
+Builtin alt sınıf ve operator protokol aşamasında toplam 278 Rust testi ile 293
+stdout ve 123 exception differential vakasına ulaşıldı. Native subclass testi
 `int`/`float`/`str`/`list`/`tuple`/`dict` backing storage'ını, instance alanlarını,
 hash eşdeğerliğini, slice/iteration/mutation yollarını, custom iterable sırasında
 continuation root'larını ve immediate-int JIT guard miss'inde exact-PC deopt'u
 doğrular. Operator testi direct/reflected sıra, strict subclass önceliği,
-`NotImplemented`, `__iadd__` fallback'i, altı binary grup, rich comparison,
-`!=` truth terslemesi, unary/`abs` ve metaclass dispatch'ini her-allocation stress
-GC altında kapsar. Debug/release × interpreter/JIT × normal/stress-GC
+`NotImplemented`, bütün in-place fallback'leri, power/bitwise/shift, altı temel
+binary grup, rich comparison, `!=` truth terslemesi, unary/`abs`/invert ve
+metaclass dispatch'ini her-allocation stress GC altında kapsar. Büyük integer
+sonuçları kaynak sınırıyla kontrollü `MemoryError` üretir; bu opcode'lar native
+JIT kapsamı dışında kaldığında doğrulanmış exact-PC interpreter fallback'i
+kullanır. Debug/release × interpreter/JIT × normal/stress-GC
 differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
 

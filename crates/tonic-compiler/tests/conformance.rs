@@ -31,6 +31,7 @@ fn valid_python_forms() {
         "def f(a, /, b):\n    return a+b\nprint(f(1,2))",
         "f=lambda a,/,b=2,*args,c=3,**kw:(a,b,args,c,kw)",
         "print(-1*2+3, not 1==2)",
+        "print(2**8,5|2,5^3,5&3,1<<4,8>>2,~5)",
         "print([0,1,2,3][1:3], 'abc'[::-1])",
         "del object.attr",
         "class Meta(type):\n    pass\nclass X(metaclass=Meta):\n    pass",

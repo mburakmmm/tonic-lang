@@ -563,17 +563,7 @@ impl Lower<'_> {
                 };
                 let right = self.expr(e)?;
                 let r = self.alloc(1)?;
-                self.emit(
-                    if matches!(op, BinaryOp::Add) {
-                        Op::InplaceAdd
-                    } else {
-                        binary(*op)
-                    },
-                    r,
-                    left,
-                    right,
-                    s,
-                )?;
+                self.emit(inplace_binary(*op), r, left, right, s)?;
                 if let Some((op, owner, key)) = item {
                     if op == Op::SetAttr {
                         self.emit(op, owner, r, key, s)?;
@@ -940,6 +930,7 @@ impl Lower<'_> {
                     match op {
                         UnaryOp::Negative => Op::Neg,
                         UnaryOp::Positive => Op::Pos,
+                        UnaryOp::Invert => Op::Invert,
                         UnaryOp::Not => Op::Not,
                     },
                     r,
@@ -1140,9 +1131,31 @@ fn binary(op: BinaryOp) -> Op {
         BinaryOp::Add => Op::Add,
         BinaryOp::Subtract => Op::Sub,
         BinaryOp::Multiply => Op::Mul,
+        BinaryOp::Power => Op::Pow,
+        BinaryOp::BitOr => Op::BitOr,
+        BinaryOp::BitXor => Op::BitXor,
+        BinaryOp::BitAnd => Op::BitAnd,
+        BinaryOp::LeftShift => Op::LeftShift,
+        BinaryOp::RightShift => Op::RightShift,
         BinaryOp::FloorDivide => Op::FloorDiv,
         BinaryOp::Modulo => Op::Mod,
         BinaryOp::Divide => Op::Div,
+    }
+}
+fn inplace_binary(op: BinaryOp) -> Op {
+    match op {
+        BinaryOp::Add => Op::InplaceAdd,
+        BinaryOp::Subtract => Op::InplaceSub,
+        BinaryOp::Multiply => Op::InplaceMul,
+        BinaryOp::Power => Op::InplacePow,
+        BinaryOp::BitOr => Op::InplaceBitOr,
+        BinaryOp::BitXor => Op::InplaceBitXor,
+        BinaryOp::BitAnd => Op::InplaceBitAnd,
+        BinaryOp::LeftShift => Op::InplaceLeftShift,
+        BinaryOp::RightShift => Op::InplaceRightShift,
+        BinaryOp::FloorDivide => Op::InplaceFloorDiv,
+        BinaryOp::Modulo => Op::InplaceMod,
+        BinaryOp::Divide => Op::InplaceDiv,
     }
 }
 fn compare(op: CompareOp) -> Op {

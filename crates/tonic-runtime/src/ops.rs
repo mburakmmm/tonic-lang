@@ -4,7 +4,7 @@ use crate::{
     value::Value,
 };
 use num_bigint::BigInt;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
 use tonic_core::{
     bytecode::Op,
@@ -16,6 +16,7 @@ fn type_error() -> Diagnostic {
 fn zero() -> Diagnostic {
     Diagnostic::new("ZeroDivisionError", "division or modulo by zero")
 }
+const MAX_INTEGER_RESULT_BITS: u64 = 1 << 26;
 
 impl Heap {
     pub fn inplace_add(&mut self, a: Value, b: Value) -> Result<Value> {
@@ -43,12 +44,60 @@ impl Heap {
     }
 
     pub fn binary(&mut self, op: Op, a: Value, b: Value) -> Result<Value> {
+        if let (Some(x), Some(y)) = (a.as_bool(), b.as_bool()) {
+            let value = match op {
+                Op::BitOr => Some(x | y),
+                Op::BitXor => Some(x ^ y),
+                Op::BitAnd => Some(x & y),
+                _ => None,
+            };
+            if let Some(value) = value {
+                return Ok(Value::bool(value));
+            }
+        }
         // Common integer path never constructs BigInt or allocates an object.
         if let (Some(x), Some(y)) = (a.integer(), b.integer()) {
             let n = match op {
                 Op::Add => x.checked_add(y),
                 Op::Sub => x.checked_sub(y),
                 Op::Mul => x.checked_mul(y),
+                Op::BitOr => Some(x | y),
+                Op::BitXor => Some(x ^ y),
+                Op::BitAnd => Some(x & y),
+                Op::LeftShift | Op::RightShift => {
+                    if y < 0 {
+                        return Err(Diagnostic::new("ValueError", "negative shift count"));
+                    }
+                    let shift = u32::try_from(y).ok();
+                    shift.and_then(|shift| {
+                        if op == Op::LeftShift {
+                            x.checked_shl(shift)
+                        } else {
+                            x.checked_shr(shift).or(Some(if x < 0 { -1 } else { 0 }))
+                        }
+                    })
+                }
+                Op::Pow if y >= 0 => u32::try_from(y).ok().and_then(|power| {
+                    let mut result = 1i64;
+                    let mut base = x;
+                    let mut remaining = power;
+                    while remaining != 0 {
+                        if remaining & 1 != 0 {
+                            result = result.checked_mul(base)?;
+                        }
+                        remaining >>= 1;
+                        if remaining != 0 {
+                            base = base.checked_mul(base)?;
+                        }
+                    }
+                    Some(result)
+                }),
+                Op::Pow => {
+                    if x == 0 {
+                        return Err(zero());
+                    }
+                    return self.float_power(x as f64, y as f64);
+                }
                 Op::FloorDiv | Op::Mod => {
                     if y == 0 {
                         return Err(zero());
@@ -83,6 +132,90 @@ impl Heap {
                 Op::Add => self.int(x + y),
                 Op::Sub => self.int(x - y),
                 Op::Mul => self.int(x * y),
+                Op::BitOr => self.int(x | y),
+                Op::BitXor => self.int(x ^ y),
+                Op::BitAnd => self.int(x & y),
+                Op::LeftShift | Op::RightShift => {
+                    if y.is_negative() {
+                        return Err(Diagnostic::new("ValueError", "negative shift count"));
+                    }
+                    if op == Op::LeftShift && x.is_zero() {
+                        return self.int(BigInt::zero());
+                    }
+                    let Some(shift) = y.to_usize() else {
+                        return if op == Op::RightShift {
+                            self.int(if x.is_negative() {
+                                -BigInt::one()
+                            } else {
+                                BigInt::zero()
+                            })
+                        } else {
+                            Err(Diagnostic::new("MemoryError", "shift count is too large"))
+                        };
+                    };
+                    if op == Op::LeftShift
+                        && x.bits()
+                            .saturating_add(u64::try_from(shift).unwrap_or(u64::MAX))
+                            > MAX_INTEGER_RESULT_BITS
+                    {
+                        return Err(Diagnostic::new("MemoryError", "shift count is too large"));
+                    }
+                    self.int(if op == Op::LeftShift {
+                        x << shift
+                    } else {
+                        x >> shift
+                    })
+                }
+                Op::Pow => {
+                    if x.is_zero() {
+                        if y.is_negative() {
+                            return Err(zero());
+                        }
+                        return self.int(if y.is_zero() {
+                            BigInt::one()
+                        } else {
+                            BigInt::zero()
+                        });
+                    }
+                    if x.is_one() {
+                        return if y.is_negative() {
+                            self.alloc(Object::Float(1.0))
+                        } else {
+                            self.int(BigInt::one())
+                        };
+                    }
+                    if x == -BigInt::one() {
+                        let odd = !(&y & BigInt::one()).is_zero();
+                        let result = if odd { -1 } else { 1 };
+                        return if y.is_negative() {
+                            self.alloc(Object::Float(result as f64))
+                        } else {
+                            self.int(BigInt::from(result))
+                        };
+                    }
+                    if y.is_negative() {
+                        if x.is_zero() {
+                            return Err(zero());
+                        }
+                        let base = x.to_f64().unwrap_or_else(|| {
+                            if x.is_negative() {
+                                f64::NEG_INFINITY
+                            } else {
+                                f64::INFINITY
+                            }
+                        });
+                        let exponent = y.to_f64().unwrap_or(f64::NEG_INFINITY);
+                        self.float_power(base, exponent)
+                    } else {
+                        let power = y.to_u32().ok_or_else(|| {
+                            Diagnostic::new("MemoryError", "exponent is too large")
+                        })?;
+                        if x.bits().saturating_mul(u64::from(power)) > MAX_INTEGER_RESULT_BITS {
+                            return Err(Diagnostic::new("MemoryError", "exponent is too large"));
+                        }
+                        self.int(x.pow(power))
+                    }
+                }
                 Op::FloorDiv | Op::Mod => {
                     if y.is_zero() {
                         return Err(zero());
@@ -112,6 +245,7 @@ impl Heap {
                 Op::Add => x + y,
                 Op::Sub => x - y,
                 Op::Mul => x * y,
+                Op::Pow => return self.float_power(x, y),
                 Op::Div => {
                     if y == 0.0 {
                         return Err(zero());
@@ -179,11 +313,19 @@ impl Heap {
             return Ok(Value::bool(!self.truth(v)?));
         }
         if let Some(n) = v.integer() {
-            return self.i64(if op == Op::Neg { -n } else { n });
+            return self.i64(match op {
+                Op::Neg => -n,
+                Op::Invert => !n,
+                _ => n,
+            });
         }
         if self.is_integer(v) {
             let n = self.integer(v)?;
-            return self.int(if op == Op::Neg { -n } else { n });
+            return self.int(match op {
+                Op::Neg => -n,
+                Op::Invert => !n,
+                _ => n,
+            });
         }
         let native = self.native_value(v);
         if let Object::Float(n) = self.get(native)? {
@@ -194,6 +336,26 @@ impl Heap {
             };
         }
         Err(type_error())
+    }
+
+    fn float_power(&mut self, base: f64, exponent: f64) -> Result<Value> {
+        if base == 0.0 && exponent < 0.0 {
+            return Err(zero());
+        }
+        if base < 0.0 && exponent.fract() != 0.0 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "complex power results are not supported",
+            ));
+        }
+        let result = base.powf(exponent);
+        if result.is_infinite() && base.is_finite() && exponent.is_finite() {
+            return Err(Diagnostic::new(
+                "OverflowError",
+                "numeric result out of range",
+            ));
+        }
+        self.alloc(Object::Float(result))
     }
     pub fn compare(&self, op: Op, a: Value, b: Value) -> Result<Value> {
         if matches!(op, Op::Eq | Op::Ne) {

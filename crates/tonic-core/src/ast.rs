@@ -160,6 +160,12 @@ pub enum BinaryOp {
     Add,
     Subtract,
     Multiply,
+    Power,
+    BitOr,
+    BitXor,
+    BitAnd,
+    LeftShift,
+    RightShift,
     FloorDivide,
     Modulo,
     Divide,
@@ -168,6 +174,7 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Negative,
     Positive,
+    Invert,
     Not,
 }
 #[derive(Clone, Copy, Debug)]

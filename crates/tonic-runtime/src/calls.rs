@@ -1076,24 +1076,42 @@ impl Vm {
         if !self.operator_protocol_capable(left) && !self.operator_protocol_capable(right) {
             return Ok(None);
         }
-        let (direct, reflected) = match op {
-            Op::Add | Op::InplaceAdd => ("__add__", "__radd__"),
-            Op::Sub => ("__sub__", "__rsub__"),
-            Op::Mul => ("__mul__", "__rmul__"),
-            Op::Div => ("__truediv__", "__rtruediv__"),
-            Op::FloorDiv => ("__floordiv__", "__rfloordiv__"),
-            Op::Mod => ("__mod__", "__rmod__"),
-            Op::Eq => ("__eq__", "__eq__"),
-            Op::Ne => ("__ne__", "__ne__"),
-            Op::Lt => ("__lt__", "__gt__"),
-            Op::Le => ("__le__", "__ge__"),
-            Op::Gt => ("__gt__", "__lt__"),
-            Op::Ge => ("__ge__", "__le__"),
+        let (inplace, direct, reflected) = match op {
+            Op::Add => (None, "__add__", "__radd__"),
+            Op::InplaceAdd => (Some("__iadd__"), "__add__", "__radd__"),
+            Op::Sub => (None, "__sub__", "__rsub__"),
+            Op::InplaceSub => (Some("__isub__"), "__sub__", "__rsub__"),
+            Op::Mul => (None, "__mul__", "__rmul__"),
+            Op::InplaceMul => (Some("__imul__"), "__mul__", "__rmul__"),
+            Op::Div => (None, "__truediv__", "__rtruediv__"),
+            Op::InplaceDiv => (Some("__itruediv__"), "__truediv__", "__rtruediv__"),
+            Op::FloorDiv => (None, "__floordiv__", "__rfloordiv__"),
+            Op::InplaceFloorDiv => (Some("__ifloordiv__"), "__floordiv__", "__rfloordiv__"),
+            Op::Mod => (None, "__mod__", "__rmod__"),
+            Op::InplaceMod => (Some("__imod__"), "__mod__", "__rmod__"),
+            Op::Pow => (None, "__pow__", "__rpow__"),
+            Op::InplacePow => (Some("__ipow__"), "__pow__", "__rpow__"),
+            Op::BitOr => (None, "__or__", "__ror__"),
+            Op::InplaceBitOr => (Some("__ior__"), "__or__", "__ror__"),
+            Op::BitXor => (None, "__xor__", "__rxor__"),
+            Op::InplaceBitXor => (Some("__ixor__"), "__xor__", "__rxor__"),
+            Op::BitAnd => (None, "__and__", "__rand__"),
+            Op::InplaceBitAnd => (Some("__iand__"), "__and__", "__rand__"),
+            Op::LeftShift => (None, "__lshift__", "__rlshift__"),
+            Op::InplaceLeftShift => (Some("__ilshift__"), "__lshift__", "__rlshift__"),
+            Op::RightShift => (None, "__rshift__", "__rrshift__"),
+            Op::InplaceRightShift => (Some("__irshift__"), "__rshift__", "__rrshift__"),
+            Op::Eq => (None, "__eq__", "__eq__"),
+            Op::Ne => (None, "__ne__", "__ne__"),
+            Op::Lt => (None, "__lt__", "__gt__"),
+            Op::Le => (None, "__le__", "__ge__"),
+            Op::Gt => (None, "__gt__", "__lt__"),
+            Op::Ge => (None, "__ge__", "__le__"),
             _ => return Ok(None),
         };
         let mut candidates = Vec::with_capacity(3);
-        if op == Op::InplaceAdd {
-            if let Some(call) = self.operator_method_call(left, "__iadd__")? {
+        if let Some(inplace) = inplace {
+            if let Some(call) = self.operator_method_call(left, inplace)? {
                 candidates.push(super::BinaryCandidate {
                     call,
                     argument: right,
@@ -1203,7 +1221,9 @@ impl Vm {
             | tonic_core::bytecode::Op::Ge => {
                 self.heap.compare(state.op, state.left, state.right)?
             }
-            _ => self.heap.binary(state.op, state.left, state.right)?,
+            _ => self
+                .heap
+                .binary(super::base_binary_op(state.op), state.left, state.right)?,
         };
         Ok(())
     }
@@ -1219,6 +1239,7 @@ impl Vm {
             super::UnaryProtocolKind::Neg => "__neg__",
             super::UnaryProtocolKind::Pos => "__pos__",
             super::UnaryProtocolKind::Abs => "__abs__",
+            super::UnaryProtocolKind::Invert => "__invert__",
         };
         if !self.operator_protocol_capable(value) {
             self.registers[destination] = self.unary_fallback(kind, value)?;
@@ -1276,6 +1297,9 @@ impl Vm {
                         value,
                     )
                 }
+            }
+            super::UnaryProtocolKind::Invert => {
+                self.heap.unary(tonic_core::bytecode::Op::Invert, value)
             }
         }
     }
