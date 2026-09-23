@@ -2,7 +2,7 @@
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
     ArgumentExpansion, DictConstruction, DictConstructionStart, DictPairConstruction, Frame,
-    IterableCollection, IterableCollectionKind, ReturnAction, Vm,
+    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, Vm,
 };
 use crate::{
     dict::Dict,
@@ -299,6 +299,17 @@ impl Vm {
                         }
                         return Ok(());
                     }
+                }
+                if matches!(builtin, Builtin::Abs) && args.keyword_count() == 0 && args.count() == 1
+                {
+                    let value = args.positional(&self.registers, 0);
+                    return self.invoke_unary_protocol(
+                        p,
+                        value,
+                        destination,
+                        super::UnaryProtocolKind::Abs,
+                        output,
+                    );
                 }
                 if matches!(
                     builtin,
@@ -1039,6 +1050,235 @@ impl Vm {
             }
         }
     }
+    fn operator_method_call(
+        &self,
+        value: Value,
+        name: &str,
+    ) -> Result<Option<crate::classes::DescriptorCall>> {
+        if matches!(self.heap.get(value), Ok(Object::Class(_))) {
+            self.heap.metaclass_method_call(value, name)
+        } else {
+            self.heap.special_method_call(value, name)
+        }
+    }
+    fn operator_protocol_capable(&self, value: Value) -> bool {
+        self.heap.get(value).is_ok_and(|object| {
+            object.instance_class().is_some() || matches!(object, Object::Class(_))
+        })
+    }
+    pub(super) fn binary_protocol(
+        &self,
+        op: tonic_core::bytecode::Op,
+        left: Value,
+        right: Value,
+    ) -> Result<Option<super::BinaryProtocol>> {
+        use tonic_core::bytecode::Op;
+        if !self.operator_protocol_capable(left) && !self.operator_protocol_capable(right) {
+            return Ok(None);
+        }
+        let (direct, reflected) = match op {
+            Op::Add | Op::InplaceAdd => ("__add__", "__radd__"),
+            Op::Sub => ("__sub__", "__rsub__"),
+            Op::Mul => ("__mul__", "__rmul__"),
+            Op::Div => ("__truediv__", "__rtruediv__"),
+            Op::FloorDiv => ("__floordiv__", "__rfloordiv__"),
+            Op::Mod => ("__mod__", "__rmod__"),
+            Op::Eq => ("__eq__", "__eq__"),
+            Op::Ne => ("__ne__", "__ne__"),
+            Op::Lt => ("__lt__", "__gt__"),
+            Op::Le => ("__le__", "__ge__"),
+            Op::Gt => ("__gt__", "__lt__"),
+            Op::Ge => ("__ge__", "__le__"),
+            _ => return Ok(None),
+        };
+        let mut candidates = Vec::with_capacity(3);
+        if op == Op::InplaceAdd {
+            if let Some(call) = self.operator_method_call(left, "__iadd__")? {
+                candidates.push(super::BinaryCandidate {
+                    call,
+                    argument: right,
+                    negate: false,
+                });
+            }
+        }
+        let left_call = self.operator_method_call(left, direct)?;
+        let left_class = self.runtime_class(left)?;
+        let right_class = self.runtime_class(right)?;
+        let right_call = if left_class == right_class {
+            None
+        } else {
+            self.operator_method_call(right, reflected)?
+        };
+        let right_is_subclass = left_class != right_class
+            && self
+                .heap
+                .class(right_class)
+                .is_ok_and(|class| class.mro.contains(&left_class));
+        let mut push = |call: Option<crate::classes::DescriptorCall>, argument, negate| {
+            if let Some(call) = call {
+                candidates.push(super::BinaryCandidate {
+                    call,
+                    argument,
+                    negate,
+                });
+            }
+        };
+        if right_is_subclass {
+            push(right_call, left, false);
+            push(left_call, right, false);
+        } else {
+            push(left_call, right, false);
+            push(right_call, left, false);
+        }
+        if op == Op::Ne {
+            let left_eq = self.operator_method_call(left, "__eq__")?;
+            let right_eq = if left_class == right_class {
+                None
+            } else {
+                self.operator_method_call(right, "__eq__")?
+            };
+            if right_is_subclass {
+                push(right_eq, left, true);
+                push(left_eq, right, true);
+            } else {
+                push(left_eq, right, true);
+                push(right_eq, left, true);
+            }
+        }
+        Ok((!candidates.is_empty()).then_some(super::BinaryProtocol {
+            op,
+            left,
+            right,
+            candidates,
+            next: 0,
+            negate_result: false,
+        }))
+    }
+    pub(super) fn continue_binary_protocol(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: super::BinaryProtocol,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        while let Some(candidate) = state.candidates.get(state.next).copied() {
+            state.next += 1;
+            state.negate_result = candidate.negate;
+            let depth = self.frames.len();
+            self.invoke_target(
+                p,
+                candidate.call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: candidate.call.receiver,
+                    positional: [candidate.argument, Value::UNBOUND, Value::UNBOUND],
+                    count: 1,
+                },
+                output,
+            )?;
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("binary protocol frame")
+                    .action = super::ReturnAction::BinaryProtocol(state);
+                return Ok(());
+            }
+            if self.registers[destination] != Value::NOT_IMPLEMENTED {
+                if state.negate_result {
+                    let value = self.registers[destination];
+                    self.invoke_truth(p, value, destination, super::TruthAction::Not, output)?;
+                }
+                return Ok(());
+            }
+        }
+        self.registers[destination] = match state.op {
+            tonic_core::bytecode::Op::InplaceAdd => {
+                self.heap.inplace_add(state.left, state.right)?
+            }
+            tonic_core::bytecode::Op::Eq
+            | tonic_core::bytecode::Op::Ne
+            | tonic_core::bytecode::Op::Lt
+            | tonic_core::bytecode::Op::Le
+            | tonic_core::bytecode::Op::Gt
+            | tonic_core::bytecode::Op::Ge => {
+                self.heap.compare(state.op, state.left, state.right)?
+            }
+            _ => self.heap.binary(state.op, state.left, state.right)?,
+        };
+        Ok(())
+    }
+    pub(super) fn invoke_unary_protocol(
+        &mut self,
+        p: &Program,
+        value: Value,
+        destination: usize,
+        kind: super::UnaryProtocolKind,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let name = match kind {
+            super::UnaryProtocolKind::Neg => "__neg__",
+            super::UnaryProtocolKind::Pos => "__pos__",
+            super::UnaryProtocolKind::Abs => "__abs__",
+        };
+        if !self.operator_protocol_capable(value) {
+            self.registers[destination] = self.unary_fallback(kind, value)?;
+            return Ok(());
+        }
+        let Some(call) = self.operator_method_call(value, name)? else {
+            self.registers[destination] = self.unary_fallback(kind, value)?;
+            return Ok(());
+        };
+        let depth = self.frames.len();
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            },
+            output,
+        )?;
+        if self.frames.len() > depth {
+            self.frames.last_mut().expect("unary protocol frame").action =
+                super::ReturnAction::UnaryProtocol(super::UnaryProtocol { kind, value });
+        } else if self.registers[destination] == Value::NOT_IMPLEMENTED {
+            self.registers[destination] = self.unary_fallback(kind, value)?;
+        }
+        Ok(())
+    }
+    pub(super) fn unary_fallback(
+        &mut self,
+        kind: super::UnaryProtocolKind,
+        value: Value,
+    ) -> Result<Value> {
+        match kind {
+            super::UnaryProtocolKind::Neg => self.heap.unary(tonic_core::bytecode::Op::Neg, value),
+            super::UnaryProtocolKind::Pos => self.heap.unary(tonic_core::bytecode::Op::Pos, value),
+            super::UnaryProtocolKind::Abs => {
+                if self.heap.is_float(value) {
+                    let n = self.heap.float(value)?.abs();
+                    self.heap.alloc(Object::Float(n))
+                } else {
+                    let zero = Value::int(0).expect("immediate");
+                    let negative = self
+                        .heap
+                        .compare(tonic_core::bytecode::Op::Lt, value, zero)?
+                        .as_bool()
+                        .expect("numeric comparison returns bool");
+                    self.heap.unary(
+                        if negative {
+                            tonic_core::bytecode::Op::Neg
+                        } else {
+                            tonic_core::bytecode::Op::Pos
+                        },
+                        value,
+                    )
+                }
+            }
+        }
+    }
     fn checked_length(&self, value: Value) -> Result<i64> {
         if !self.heap.is_integer(value) {
             return Err(Diagnostic::new(
@@ -1085,7 +1325,7 @@ impl Vm {
             return Ok(());
         }
         if let Some(kind) = self.builtin_type_kind(class) {
-            return self.invoke_builtin_type(p, class, destination, kind, args, output);
+            return self.invoke_builtin_type(p, (class, kind), destination, args, None, output);
         }
         if self.instance_check(class, self.runtime_types.base_exception, true, 0)? {
             let mut arguments = args.owned(p, &self.registers);
@@ -1128,6 +1368,28 @@ impl Vm {
         if arguments.receiver.take().is_some() {
             return Err(Diagnostic::new("BytecodeError", "bound class call"));
         }
+        if let Some(kind) = self.builtin_subclass_kind(class) {
+            let constructor = self.heap.class_lookup(class, "__new__")?;
+            if constructor.is_some_and(|constructor| {
+                matches!(
+                    self.heap.get(constructor),
+                    Ok(Object::Builtin(Builtin::ObjectNew))
+                )
+            }) {
+                let finish = NativeSubclassFinish {
+                    class,
+                    arguments: arguments.clone(),
+                };
+                return self.invoke_builtin_type(
+                    p,
+                    (class, kind),
+                    destination,
+                    Arguments::Expanded(arguments),
+                    Some(finish),
+                    output,
+                );
+            }
+        }
         let constructor = self
             .heap
             .class_lookup(class, "__new__")?
@@ -1161,12 +1423,13 @@ impl Vm {
     fn invoke_builtin_type(
         &mut self,
         p: &Program,
-        class: Value,
+        target: (Value, super::RuntimeTypeKind),
         destination: usize,
-        kind: super::RuntimeTypeKind,
         args: Arguments<'_>,
+        finish: Option<NativeSubclassFinish>,
         output: &mut dyn Write,
     ) -> Result<()> {
+        let (class, kind) = target;
         if kind == super::RuntimeTypeKind::Range {
             if args.keyword_count() != 0 || !(1..=3).contains(&args.count()) {
                 return Err(Diagnostic::new(
@@ -1233,7 +1496,9 @@ impl Vm {
                     Value::int(i64::from(value.as_bool().expect("checked bool")))
                         .expect("bool integer is immediate")
                 }
-                Some(value) if base.is_none() && self.heap.is_integer(value) => value,
+                Some(value) if base.is_none() && self.heap.is_integer(value) => {
+                    self.heap.native_value(value)
+                }
                 Some(value) => match self.heap.get(value)? {
                     Object::Float(value) if base.is_none() => {
                         self.heap
@@ -1257,7 +1522,7 @@ impl Vm {
                     _ => return Err(Diagnostic::new("TypeError", "cannot convert value to int")),
                 },
             };
-            return Ok(());
+            return self.finish_builtin_value(p, destination, finish, output);
         }
         if kind == super::RuntimeTypeKind::Dict {
             if args.count() > 1 {
@@ -1273,16 +1538,23 @@ impl Vm {
                 let key = self.heap.alloc(Object::Str(name.to_owned()))?;
                 keywords.push((key, value));
             }
-            let start = DictConstructionStart { result, keywords };
+            let start = DictConstructionStart {
+                result,
+                keywords,
+                native: finish,
+            };
             if args.count() == 1 {
                 let source = args.positional(&self.registers, 0);
-                if matches!(self.heap.get(source)?, Object::Dict(_)) {
+                if matches!(
+                    self.heap.get(self.heap.native_value(source))?,
+                    Object::Dict(_)
+                ) {
                     self.heap.dict_merge(result, source)?;
                 } else {
                     return self.invoke_dict_construction(p, destination, start, source, output);
                 }
             }
-            return self.finish_dict_construction(destination, start);
+            return self.finish_dict_construction(p, destination, start, output);
         }
         if kind == super::RuntimeTypeKind::Exception {
             if args.keyword_count() != 0 {
@@ -1317,12 +1589,24 @@ impl Vm {
         use super::RuntimeTypeKind;
         if matches!(kind, RuntimeTypeKind::List | RuntimeTypeKind::Tuple) {
             let collection_kind = if kind == RuntimeTypeKind::List {
-                IterableCollectionKind::List
+                finish.map_or(
+                    IterableCollectionKind::List,
+                    IterableCollectionKind::NativeList,
+                )
             } else {
-                IterableCollectionKind::Tuple
+                finish.map_or(
+                    IterableCollectionKind::Tuple,
+                    IterableCollectionKind::NativeTuple,
+                )
             };
             let Some(source) = argument else {
-                return self.finish_iterable_collection(destination, collection_kind, Vec::new());
+                return self.finish_iterable_collection(
+                    p,
+                    destination,
+                    collection_kind,
+                    Vec::new(),
+                    output,
+                );
             };
             return self.invoke_iterable_collection(
                 p,
@@ -1375,7 +1659,29 @@ impl Vm {
             RuntimeTypeKind::Range => unreachable!("range handled before unary constructors"),
             RuntimeTypeKind::Exception => unreachable!("exceptions handled before unary types"),
         };
-        Ok(())
+        self.finish_builtin_value(p, destination, finish, output)
+    }
+
+    fn finish_builtin_value(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        finish: Option<NativeSubclassFinish>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let Some(finish) = finish else {
+            return Ok(());
+        };
+        let native = self.registers[destination];
+        let instance = self.heap.native_instance(finish.class, native)?;
+        self.finish_new(
+            p,
+            destination,
+            finish.class,
+            instance,
+            finish.arguments,
+            output,
+        )
     }
     pub(super) fn invoke_dict_construction(
         &mut self,
@@ -1444,7 +1750,7 @@ impl Vm {
         loop {
             let item = if self.heap.is_iterator(state.iterator) {
                 let Some(item) = self.heap.next(state.iterator)? else {
-                    return self.finish_dict_construction(destination, state.start);
+                    return self.finish_dict_construction(p, destination, state.start, output);
                 };
                 item
             } else {
@@ -1465,7 +1771,7 @@ impl Vm {
                 ) {
                     Ok(()) => {}
                     Err(error) if error.kind == "StopIteration" => {
-                        return self.finish_dict_construction(destination, state.start)
+                        return self.finish_dict_construction(p, destination, state.start, output)
                     }
                     Err(error) => return Err(error),
                 }
@@ -1654,14 +1960,21 @@ impl Vm {
     }
     pub(super) fn finish_dict_construction(
         &mut self,
+        p: &Program,
         destination: usize,
         state: DictConstructionStart,
+        output: &mut dyn Write,
     ) -> Result<()> {
-        for (key, value) in state.keywords {
-            self.heap.dict_set(state.result, key, value)?;
+        let DictConstructionStart {
+            result,
+            keywords,
+            native,
+        } = state;
+        for (key, value) in keywords {
+            self.heap.dict_set(result, key, value)?;
         }
-        self.registers[destination] = state.result;
-        Ok(())
+        self.registers[destination] = result;
+        self.finish_builtin_value(p, destination, native, output)
     }
     pub(super) fn invoke_iterable_collection(
         &mut self,
@@ -1677,7 +1990,7 @@ impl Vm {
                 while let Some(item) = self.heap.next(iterator)? {
                     items.push(item);
                 }
-                self.finish_iterable_collection(destination, kind, items)
+                self.finish_iterable_collection(p, destination, kind, items, output)
             }
             Err(error) if error.kind == "TypeError" => {
                 let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
@@ -1728,7 +2041,13 @@ impl Vm {
             while let Some(item) = self.heap.next(state.iterator)? {
                 state.items.push(item);
             }
-            return self.finish_iterable_collection(destination, state.kind, state.items);
+            return self.finish_iterable_collection(
+                p,
+                destination,
+                state.kind,
+                state.items,
+                output,
+            );
         }
         loop {
             let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
@@ -1748,7 +2067,13 @@ impl Vm {
             ) {
                 Ok(()) => {}
                 Err(error) if error.kind == "StopIteration" => {
-                    return self.finish_iterable_collection(destination, state.kind, state.items)
+                    return self.finish_iterable_collection(
+                        p,
+                        destination,
+                        state.kind,
+                        state.items,
+                        output,
+                    )
                 }
                 Err(error) => return Err(error),
             }
@@ -1762,13 +2087,17 @@ impl Vm {
     }
     pub(super) fn finish_iterable_collection(
         &mut self,
+        p: &Program,
         destination: usize,
         kind: IterableCollectionKind,
         items: Vec<Value>,
+        output: &mut dyn Write,
     ) -> Result<()> {
-        self.registers[destination] = self.heap.alloc(match kind {
-            IterableCollectionKind::List => Object::List(items),
-            IterableCollectionKind::Tuple => Object::Tuple(items),
+        let (object, finish) = match kind {
+            IterableCollectionKind::List => (Object::List(items), None),
+            IterableCollectionKind::Tuple => (Object::Tuple(items), None),
+            IterableCollectionKind::NativeList(finish) => (Object::List(items), Some(finish)),
+            IterableCollectionKind::NativeTuple(finish) => (Object::Tuple(items), Some(finish)),
             IterableCollectionKind::Unpack { first, count } => {
                 if items.len() < count {
                     return Err(Diagnostic::new(
@@ -1788,8 +2117,9 @@ impl Vm {
                 self.registers[first..first + count].copy_from_slice(&items);
                 return Ok(());
             }
-        })?;
-        Ok(())
+        };
+        self.registers[destination] = self.heap.alloc(object)?;
+        self.finish_builtin_value(p, destination, finish, output)
     }
     pub(super) fn finish_new(
         &mut self,
@@ -1805,7 +2135,14 @@ impl Vm {
             return Ok(());
         }
         if self.heap.class_lookup(class, "__init__")?.is_none() {
-            if arguments.count() != 0 || !arguments.keywords.is_empty() {
+            let native_instance = matches!(
+                self.heap.get(instance),
+                Ok(Object::Instance {
+                    native: Some(_),
+                    ..
+                })
+            );
+            if !native_instance && (arguments.count() != 0 || !arguments.keywords.is_empty()) {
                 return Err(Diagnostic::new(
                     "TypeError",
                     "class without __init__ accepts no arguments",

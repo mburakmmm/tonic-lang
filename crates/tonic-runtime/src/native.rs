@@ -222,13 +222,23 @@ impl<'a> Context<'a> {
         if value == Value::NONE {
             return Ok(ValueKind::None);
         }
+        if value == Value::NOT_IMPLEMENTED {
+            return Ok(ValueKind::Other);
+        }
         if value.as_bool().is_some() {
             return Ok(ValueKind::Bool);
         }
         if value.as_int().is_some() {
             return Ok(ValueKind::Int);
         }
-        Ok(match self.vm.heap.get(value)? {
+        let native = self.vm.heap.native_value(value);
+        if native.as_bool().is_some() {
+            return Ok(ValueKind::Bool);
+        }
+        if native.as_int().is_some() {
+            return Ok(ValueKind::Int);
+        }
+        Ok(match self.vm.heap.get(native)? {
             Object::Int(_) => ValueKind::Int,
             Object::Float(_) => ValueKind::Float,
             Object::Str(_) => ValueKind::Str,
@@ -307,7 +317,7 @@ impl<'a> Context<'a> {
             .map(|argument| self.resolve(*argument))
             .collect::<Result<Vec<_>>>()?;
         let keywords = self.resolve(keywords)?;
-        let entries = match self.vm.heap.get(keywords)? {
+        let entries = match self.vm.heap.get(self.vm.heap.native_value(keywords))? {
             Object::Dict(dict) => dict.entries.clone(),
             _ => return Err(Diagnostic::new("TypeError", "keywords must be a dict")),
         };
@@ -541,20 +551,22 @@ impl<'a> Context<'a> {
         self.local(v)
     }
     pub fn as_str(&self, h: Handle) -> Result<&str> {
-        match self.vm.heap.get(self.resolve(h)?)? {
+        let value = self.resolve(h)?;
+        match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::Str(s) => Ok(s),
             _ => Err(Diagnostic::new("TypeError", "expected string")),
         }
     }
     pub(crate) fn sequence_len(&self, handle: Handle) -> Result<usize> {
-        match self.vm.heap.get(self.resolve(handle)?)? {
+        let value = self.resolve(handle)?;
+        match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::List(values) | Object::Tuple(values) => Ok(values.len()),
             _ => Err(Diagnostic::new("TypeError", "expected list or tuple")),
         }
     }
     pub(crate) fn sequence_get(&mut self, handle: Handle, index: usize) -> Result<Handle> {
         let value = self.resolve(handle)?;
-        let item = match self.vm.heap.get(value)? {
+        let item = match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::List(values) | Object::Tuple(values) => values
                 .get(index)
                 .copied()
@@ -564,14 +576,15 @@ impl<'a> Context<'a> {
         self.local(item)
     }
     pub(crate) fn dict_len(&self, handle: Handle) -> Result<usize> {
-        match self.vm.heap.get(self.resolve(handle)?)? {
+        let value = self.resolve(handle)?;
+        match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::Dict(dict) => Ok(dict.entries.len()),
             _ => Err(Diagnostic::new("TypeError", "expected dict")),
         }
     }
     pub(crate) fn dict_entry(&mut self, handle: Handle, index: usize) -> Result<(Handle, Handle)> {
         let value = self.resolve(handle)?;
-        let (key, value) = match self.vm.heap.get(value)? {
+        let (key, value) = match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::Dict(dict) => dict
                 .entries
                 .get(index)

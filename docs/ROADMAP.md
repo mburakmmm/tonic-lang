@@ -77,6 +77,18 @@ sonra alınır.
     `delattr`, precise roots ve attribute/direct-method cache güvenliği.
   - [ ] Builtin type alt sınıflarının native storage kurucuları ve kalan
     numeric/comparison protokolleri.
+    - [x] Varsayılan kurucu yolunda `int`/`float`/`str`/`list`/`tuple`/`dict`
+      alt sınıfları için class identity ve instance slotlarını koruyan, exact
+      builtin backing'e sahip precise-GC uyumlu native instance'lar; iterable
+      kurucu continuation root'ları, mutation/hash/slice/iteration ve JIT
+      guard-deopt güvenliği.
+    - [x] `+`, `+=`, `-`, `*`, `/`, `//`, `%`, rich comparison, unary
+      `+`/`-` ve `abs` için suspending direct/reflected protokoller; strict
+      subclass önceliği, `NotImplemented`, `__iadd__` fallback'i, `!=` için
+      `__eq__` truth terslemesi ve metaclass dispatch'i.
+    - [ ] Canonical builtin `__new__`/`__init__` descriptor'ları; custom native
+      subclass `__new__`, `__int__`/`__float__`/`__index__`/`__hash__`,
+      power/bitwise operatörleri ve container içi suspending element comparison.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

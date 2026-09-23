@@ -631,7 +631,35 @@ enum ReturnAction {
         cell: Option<Value>,
     },
     AttributeGet(AttributeGet),
+    BinaryProtocol(BinaryProtocol),
+    UnaryProtocol(UnaryProtocol),
     Setter,
+}
+#[derive(Clone, Copy)]
+pub(super) struct BinaryCandidate {
+    call: DescriptorCall,
+    argument: Value,
+    negate: bool,
+}
+#[derive(Clone)]
+pub(super) struct BinaryProtocol {
+    op: Op,
+    left: Value,
+    right: Value,
+    candidates: Vec<BinaryCandidate>,
+    next: usize,
+    negate_result: bool,
+}
+#[derive(Clone, Copy)]
+pub(super) enum UnaryProtocolKind {
+    Neg,
+    Pos,
+    Abs,
+}
+#[derive(Clone, Copy)]
+pub(super) struct UnaryProtocol {
+    kind: UnaryProtocolKind,
+    value: Value,
 }
 #[derive(Clone)]
 pub(super) struct AttributeGet {
@@ -651,11 +679,18 @@ pub(super) enum AttributePhase {
     Primary,
     Fallback,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum IterableCollectionKind {
     List,
     Tuple,
+    NativeList(NativeSubclassFinish),
+    NativeTuple(NativeSubclassFinish),
     Unpack { first: usize, count: usize },
+}
+#[derive(Clone)]
+pub(super) struct NativeSubclassFinish {
+    class: Value,
+    arguments: ExpandedArgs,
 }
 #[derive(Clone)]
 pub(super) struct IterableCollection {
@@ -672,6 +707,7 @@ pub(super) struct ArgumentExpansion {
 pub(super) struct DictConstructionStart {
     result: Value,
     keywords: Vec<(Value, Value)>,
+    native: Option<NativeSubclassFinish>,
 }
 #[derive(Clone)]
 pub(super) struct DictConstruction {
@@ -734,6 +770,7 @@ struct PendingClass {
 #[derive(Clone)]
 struct RuntimeTypes {
     none: Value,
+    not_implemented: Value,
     int: Value,
     bool_: Value,
     float: Value,
@@ -767,6 +804,7 @@ impl RuntimeTypes {
     fn unbound() -> Self {
         Self {
             none: Value::UNBOUND,
+            not_implemented: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
@@ -788,6 +826,7 @@ impl RuntimeTypes {
     fn roots(&self) -> Vec<Value> {
         let mut roots = vec![
             self.none,
+            self.not_implemented,
             self.int,
             self.bool_,
             self.float,
@@ -825,6 +864,9 @@ impl DictConstructionStart {
             visit(*key);
             visit(*value);
         });
+        if let Some(native) = &self.native {
+            native.trace(visit);
+        }
     }
 }
 impl DictConstruction {
@@ -846,21 +888,32 @@ impl ReturnAction {
             Self::Value
             | Self::Iterator
             | Self::IteratorNext { .. }
-            | Self::CollectIterableStart(_)
             | Self::ExpandIterableStart(_)
             | Self::Length
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
+            Self::CollectIterableStart(kind) => kind.trace(visit),
             Self::AttributeGet(state) => {
                 visit(state.owner);
                 if let AttributeMissing::Default(value) = state.missing {
                     visit(value);
                 }
             }
+            Self::BinaryProtocol(state) => {
+                visit(state.left);
+                visit(state.right);
+                for candidate in &state.candidates[state.next..] {
+                    visit(candidate.call.callable);
+                    candidate.call.receiver.iter().copied().for_each(&mut visit);
+                    visit(candidate.argument);
+                }
+            }
+            Self::UnaryProtocol(state) => visit(state.value),
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
             Self::CollectIterableNext(state) => {
+                state.kind.trace(&mut visit);
                 visit(state.iterator);
                 state.items.iter().copied().for_each(visit);
             }
@@ -918,6 +971,20 @@ impl ReturnAction {
         let mut count = 0;
         self.trace(|_| count += 1);
         count
+    }
+}
+impl NativeSubclassFinish {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.class);
+        self.arguments.trace(visit);
+    }
+}
+impl IterableCollectionKind {
+    fn trace(&self, visit: impl FnMut(Value)) {
+        match self {
+            Self::NativeList(state) | Self::NativeTuple(state) => state.trace(visit),
+            Self::List | Self::Tuple | Self::Unpack { .. } => {}
+        }
     }
 }
 /// Single-threaded interpreter instance. Handles may only be used with this VM.
@@ -1168,6 +1235,11 @@ impl Vm {
             none: vm
                 .heap
                 .builtin_class("NoneType", vec![vm.object_class], vm.type_class)?,
+            not_implemented: vm.heap.builtin_class(
+                "NotImplementedType",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
             float: vm
@@ -1210,6 +1282,7 @@ impl Vm {
             ("tuple", vm.runtime_types.tuple),
             ("dict", vm.runtime_types.dict),
             ("range", vm.runtime_types.range),
+            ("NotImplemented", Value::NOT_IMPLEMENTED),
             ("BaseException", vm.runtime_types.base_exception),
             ("Exception", vm.runtime_types.exception),
             ("TypeError", vm.runtime_types.type_error),
@@ -1935,12 +2008,66 @@ impl Vm {
                 .then_some(RuntimeTypeKind::Exception)
         })
     }
+    pub(super) fn builtin_subclass_kind(&self, class: Value) -> Option<RuntimeTypeKind> {
+        let mro = &self.heap.class(class).ok()?.mro;
+        [
+            (self.runtime_types.int, RuntimeTypeKind::Int),
+            (self.runtime_types.float, RuntimeTypeKind::Float),
+            (self.runtime_types.str_, RuntimeTypeKind::Str),
+            (self.runtime_types.list, RuntimeTypeKind::List),
+            (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
+            (self.runtime_types.dict, RuntimeTypeKind::Dict),
+        ]
+        .into_iter()
+        .find_map(|(candidate, kind)| mro.contains(&candidate).then_some(kind))
+    }
+    fn validate_builtin_subclass_bases(&self, bases: &[Value]) -> Result<()> {
+        let mut storage = None;
+        for base in bases {
+            // Invalid non-class bases are diagnosed by ordinary class
+            // finalization after the body has run, preserving Python's
+            // observable class-body evaluation order.
+            let Ok(class) = self.heap.class(*base) else {
+                continue;
+            };
+            let inherits = |target| *base == target || class.mro.contains(&target);
+            if inherits(self.runtime_types.bool_) || inherits(self.runtime_types.range) {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    format!("type '{}' is not an acceptable base type", class.name),
+                ));
+            }
+            let kind = [
+                (self.runtime_types.int, RuntimeTypeKind::Int),
+                (self.runtime_types.float, RuntimeTypeKind::Float),
+                (self.runtime_types.str_, RuntimeTypeKind::Str),
+                (self.runtime_types.list, RuntimeTypeKind::List),
+                (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
+                (self.runtime_types.dict, RuntimeTypeKind::Dict),
+            ]
+            .into_iter()
+            .find_map(|(target, kind)| inherits(target).then_some(kind));
+            if let Some(kind) = kind {
+                if storage.is_some_and(|existing| existing != kind) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "multiple bases have incompatible native instance layouts",
+                    ));
+                }
+                storage = Some(kind);
+            }
+        }
+        Ok(())
+    }
     pub(super) fn runtime_class(&self, value: Value) -> Result<Value> {
         if value.as_bool().is_some() {
             return Ok(self.runtime_types.bool_);
         }
         if value == Value::NONE {
             return Ok(self.runtime_types.none);
+        }
+        if value == Value::NOT_IMPLEMENTED {
+            return Ok(self.runtime_types.not_implemented);
         }
         if value.integer().is_some() {
             return Ok(self.runtime_types.int);
@@ -2262,7 +2389,9 @@ impl Vm {
                     self.cells.truncate(unwind.1);
                     self.arguments.truncate(unwind.2);
                     self.pending_classes.truncate(unwind.3);
-                    if let Err(error) = self.finish_dict_construction(destination, state.start) {
+                    if let Err(error) =
+                        self.finish_dict_construction(program, destination, state.start, output)
+                    {
                         let caller = self.frames.last().ok_or_else(|| {
                             Diagnostic::new("BytecodeError", "dict iterable lost caller frame")
                         })?;
@@ -2333,9 +2462,13 @@ impl Vm {
                     self.cells.truncate(unwind.1);
                     self.arguments.truncate(unwind.2);
                     self.pending_classes.truncate(unwind.3);
-                    if let Err(error) =
-                        self.finish_iterable_collection(destination, state.kind, state.items)
-                    {
+                    if let Err(error) = self.finish_iterable_collection(
+                        program,
+                        destination,
+                        state.kind,
+                        state.items,
+                        output,
+                    ) {
                         let caller = self.frames.last().ok_or_else(|| {
                             Diagnostic::new(
                                 "BytecodeError",
@@ -2553,21 +2686,45 @@ impl Vm {
                     Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul => {
                         let left = self.read(b)?;
                         let right = self.read(c)?;
-                        self.registers[a] = if self.adaptive_specialization {
-                            self.adaptive_binary(code_id, pc, op, left, right)?
-                        } else if op == Op::InplaceAdd {
-                            self.heap.inplace_add(left, right)?
+                        if let Some(state) = self.binary_protocol(op, left, right)? {
+                            self.continue_binary_protocol(p, a, state, output)?;
                         } else {
-                            self.heap.binary(op, left, right)?
-                        };
+                            self.registers[a] = if self.adaptive_specialization {
+                                self.adaptive_binary(code_id, pc, op, left, right)?
+                            } else if op == Op::InplaceAdd {
+                                self.heap.inplace_add(left, right)?
+                            } else {
+                                self.heap.binary(op, left, right)?
+                            };
+                        }
                     }
                     Op::FloorDiv | Op::Mod | Op::Div => {
-                        self.registers[a] = self.heap.binary(op, self.read(b)?, self.read(c)?)?
+                        let left = self.read(b)?;
+                        let right = self.read(c)?;
+                        if let Some(state) = self.binary_protocol(op, left, right)? {
+                            self.continue_binary_protocol(p, a, state, output)?;
+                        } else {
+                            self.registers[a] = self.heap.binary(op, left, right)?;
+                        }
                     }
                     Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-                        self.registers[a] = self.heap.compare(op, self.read(b)?, self.read(c)?)?
+                        let left = self.read(b)?;
+                        let right = self.read(c)?;
+                        if let Some(state) = self.binary_protocol(op, left, right)? {
+                            self.continue_binary_protocol(p, a, state, output)?;
+                        } else {
+                            self.registers[a] = self.heap.compare(op, left, right)?;
+                        }
                     }
-                    Op::Neg | Op::Pos => self.registers[a] = self.heap.unary(op, self.read(b)?)?,
+                    Op::Neg | Op::Pos => {
+                        let kind = if op == Op::Neg {
+                            UnaryProtocolKind::Neg
+                        } else {
+                            UnaryProtocolKind::Pos
+                        };
+                        let value = self.read(b)?;
+                        self.invoke_unary_protocol(p, value, a, kind, output)?;
+                    }
                     Op::Not => {
                         let value = self.read(b)?;
                         self.invoke_truth(p, value, a, TruthAction::Not, output)?;
@@ -2625,6 +2782,9 @@ impl Vm {
                         let mut dict_pair_start = None;
                         let mut dict_pair_iterator_start = None;
                         let mut dict_pair_next = None;
+                        let mut binary_protocol = None;
+                        let mut binary_negate = false;
+                        let mut unary_protocol = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
@@ -2717,6 +2877,18 @@ impl Vm {
                                     value = Value::bool(true);
                                 }
                             }
+                            ReturnAction::BinaryProtocol(state) => {
+                                if value == Value::NOT_IMPLEMENTED {
+                                    binary_protocol = Some(state);
+                                } else {
+                                    binary_negate = state.negate_result;
+                                }
+                            }
+                            ReturnAction::UnaryProtocol(state) => {
+                                if value == Value::NOT_IMPLEMENTED {
+                                    unary_protocol = Some(state);
+                                }
+                            }
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -2736,11 +2908,19 @@ impl Vm {
                             || dict_iterable_next.is_some()
                             || dict_pair_start.is_some()
                             || dict_pair_iterator_start.is_some()
-                            || dict_pair_next.is_some();
+                            || dict_pair_next.is_some()
+                            || binary_protocol.is_some()
+                            || binary_negate
+                            || unary_protocol.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
                                 self.finish_truth(dest, value, protocol, action)?;
+                            } else if binary_negate {
+                                self.invoke_truth(p, value, dest, TruthAction::Not, output)?;
+                            } else if let Some(state) = unary_protocol {
+                                self.registers[dest] =
+                                    self.unary_fallback(state.kind, state.value)?;
                             } else if let Some((class, arguments)) = finish_new {
                                 self.finish_new(p, dest, class, value, arguments, output)?;
                             } else if let Some((build, mapping)) = class_prepare {
@@ -2826,6 +3006,8 @@ impl Vm {
                                 {
                                     self.continue_dict_construction(p, dest, state, output)?;
                                 }
+                            } else if let Some(state) = binary_protocol {
+                                self.continue_binary_protocol(p, dest, state, output)?;
                             }
                         } else if continuation_required {
                             return Err(Diagnostic::new(
@@ -4807,6 +4989,7 @@ impl Vm {
             self.heap
                 .has_custom_metaclass_hook(body.metaclass, self.type_class, "__init__")?;
         if !custom_new && !custom_init {
+            self.validate_builtin_subclass_bases(&body.declared_bases)?;
             self.heap.finish_class(body.namespace)?;
             if let Some(cell) = class_cell {
                 self.heap.store_cell(cell, body.namespace)?;
@@ -4887,6 +5070,12 @@ impl Vm {
     }
 
     fn finalize_class(&mut self, state: &ClassHookState) -> Result<()> {
+        let bases = match self.heap.get(state.namespace)? {
+            Object::Namespace(class) => class.bases.clone(),
+            Object::Class(class) => class.bases.clone(),
+            _ => return Err(Diagnostic::new("BytecodeError", "missing class namespace")),
+        };
+        self.validate_builtin_subclass_bases(&bases)?;
         self.heap.finish_class(state.namespace)?;
         if let Some(cell) = state.class_cell {
             self.heap.store_cell(cell, state.namespace)?;
@@ -4914,6 +5103,7 @@ impl Vm {
         if bases.is_empty() {
             bases.push(self.object_class);
         }
+        self.validate_builtin_subclass_bases(&bases)?;
         let class =
             self.heap
                 .namespace_from_type_mapping(&name, bases, self.type_class, mapping)?;

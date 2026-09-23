@@ -5,6 +5,7 @@ pub(crate) struct Value(u64);
 impl Value {
     pub const NONE: Self = Self(4);
     pub const UNBOUND: Self = Self(5);
+    pub const NOT_IMPLEMENTED: Self = Self(6);
     pub(crate) fn raw(self) -> u64 {
         self.0
     }

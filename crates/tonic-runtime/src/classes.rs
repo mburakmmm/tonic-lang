@@ -136,6 +136,31 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__setitem__"
                 | "__delitem__"
                 | "__delete__"
+                | "__add__"
+                | "__radd__"
+                | "__iadd__"
+                | "__sub__"
+                | "__rsub__"
+                | "__mul__"
+                | "__rmul__"
+                | "__truediv__"
+                | "__rtruediv__"
+                | "__floordiv__"
+                | "__rfloordiv__"
+                | "__mod__"
+                | "__rmod__"
+                | "__eq__"
+                | "__ne__"
+                | "__lt__"
+                | "__le__"
+                | "__gt__"
+                | "__ge__"
+                | "__neg__"
+                | "__pos__"
+                | "__abs__"
+                | "__int__"
+                | "__float__"
+                | "__index__"
                 | "__module__"
                 | "__qualname__"
                 | "__doc__"
@@ -846,6 +871,7 @@ impl Heap {
         self.alloc(Object::Instance {
             class,
             attributes: Attributes::default(),
+            native: None,
         })
     }
     pub fn property_getter(&self, owner: Value, name: &str) -> Result<Option<Value>> {
@@ -1289,7 +1315,9 @@ impl Heap {
                 };
                 return self.bind_descriptor(value, None, owner);
             }
-            Ok(Object::Instance { class, attributes }) => {
+            Ok(Object::Instance {
+                class, attributes, ..
+            }) => {
                 let class = *class;
                 if name == "__class__" {
                     return Ok(class);

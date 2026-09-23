@@ -1259,12 +1259,123 @@ text='x'
 print((1).__class__==int,items.__class__==list,mapping.__class__==dict,text.__class__==str,None.__class__.__name__)
 print(object.__getattribute__(1,'__class__')==int)
 ''',
+'''class I(int):
+    def twice(self):
+        return self+self
+class F(float):
+    pass
+class S(str):
+    pass
+class L(list):
+    def first(self):
+        return self[0]
+class T(tuple):
+    pass
+class D(dict):
+    pass
+class SpecialInt(int):
+    def __add__(self,other):
+        return 90+other
+class Source:
+    def __init__(self,values):
+        self.values=values
+        self.index=0
+    def __iter__(self):
+        return self
+    def __next__(self):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        if self.index==len(self.values):
+            raise StopIteration()
+        value=self.values[self.index]
+        self.index+=1
+        return value
+i=I('42')
+f=F('2.5')
+s=S('ab')
+l=L(Source([1,2]))
+t=T(Source([3,4]))
+d=D(Source([('x',5)]))
+i.tag='integer'; s.tag='string'; l.tag='list'; d.tag='dict'
+print(type(i).__name__,i,i.twice(),i.tag,isinstance(i,int),type(i+1)==int)
+print(type(f).__name__,f,f+0.5,isinstance(f,float),type(-f)==float)
+print(type(s).__name__,s,s+'c',s.tag,len(s),isinstance(s,str),type(s+'c')==str)
+print(type(l).__name__,l,l.first(),l.tag,len(l),isinstance(l,list),type(l[:])==list)
+print(type(t).__name__,t,t[1],len(t),isinstance(t,tuple),type(t[:])==tuple)
+print(type(d).__name__,d,d['x'],d.tag,len(d),isinstance(d,dict))
+l += [7]
+l[0]=9
+d['y']=6
+print(type(l).__name__,l,d)
+print({i:'int',s:'str',t:'tuple'}[42],{i:'int',s:'str',t:'tuple'}['ab'],{i:'int',s:'str',t:'tuple'}[(3,4)])
+print(list(l),tuple(t),dict(d))
+print(SpecialInt(2)+1)
+print(type(int(i)).__name__,type(float(f)).__name__,type(str(s)).__name__)
+''',
+'''class Number:
+    def __init__(self,value):
+        self.value=value
+    def __add__(self,other):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        return Number(self.value+other.value)
+    def __sub__(self,other): return self.value-other.value
+    def __rsub__(self,other): return other.value-self.value
+    def __mul__(self,other): return self.value*other.value
+    def __truediv__(self,other): return self.value/other.value
+    def __floordiv__(self,other): return self.value//other.value
+    def __mod__(self,other): return self.value%other.value
+    def __eq__(self,other): return self.value==other.value
+    def __lt__(self,other): return self.value<other.value
+    def __le__(self,other): return self.value<=other.value
+    def __gt__(self,other): return self.value>other.value
+    def __ge__(self,other): return self.value>=other.value
+    def __neg__(self): return -self.value
+    def __pos__(self): return self.value
+    def __abs__(self): return 100+self.value
+class Child(Number):
+    def __radd__(self,other):
+        return Number(other.value+self.value+1000)
+a=Number(8); b=Number(3); c=Child(2)
+print((a+b).value,(a+c).value,a-b,b-a,a*b,a/b,a//b,a%b)
+print(a==Number(8),Number(8)!=Number(8),a!=b,a<b,a<=b,a>b,a>=b)
+print(-a,+a,abs(a))
+class Maybe:
+    def __add__(self,other): return NotImplemented
+class Reverse:
+    def __radd__(self,other): return 17
+print(Maybe()+Reverse())
+class InPlace:
+    def __iadd__(self,other): return NotImplemented
+    def __add__(self,other): return 9
+x=InPlace(); x+=1; print(x)
+class Equal:
+    def __eq__(self,other): return NotImplemented
+x=Equal(); y=Equal()
+print(x==x,x==y,x!=y,type(NotImplemented).__name__,str(NotImplemented))
+class Truth:
+    def __bool__(self): return True
+class Weird:
+    def __eq__(self,other): return Truth()
+print(Weird()!=Weird())
+class Meta(type):
+    def __mul__(cls,other): return cls.__name__+other
+class C(metaclass=Meta): pass
+print(C*'!')
+''',
 ]
 ERRORS = [
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),
     ('class C:\n    pass\nC().missing', 'AttributeError'),
+    ('class B(bool):\n    pass', 'TypeError'),
+    ('class R(range):\n    pass', 'TypeError'),
+    ('class C(int,str):\n    pass', 'TypeError'),
+    ("type('B',(bool,),{})", 'TypeError'),
+    ('bool(NotImplemented)', 'TypeError'),
     ('class C(1):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B(A,A):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    print("body")', 'TypeError'),

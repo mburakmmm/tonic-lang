@@ -92,7 +92,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 274 Rust testi ile 290 stdout ve 116 exception türü
+Güncel yerel matris 276 Rust testi ile 292 stdout ve 121 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -228,8 +228,12 @@ Descriptor `__get__`/`__set__`/`__delete__` data ve non-data önceliğiyle,
 `__set_name__` class body sonrasında tanım sırasıyla çalışır. Metaclass seçimi,
 dict tabanlı `__prepare__`, `__new__/__init__` zinciri, canlı salt okunur class
 `__dict__` mappingproxy, `for` için custom `__iter__/__next__` ve dict dışı
-class namespace mapping'leri desteklenir; kalan numeric/operator protokolleri
-açıktır.
+class namespace mapping'leri desteklenir. `int`/`float`/`str`/`list`/`tuple`/
+`dict` alt sınıfları class kimliği ve instance alanlarını koruyan native backing
+storage kullanır. Temel aritmetik, reflected/in-place dispatch, rich comparison,
+unary ve `abs` protokolleri `NotImplemented` ile strict-subclass sırasını uygular.
+Canonical builtin `__new__`/`__init__`, conversion/index/hash, power/bitwise ve
+container içi suspending comparison kapsamı hâlâ açıktır.
 Senkron context manager `__enter__/__exit__` özel-metot lookup'u, nested unwind,
 exception suppression, managed traceback aktarımı ve return/break/continue
 temizliğiyle desteklenir. `raise ... from ...`, örtük `__context__`, explicit
@@ -311,6 +315,8 @@ Adaptive integer quickening sözleşmesi: [ADR 0015](docs/adr/0015-adaptive-inte
 Monomorphic function-call cache sözleşmesi: [ADR 0016](docs/adr/0016-monomorphic-call-cache.md).
 Instance attribute cache sözleşmesi: [ADR 0017](docs/adr/0017-instance-attribute-cache.md).
 Attribute interception sözleşmesi: [ADR 0065](docs/adr/0065-attribute-interception.md).
+Native builtin alt sınıf ve operator protokol sözleşmesi:
+[ADR 0066](docs/adr/0066-native-subclasses-and-operator-protocols.md).
 
 Kuralların analizi: [ANALYSIS.md](docs/ANALYSIS.md).
 Kararlar/riskler: [ADR 0001](docs/adr/0001-bootstrap.md).

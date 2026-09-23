@@ -1,5 +1,5 @@
 use tonic_compiler::compile;
-use tonic_runtime::Vm;
+use tonic_runtime::{ExecutionMode, Vm};
 fn run(source: &str) -> String {
     let code = compile(source, "classes").unwrap();
     let mut vm = Vm::new().unwrap();
@@ -644,7 +644,7 @@ fn class_errors_and_unsupported_protocols_are_explicit() {
         ("class C(1):\n    pass","TypeError"),
         ("class A:\n    pass\nclass B(A,A):\n    pass","TypeError"),
         ("class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    pass","TypeError"),
-        ("class C:\n    pass\nC.__eq__=1","UnsupportedFeature"),
+        ("class C:\n    pass\nC.__eq__=1\nC()==C()","TypeError"),
         ("x=object()\nx.a=1","AttributeError"),
         ("object.x=1","TypeError"),
         ("class C:\n    x=classmethod(1)\nd={C.x:2}\nprint(d[C.x],C.x==C.x)\nC.x()","TypeError"),
@@ -652,4 +652,161 @@ fn class_errors_and_unsupported_protocols_are_explicit() {
         let mut vm=Vm::new().unwrap();vm.gc_interval=Some(1);
         assert_eq!(vm.run(&compile(source,"error").unwrap(),&mut Vec::new()).unwrap_err().kind,kind,"{source}");
     }
+}
+
+#[test]
+fn builtin_subclasses_keep_native_storage_identity_and_gc_roots() {
+    let source = r#"class I(int):
+    def twice(self):
+        return self+self
+class F(float):
+    pass
+class S(str):
+    pass
+class L(list):
+    def first(self):
+        return self[0]
+class T(tuple):
+    pass
+class D(dict):
+    pass
+class SpecialInt(int):
+    def __add__(self,other):
+        return 90+other
+class Source:
+    def __init__(self,values):
+        self.values=values
+        self.index=0
+    def __iter__(self):
+        return self
+    def __next__(self):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        if self.index==len(self.values):
+            raise StopIteration()
+        value=self.values[self.index]
+        self.index+=1
+        return value
+i=I('42')
+f=F('2.5')
+s=S('ab')
+l=L(Source([1,2]))
+t=T(Source([3,4]))
+d=D(Source([('x',5)]))
+i.tag='integer'; s.tag='string'; l.tag='list'; d.tag='dict'
+print(type(i).__name__,i,i.twice(),i.tag,isinstance(i,int),type(i+1)==int)
+print(type(f).__name__,f,f+0.5,isinstance(f,float),type(-f)==float)
+print(type(s).__name__,s,s+'c',s.tag,len(s),isinstance(s,str),type(s+'c')==str)
+print(type(l).__name__,l,l.first(),l.tag,len(l),isinstance(l,list),type(l[:])==list)
+print(type(t).__name__,t,t[1],len(t),isinstance(t,tuple),type(t[:])==tuple)
+print(type(d).__name__,d,d['x'],d.tag,len(d),isinstance(d,dict))
+l += [7]
+l[0]=9
+d['y']=6
+print(type(l).__name__,l,d)
+print({i:'int',s:'str',t:'tuple'}[42],{i:'int',s:'str',t:'tuple'}['ab'],{i:'int',s:'str',t:'tuple'}[(3,4)])
+print(list(l),tuple(t),dict(d))
+print(SpecialInt(2)+1)
+print(type(int(i)).__name__,type(float(f)).__name__,type(str(s)).__name__)"#;
+    assert_eq!(
+        run(source),
+        "I 42 84 integer True True\nF 2.5 3.0 True True\nS ab abc string 2 True True\nL [1, 2] 1 list 2 True True\nT (3, 4) 4 2 True True\nD {'x': 5} 5 dict 1 True\nL [9, 2, 7] {'x': 5, 'y': 6}\nint str tuple\n[9, 2, 7] (3, 4) {'x': 5, 'y': 6}\n91\nint float str\n"
+    );
+
+    for source in [
+        "class B(bool):\n    pass",
+        "class R(range):\n    pass",
+        "class C(int,str):\n    pass",
+        "type('B',(bool,),{})",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "native-layout").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError", "{source}");
+    }
+
+    let program = compile(
+        "def add_one(value):\n    return value+1\nfor i in range(20):\n    add_one(i)\nclass I(int):\n    pass\nprint(add_one(I(4)),type(add_one(I(5))).__name__)",
+        "native-subclass-jit",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"5 int\n");
+    assert!(vm.stats.jit_compiled >= 1);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
+fn numeric_and_comparison_protocols_suspend_reflect_and_fallback() {
+    let source = r#"class Number:
+    def __init__(self,value):
+        self.value=value
+    def __add__(self,other):
+        scratch=0.0
+        for i in range(20):
+            scratch+=0.5
+        return Number(self.value+other.value)
+    def __sub__(self,other): return self.value-other.value
+    def __rsub__(self,other): return other.value-self.value
+    def __mul__(self,other): return self.value*other.value
+    def __truediv__(self,other): return self.value/other.value
+    def __floordiv__(self,other): return self.value//other.value
+    def __mod__(self,other): return self.value%other.value
+    def __eq__(self,other): return self.value==other.value
+    def __lt__(self,other): return self.value<other.value
+    def __le__(self,other): return self.value<=other.value
+    def __gt__(self,other): return self.value>other.value
+    def __ge__(self,other): return self.value>=other.value
+    def __neg__(self): return -self.value
+    def __pos__(self): return self.value
+    def __abs__(self): return 100+self.value
+class Child(Number):
+    def __radd__(self,other):
+        return Number(other.value+self.value+1000)
+a=Number(8); b=Number(3); c=Child(2)
+print((a+b).value,(a+c).value,a-b,b-a,a*b,a/b,a//b,a%b)
+print(a==Number(8),Number(8)!=Number(8),a!=b,a<b,a<=b,a>b,a>=b)
+print(-a,+a,abs(a))
+class Maybe:
+    def __add__(self,other): return NotImplemented
+class Reverse:
+    def __radd__(self,other): return 17
+print(Maybe()+Reverse())
+class InPlace:
+    def __iadd__(self,other): return NotImplemented
+    def __add__(self,other): return 9
+x=InPlace(); x+=1; print(x)
+class Equal:
+    def __eq__(self,other): return NotImplemented
+x=Equal(); y=Equal()
+print(x==x,x==y,x!=y,type(NotImplemented).__name__,str(NotImplemented))
+class Truth:
+    def __bool__(self): return True
+class Weird:
+    def __eq__(self,other): return Truth()
+print(Weird()!=Weird())
+class Meta(type):
+    def __mul__(cls,other): return cls.__name__+other
+class C(metaclass=Meta): pass
+print(C*'!')"#;
+    assert_eq!(
+        run(source),
+        "11 1010 5 -5 24 2.6666666666666665 2 2\nTrue False True False False True True\n-8 8 108\n17\n9\nTrue False True NotImplementedType NotImplemented\nFalse\nC!\n"
+    );
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile("bool(NotImplemented)", "not-implemented-truth").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "TypeError");
 }

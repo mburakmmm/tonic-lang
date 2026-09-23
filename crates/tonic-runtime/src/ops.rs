@@ -19,13 +19,14 @@ fn zero() -> Diagnostic {
 
 impl Heap {
     pub fn inplace_add(&mut self, a: Value, b: Value) -> Result<Value> {
+        let storage = self.native_value(a);
         // Probe tags without constructing a TypeError on immediate arithmetic.
-        if a.heap_index().is_none() || !matches!(self.get(a), Ok(Object::List(_))) {
+        if storage.heap_index().is_none() || !matches!(self.get(storage), Ok(Object::List(_))) {
             return self.binary(Op::Add, a, b);
         }
         if a == b {
             // list += itself copies its original contents exactly once.
-            let Object::List(values) = self.get(a)? else {
+            let Object::List(values) = self.get(storage)? else {
                 unreachable!()
             };
             let values = values.clone();
@@ -152,6 +153,8 @@ impl Heap {
             return self.alloc(Object::Float(f));
         }
         if op == Op::Add {
+            let a = self.native_value(a);
+            let b = self.native_value(b);
             let result = match (self.get(a), self.get(b)) {
                 (Ok(Object::Str(x)), Ok(Object::Str(y))) => {
                     let mut s = String::with_capacity(x.len() + y.len());
@@ -182,11 +185,12 @@ impl Heap {
             let n = self.integer(v)?;
             return self.int(if op == Op::Neg { -n } else { n });
         }
-        if let Object::Float(n) = self.get(v)? {
+        let native = self.native_value(v);
+        if let Object::Float(n) = self.get(native)? {
             return if op == Op::Neg {
                 self.alloc(Object::Float(-n))
             } else {
-                Ok(v)
+                Ok(native)
             };
         }
         Err(type_error())
@@ -218,7 +222,9 @@ impl Heap {
         if a == b {
             return Ok(true);
         }
-        Ok(match (self.get(a), self.get(b)) {
+        let native_a = self.native_value(a);
+        let native_b = self.native_value(b);
+        Ok(match (self.get(native_a), self.get(native_b)) {
             (
                 Ok(Object::BoundMethod {
                     function: a,
@@ -335,6 +341,8 @@ impl Heap {
         if self.numeric(a) && self.numeric(b) {
             return self.number_order(a, b);
         }
+        let a = self.native_value(a);
+        let b = self.native_value(b);
         match (self.get(a), self.get(b)) {
             (Ok(Object::Str(x)), Ok(Object::Str(y))) => Ok(Some(x.cmp(y))),
             (Ok(Object::Tuple(x)), Ok(Object::Tuple(y)))
@@ -350,6 +358,7 @@ impl Heap {
         }
     }
     pub fn length(&mut self, v: Value) -> Result<Value> {
+        let v = self.native_value(v);
         let n = match self.get(v)? {
             Object::Str(s) => BigInt::from(s.chars().count()),
             Object::Tuple(v) | Object::List(v) => BigInt::from(v.len()),
@@ -362,6 +371,7 @@ impl Heap {
         self.int(n)
     }
     pub fn item(&mut self, v: Value, index: Value) -> Result<Value> {
+        let v = self.native_value(v);
         if matches!(self.get(v), Ok(Object::Dict(_))) {
             return self.dict_get(v, index)?.ok_or_else(|| {
                 Diagnostic::new(
@@ -430,6 +440,7 @@ impl Heap {
         }
     }
     fn slice(&mut self, source: Value, components: [Value; 3]) -> Result<Value> {
+        let source = self.native_value(source);
         let start = self.slice_component(components[0])?;
         let stop = self.slice_component(components[1])?;
         let step = self.slice_component(components[2])?.unwrap_or(1);
@@ -469,6 +480,7 @@ impl Heap {
         })))
     }
     pub fn iterator(&mut self, v: Value) -> Result<Value> {
+        let v = self.native_value(v);
         let object = match self.get(v)? {
             Object::Range { start, stop, step } => Object::RangeIterator {
                 next: *start as i128,

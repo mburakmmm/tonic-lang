@@ -12,6 +12,7 @@ use tonic_core::diagnostic::{Diagnostic, Result};
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum Key {
     None,
+    NotImplemented,
     SmallInt(i64),
     Int(BigInt),
     Float(u64),
@@ -34,6 +35,7 @@ impl Dict {
 }
 impl Heap {
     pub(crate) fn dict_get_str(&self, owner: Value, name: &str) -> Result<Option<Value>> {
+        let owner = self.native_value(owner);
         let Object::Dict(dict) = self.get(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected dict"));
         };
@@ -47,6 +49,7 @@ impl Heap {
         self.dict_set(owner, key, value)
     }
     pub(crate) fn dict_entries(&self, owner: Value) -> Result<Vec<(Value, Value)>> {
+        let owner = self.native_value(owner);
         let Object::Dict(dict) = self.get(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected dict"));
         };
@@ -59,8 +62,13 @@ impl Heap {
                 "dictionary key nesting limit",
             ));
         }
+        let identity = value;
+        let value = self.native_value(value);
         if value == Value::NONE {
             return Ok(Key::None);
+        }
+        if value == Value::NOT_IMPLEMENTED {
+            return Ok(Key::NotImplemented);
         }
         if let Some(n) = value.integer() {
             return Ok(Key::SmallInt(n));
@@ -73,7 +81,7 @@ impl Heap {
                     Key::Int(n.clone())
                 }
             }
-            Object::Float(n) if n.is_nan() => Key::NaN(value.heap_index().expect("heap float")),
+            Object::Float(n) if n.is_nan() => Key::NaN(identity.heap_index().expect("heap float")),
             Object::Float(n) if n.is_finite() && n.fract() == 0.0 => {
                 let n = BigInt::from_f64(*n).expect("finite integer float");
                 if let Some(n) = n.to_i64() {
@@ -111,6 +119,7 @@ impl Heap {
     }
     pub fn dict_get(&self, owner: Value, key: Value) -> Result<Option<Value>> {
         let key = self.dict_key(key, 0)?;
+        let owner = self.native_value(owner);
         let Object::Dict(dict) = self.get(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected dict"));
         };
@@ -121,6 +130,7 @@ impl Heap {
     }
     /// Single dictionary mutation boundary for the generational write barrier.
     pub fn dict_set(&mut self, owner: Value, key: Value, value: Value) -> Result<()> {
+        let owner = self.native_value(owner);
         let material = self.dict_key(key, 0)?;
         self.write_barrier_pair(owner, key, value);
         let Object::Dict(dict) = self.get_mut(owner)? else {
@@ -143,6 +153,7 @@ impl Heap {
         Ok(())
     }
     pub fn dict_delete(&mut self, owner: Value, key: Value) -> Result<()> {
+        let owner = self.native_value(owner);
         let material = self.dict_key(key, 0)?;
         let Object::Dict(dict) = self.get(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected dict"));
@@ -171,6 +182,8 @@ impl Heap {
         Ok(())
     }
     pub fn dict_merge(&mut self, owner: Value, other: Value) -> Result<()> {
+        let owner = self.native_value(owner);
+        let other = self.native_value(other);
         let Object::Dict(dict) = self.get(other)? else {
             return Err(Diagnostic::new(
                 "TypeError",
@@ -191,6 +204,7 @@ impl Heap {
         Ok(())
     }
     pub fn set_item(&mut self, owner: Value, key: Value, value: Value) -> Result<()> {
+        let owner = self.native_value(owner);
         if matches!(self.get(owner)?, Object::Dict(_)) {
             return self.dict_set(owner, key, value);
         }
@@ -224,6 +238,7 @@ impl Heap {
         Ok(())
     }
     pub fn delete_item(&mut self, owner: Value, key: Value) -> Result<()> {
+        let owner = self.native_value(owner);
         if matches!(self.get(owner)?, Object::Dict(_)) {
             return self.dict_delete(owner, key);
         }

@@ -47,6 +47,10 @@ pub(crate) enum Object {
     Instance {
         class: Value,
         attributes: crate::shapes::Attributes,
+        /// Exact builtin storage retained behind a user-visible subclass
+        /// instance.  The indirection keeps builtin layouts compact while the
+        /// outer object owns class identity and instance attributes.
+        native: Option<Value>,
     },
     BoundMethod {
         function: Value,
@@ -132,7 +136,9 @@ impl Object {
 
     pub(crate) fn instance_parts(&self) -> Option<(Value, &crate::shapes::Attributes)> {
         match self {
-            Self::Instance { class, attributes }
+            Self::Instance {
+                class, attributes, ..
+            }
             | Self::Exception {
                 class, attributes, ..
             } => Some((*class, attributes)),
@@ -156,9 +162,14 @@ impl Object {
             Self::MappingProxy { class } | Self::MappingProxyIterator { class, .. } => {
                 visit(*class)
             }
-            Self::Instance { class, attributes } => {
+            Self::Instance {
+                class,
+                attributes,
+                native,
+            } => {
                 visit(*class);
-                attributes.trace(visit);
+                attributes.trace(&mut visit);
+                native.iter().copied().for_each(visit);
             }
             Self::Exception {
                 class,
@@ -254,6 +265,28 @@ pub(crate) struct Heap {
     pending_foreign: Vec<crate::foreign::PendingForeign>,
 }
 impl Heap {
+    /// Return the exact builtin backing value for a builtin subclass instance.
+    /// Native payloads never nest, so one lookup is sufficient and keeps the
+    /// exact builtin fast path unchanged.
+    pub(crate) fn native_value(&self, value: Value) -> Value {
+        match self.try_get(value) {
+            Some(Object::Instance {
+                native: Some(native),
+                ..
+            }) => *native,
+            _ => value,
+        }
+    }
+
+    pub(crate) fn native_instance(&mut self, class: Value, native: Value) -> Result<Value> {
+        self.class(class)?;
+        self.alloc(Object::Instance {
+            class,
+            attributes: Default::default(),
+            native: Some(native),
+        })
+    }
+
     pub(crate) fn refresh_foreign_references(
         &mut self,
         handles: &mut crate::native::HandleTable,
@@ -431,6 +464,7 @@ impl Heap {
     /// Managed mutation boundary. Native extensions and the VM cannot bypass
     /// the owner/value write barrier by mutating list storage directly.
     pub fn append_list(&mut self, owner: Value, value: Value) -> Result<()> {
+        let owner = self.native_value(owner);
         self.write_barrier(owner, value);
         let Object::List(values) = self.get_mut(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected list"));
@@ -584,6 +618,7 @@ impl Heap {
         }
     }
     pub fn integer(&self, v: Value) -> Result<BigInt> {
+        let v = self.native_value(v);
         if let Some(n) = v.integer() {
             return Ok(n.into());
         }
@@ -601,6 +636,7 @@ impl Heap {
             .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit i64"))
     }
     pub fn float(&self, v: Value) -> Result<f64> {
+        let v = self.native_value(v);
         if let Some(n) = v.integer() {
             return Ok(n as f64);
         }
@@ -613,18 +649,27 @@ impl Heap {
         }
     }
     pub fn is_integer(&self, v: Value) -> bool {
+        let v = self.native_value(v);
         v.integer().is_some() || self.try_get(v).is_some_and(|o| matches!(o, Object::Int(_)))
     }
     pub fn is_float(&self, v: Value) -> bool {
+        let v = self.native_value(v);
         self.try_get(v)
             .is_some_and(|o| matches!(o, Object::Float(_)))
     }
     pub fn truth(&self, v: Value) -> Result<bool> {
+        let v = self.native_value(v);
         if let Some(n) = v.integer() {
             return Ok(n != 0);
         }
         if v == Value::NONE {
             return Ok(false);
+        }
+        if v == Value::NOT_IMPLEMENTED {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "NotImplemented should not be used in a boolean context",
+            ));
         }
         Ok(match self.get(v)? {
             Object::Int(n) => !n.is_zero(),
@@ -680,6 +725,9 @@ impl Heap {
         if v == Value::NONE {
             return Ok("None".into());
         }
+        if v == Value::NOT_IMPLEMENTED {
+            return Ok("NotImplemented".into());
+        }
         Ok(match self.get(v)? {
             Object::Class(c) => format!("<class '{}'>", c.name),
             Object::Exception {
@@ -729,6 +777,14 @@ impl Heap {
                 path.pop();
                 result.push_str("})");
                 result
+            }
+            Object::Instance {
+                class,
+                native: Some(native),
+                ..
+            } => {
+                let _ = class;
+                self.format_depth(*native, repr, path)?
             }
             Object::Instance { class, .. } => format!("<{} instance>", self.class(*class)?.name),
             Object::Traceback { .. } => "<traceback object>".into(),
