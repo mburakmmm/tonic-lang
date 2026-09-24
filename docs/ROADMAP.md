@@ -90,9 +90,14 @@ sonra alınır.
       protokoller, bool/int/BigInt semantiği, negatif shift ve sıfırın negatif
       kuvveti tanıları, büyük sonuç kaynak sınırı, bytecode v13 doğrulaması ve
       Cranelift desteklenmeyen-op interpreter fallback'i.
-    - [ ] Canonical builtin `__new__`/`__init__` descriptor'ları; custom native
-      subclass `__new__`, `__int__`/`__float__`/`__index__`/`__hash__` ve
-      container içi suspending element comparison.
+    - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
+      `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
+      `__new__`, yeniden başlatma semantiği ve precise continuation roots.
+    - [x] `int`/`float` constructor'larında suspending `__int__`/`__float__` ve
+      `__index__` fallback'i; dönüş tipi doğrulaması, bool normalizasyonu ve
+      custom native `__new__` tamamlaması.
+    - [ ] Slice/range/indexleme gibi kalan `__index__` tüketicileri, `__hash__`
+      protokolü ve container içi suspending element comparison.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

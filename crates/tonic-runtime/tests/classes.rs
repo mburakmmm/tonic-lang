@@ -744,6 +744,147 @@ print(type(int(i)).__name__,type(float(f)).__name__,type(str(s)).__name__)"#;
 }
 
 #[test]
+fn canonical_builtin_new_init_and_custom_native_new_suspend_safely() {
+    let source = r#"class Source:
+    def __init__(self,values):
+        self.values=values
+        self.index=0
+    def __iter__(self): return self
+    def __next__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        if self.index==len(self.values): raise StopIteration()
+        value=self.values[self.index]
+        self.index+=1
+        return value
+class I(int):
+    def __new__(cls,value):
+        self=int.__new__(cls,value+1)
+        self.before=value
+        return self
+    def __init__(self,value): self.after=value
+class F(float):
+    def __new__(cls,value): return float.__new__(cls,value)
+class S(str):
+    def __new__(cls,value): return str.__new__(cls,value)
+class T(tuple):
+    def __new__(cls,values): return tuple.__new__(cls,values)
+class L(list):
+    def __new__(cls,values):
+        self=list.__new__(cls,'ignored',marker=True)
+        self.empty_at_new=len(self)
+        return self
+class CustomList(list):
+    def __init__(self,values):
+        self.empty_at_init=len(self)
+        list.__init__(self,values)
+class D(dict):
+    def __new__(cls,*args,**keywords):
+        self=dict.__new__(cls,'ignored',marker=True)
+        self.empty_at_new=len(self)
+        return self
+i=I(4); f=F('2.5'); s=S(12); t=T(Source([1,2]))
+l=L(Source([3,4])); c=CustomList(Source([5,6])); d=D(Source([('x',7)]),y=8)
+print(i,i.before,i.after,type(i).__name__,f,type(f).__name__,s,type(s).__name__)
+print(t,type(t).__name__,l,l.empty_at_new,type(l).__name__)
+print(c,c.empty_at_init,type(c).__name__,d,d.empty_at_new,type(d).__name__)
+list.__init__(l,Source([9,10]))
+dict.__init__(d,d,z=11)
+print(l,d)
+print(int.__new__==int.__new__,list.__init__==list.__init__,object.__init__(f,marker=99))
+print(bool.__new__(bool,1),list(range.__new__(range,1,4)))"#;
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(
+        &compile(source, "canonical-native-constructors").unwrap(),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(
+        output,
+        b"5 4 4 I 2.5 F 12 S\n(1, 2) T [3, 4] 0 L\n[5, 6] 0 CustomList {'x': 7, 'y': 8} 0 D\n[9, 10] {'x': 7, 'y': 8, 'z': 11}\nTrue True None\nTrue [1, 2, 3]\n"
+    );
+
+    for source in [
+        "int.__new__(str,1)",
+        "object.__new__(int)",
+        "list.__init__(1,[])",
+        "dict.__init__([],{})",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "invalid-native-constructor").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError", "{source}");
+    }
+}
+
+#[test]
+fn numeric_conversion_protocols_suspend_validate_and_finish_native_new() {
+    let source = r#"class Convert:
+    def __int__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return 41
+    def __float__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return 2.5
+class IndexOnly:
+    def __index__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return 7
+class BoolIndex:
+    def __index__(self): return True
+class OverrideInt(int):
+    def __int__(self): return 99
+class OverrideFloat(float):
+    def __float__(self): return 3.5
+class PlainFloat(float): pass
+class PlainStr(str): pass
+class Constructed(int):
+    def __new__(cls,value): return int.__new__(cls,value)
+print(int(Convert()),float(Convert()),int(IndexOnly()),float(IndexOnly()))
+print(int(BoolIndex()),float(BoolIndex()))
+print(int(OverrideInt(2)),float(OverrideFloat(2.0)))
+print(int(PlainFloat(3.8)),int(PlainStr('12')),float(PlainStr('2.5')))
+value=Constructed(IndexOnly())
+print(value,type(value).__name__)"#;
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(
+        &compile(source, "numeric-conversion-protocols").unwrap(),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(
+        output,
+        b"41 2.5 7 7.0\n1 1.0\n99 3.5\n3 12 2.5\n7 Constructed\n"
+    );
+
+    for source in [
+        "class C:\n    def __int__(self): return 1.0\nint(C())",
+        "class C:\n    def __float__(self): return 1\nfloat(C())",
+        "class C:\n    def __index__(self): return 1.0\nint(C())",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "invalid-conversion-result").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError", "{source}");
+    }
+}
+
+#[test]
 fn numeric_and_comparison_protocols_suspend_reflect_and_fallback() {
     let source = r#"class Number:
     def __init__(self,value):

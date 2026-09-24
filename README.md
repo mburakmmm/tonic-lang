@@ -32,6 +32,7 @@ The current implementation includes:
 - immediate integers, booleans and `None`, plus arbitrary-precision integers;
 - functions, closures, defaults, positional-only/keyword-only and variadic calls;
 - classes, C3 multiple inheritance, shapes, descriptors, properties and `super`;
+- canonical builtin constructors, native builtin subclasses, and suspending numeric conversion protocols;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps;
@@ -139,8 +140,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 278 Rust tests and a differential corpus of
-293 output cases plus 123 exception cases. The documented local matrix covers
+The repository currently contains 280 Rust tests and a differential corpus of
+295 output cases plus 130 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

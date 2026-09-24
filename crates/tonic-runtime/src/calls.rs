@@ -152,6 +152,21 @@ impl Arguments<'_> {
         }
     }
 }
+
+fn native_new_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
+    Some(match builtin {
+        Builtin::IntNew => super::RuntimeTypeKind::Int,
+        Builtin::BoolNew => super::RuntimeTypeKind::Bool,
+        Builtin::FloatNew => super::RuntimeTypeKind::Float,
+        Builtin::StrNew => super::RuntimeTypeKind::Str,
+        Builtin::ListNew => super::RuntimeTypeKind::List,
+        Builtin::TupleNew => super::RuntimeTypeKind::Tuple,
+        Builtin::DictNew => super::RuntimeTypeKind::Dict,
+        Builtin::RangeNew => super::RuntimeTypeKind::Range,
+        _ => return None,
+    })
+}
+
 impl Vm {
     pub(super) fn invoke(
         &mut self,
@@ -271,6 +286,19 @@ impl Vm {
             }
             Object::Builtin(builtin) => {
                 let builtin = *builtin;
+                if let Some(kind) = native_new_kind(builtin) {
+                    return self.invoke_native_new(p, kind, destination, &args, output);
+                }
+                if matches!(builtin, Builtin::ListInit | Builtin::DictInit) {
+                    return self.invoke_native_initializer(
+                        p,
+                        builtin,
+                        destination,
+                        &args,
+                        Value::NONE,
+                        output,
+                    );
+                }
                 if matches!(builtin, Builtin::TypeNew) {
                     return self.invoke_type_new(p, destination, &args, output);
                 }
@@ -1323,6 +1351,307 @@ impl Vm {
         let length = self.checked_length(value)?;
         self.heap.i64(length)
     }
+    fn runtime_type_for_kind(&self, kind: super::RuntimeTypeKind) -> Value {
+        match kind {
+            super::RuntimeTypeKind::Int => self.runtime_types.int,
+            super::RuntimeTypeKind::Bool => self.runtime_types.bool_,
+            super::RuntimeTypeKind::Float => self.runtime_types.float,
+            super::RuntimeTypeKind::Str => self.runtime_types.str_,
+            super::RuntimeTypeKind::List => self.runtime_types.list,
+            super::RuntimeTypeKind::Tuple => self.runtime_types.tuple,
+            super::RuntimeTypeKind::Dict => self.runtime_types.dict,
+            super::RuntimeTypeKind::Range => self.runtime_types.range,
+            _ => unreachable!("kind has no native subclass storage"),
+        }
+    }
+    fn validate_native_new_class(
+        &self,
+        class: Value,
+        kind: super::RuntimeTypeKind,
+    ) -> Result<bool> {
+        self.heap.class(class)?;
+        let exact = self.runtime_type_for_kind(kind);
+        if class == exact {
+            return Ok(true);
+        }
+        if self.builtin_type_kind(class).is_some()
+            || self.builtin_subclass_kind(class) != Some(kind)
+        {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "builtin __new__ received an incompatible class",
+            ));
+        }
+        Ok(false)
+    }
+    fn invoke_native_new(
+        &mut self,
+        p: &Program,
+        kind: super::RuntimeTypeKind,
+        destination: usize,
+        args: &Arguments<'_>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.count() == 0 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "builtin __new__ expects a class argument",
+            ));
+        }
+        let class = args.positional(&self.registers, 0);
+        let exact = self.validate_native_new_class(class, kind)?;
+        let mut arguments = args.owned(p, &self.registers);
+        if arguments.receiver.is_some() || arguments.positional.is_empty() {
+            return Err(Diagnostic::new("TypeError", "invalid builtin __new__ call"));
+        }
+        arguments.positional.remove(0);
+        if matches!(
+            kind,
+            super::RuntimeTypeKind::List | super::RuntimeTypeKind::Dict
+        ) {
+            let native = self.heap.alloc(if kind == super::RuntimeTypeKind::List {
+                Object::List(Vec::new())
+            } else {
+                Object::Dict(Dict::default())
+            })?;
+            self.registers[destination] = if exact {
+                native
+            } else {
+                self.heap.native_instance(class, native)?
+            };
+            return Ok(());
+        }
+        let finish = (!exact).then_some(NativeSubclassFinish {
+            class,
+            initialize: None,
+        });
+        self.invoke_builtin_type(
+            p,
+            (self.runtime_type_for_kind(kind), kind),
+            destination,
+            Arguments::Expanded(arguments),
+            finish,
+            output,
+        )
+    }
+    fn invoke_native_initializer(
+        &mut self,
+        p: &Program,
+        builtin: Builtin,
+        destination: usize,
+        args: &Arguments<'_>,
+        result: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.count() == 0 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "builtin __init__ expects an instance",
+            ));
+        }
+        let owner = args.positional(&self.registers, 0);
+        let native = self.heap.native_value(owner);
+        match builtin {
+            Builtin::ListInit => {
+                if args.keyword_count() != 0 || args.count() > 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "list.__init__ expects at most one argument",
+                    ));
+                }
+                if !matches!(self.heap.get(native)?, Object::List(_)) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "list.__init__ requires a list instance",
+                    ));
+                }
+                self.heap.replace_list(owner, Vec::new())?;
+                if args.count() == 1 {
+                    self.registers[destination] = result;
+                    return Ok(());
+                }
+                self.invoke_iterable_collection(
+                    p,
+                    destination,
+                    IterableCollectionKind::ListInit { owner, result },
+                    args.positional(&self.registers, 1),
+                    output,
+                )
+            }
+            Builtin::DictInit => {
+                if args.count() > 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "dict.__init__ expects at most one positional argument",
+                    ));
+                }
+                if !matches!(self.heap.get(native)?, Object::Dict(_)) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "dict.__init__ requires a dict instance",
+                    ));
+                }
+                let source = (args.count() == 2).then(|| args.positional(&self.registers, 1));
+                let self_source =
+                    source.is_some_and(|source| self.heap.native_value(source) == native);
+                if !self_source {
+                    self.heap.dict_clear(owner)?;
+                }
+                let mut keywords = Vec::with_capacity(args.keyword_count());
+                for index in 0..args.keyword_count() {
+                    let (name, value) = args.keyword(p, &self.registers, index);
+                    let key = self.heap.alloc(Object::Str(name.to_owned()))?;
+                    keywords.push((key, value));
+                }
+                let start = DictConstructionStart {
+                    result: native,
+                    keywords,
+                    native: None,
+                    return_value: Some(result),
+                };
+                if let Some(source) = source {
+                    if matches!(
+                        self.heap.get(self.heap.native_value(source))?,
+                        Object::Dict(_)
+                    ) {
+                        if !self_source {
+                            self.heap.dict_merge(native, source)?;
+                        }
+                    } else {
+                        return self.invoke_dict_construction(
+                            p,
+                            destination,
+                            start,
+                            source,
+                            output,
+                        );
+                    }
+                }
+                self.finish_dict_construction(p, destination, start, output)
+            }
+            _ => unreachable!("not a native initializer"),
+        }
+    }
+    fn has_canonical_native_initializer(
+        &self,
+        class: Value,
+        kind: super::RuntimeTypeKind,
+    ) -> Result<bool> {
+        let Some(initializer) = self.heap.class_lookup(class, "__init__")? else {
+            return Ok(false);
+        };
+        let expected = match kind {
+            super::RuntimeTypeKind::List => Builtin::ListInit,
+            super::RuntimeTypeKind::Dict => Builtin::DictInit,
+            _ => Builtin::ObjectInit,
+        };
+        Ok(matches!(self.heap.get(initializer), Ok(Object::Builtin(actual)) if *actual == expected))
+    }
+    fn invoke_numeric_conversion(
+        &mut self,
+        p: &Program,
+        source: Value,
+        destination: usize,
+        target: super::RuntimeTypeKind,
+        finish: Option<NativeSubclassFinish>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let (call, kind) = match target {
+            super::RuntimeTypeKind::Int => {
+                if let Some(call) = self.heap.special_method_call(source, "__int__")? {
+                    (call, super::NumericConversionKind::Int)
+                } else if let Some(call) = self.heap.special_method_call(source, "__index__")? {
+                    (call, super::NumericConversionKind::IndexToInt)
+                } else if self.heap.is_integer(source) {
+                    self.registers[destination] = self.heap.native_value(source);
+                    return self.finish_builtin_value(p, destination, finish, output);
+                } else {
+                    return Err(Diagnostic::new("TypeError", "cannot convert value to int"));
+                }
+            }
+            super::RuntimeTypeKind::Float => {
+                if let Some(call) = self.heap.special_method_call(source, "__float__")? {
+                    (call, super::NumericConversionKind::Float)
+                } else if let Some(call) = self.heap.special_method_call(source, "__index__")? {
+                    (call, super::NumericConversionKind::IndexToFloat)
+                } else if self.heap.is_float(source) {
+                    self.registers[destination] = self.heap.native_value(source);
+                    return self.finish_builtin_value(p, destination, finish, output);
+                } else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "cannot convert value to float",
+                    ));
+                }
+            }
+            _ => unreachable!("not a numeric conversion target"),
+        };
+        let state = super::NumericConversion { kind, finish };
+        let depth = self.frames.len();
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            },
+            output,
+        )?;
+        if self.frames.len() > depth {
+            self.frames
+                .last_mut()
+                .expect("numeric conversion frame")
+                .action = super::ReturnAction::NumericConversion(state);
+            Ok(())
+        } else {
+            let value = self.registers[destination];
+            self.finish_numeric_conversion(p, destination, value, state, output)
+        }
+    }
+    pub(super) fn finish_numeric_conversion(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        state: super::NumericConversion,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let converted = match state.kind {
+            super::NumericConversionKind::Int | super::NumericConversionKind::IndexToInt => {
+                if let Some(value) = value.as_bool() {
+                    Value::int(i64::from(value)).expect("bool always fits an immediate integer")
+                } else if self.heap.is_integer(value) {
+                    self.heap.native_value(value)
+                } else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "integer conversion method must return int",
+                    ));
+                }
+            }
+            super::NumericConversionKind::Float => {
+                if !self.heap.is_float(value) {
+                    return Err(Diagnostic::new("TypeError", "__float__ must return float"));
+                }
+                self.heap.native_value(value)
+            }
+            super::NumericConversionKind::IndexToFloat => {
+                let value = if let Some(value) = value.as_bool() {
+                    Value::int(i64::from(value)).expect("bool always fits an immediate integer")
+                } else if self.heap.is_integer(value) {
+                    self.heap.native_value(value)
+                } else {
+                    return Err(Diagnostic::new("TypeError", "__index__ must return int"));
+                };
+                let value = self.heap.float(value)?;
+                self.heap.alloc(Object::Float(value))?
+            }
+        };
+        self.registers[destination] = converted;
+        self.finish_builtin_value(p, destination, state.finish, output)
+    }
     fn invoke_class(
         &mut self,
         p: &Program,
@@ -1370,7 +1699,13 @@ impl Vm {
                 suppress_context: false,
                 traceback: None,
             })?;
-            if self.heap.class_lookup(class, "__init__")?.is_none() {
+            let initializer = self.heap.class_lookup(class, "__init__")?;
+            if initializer.is_none_or(|initializer| {
+                matches!(
+                    self.heap.get(initializer),
+                    Ok(Object::Builtin(Builtin::ObjectInit))
+                )
+            }) {
                 if !arguments.keywords.is_empty() {
                     return Err(Diagnostic::new(
                         "TypeError",
@@ -1394,6 +1729,43 @@ impl Vm {
         }
         if let Some(kind) = self.builtin_subclass_kind(class) {
             let constructor = self.heap.class_lookup(class, "__new__")?;
+            if let Some(constructor_kind) =
+                constructor.and_then(|constructor| match self.heap.get(constructor) {
+                    Ok(Object::Builtin(builtin)) => native_new_kind(*builtin),
+                    _ => None,
+                })
+            {
+                if constructor_kind != kind {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "native subclass inherited an incompatible __new__",
+                    ));
+                }
+                let initialize = (!self.has_canonical_native_initializer(class, kind)?)
+                    .then_some(arguments.clone());
+                if matches!(
+                    kind,
+                    super::RuntimeTypeKind::List | super::RuntimeTypeKind::Dict
+                ) && initialize.is_some()
+                {
+                    let native = self.heap.alloc(if kind == super::RuntimeTypeKind::List {
+                        Object::List(Vec::new())
+                    } else {
+                        Object::Dict(Dict::default())
+                    })?;
+                    let instance = self.heap.native_instance(class, native)?;
+                    return self.finish_new(p, destination, class, instance, arguments, output);
+                }
+                let finish = NativeSubclassFinish { class, initialize };
+                return self.invoke_builtin_type(
+                    p,
+                    (class, kind),
+                    destination,
+                    Arguments::Expanded(arguments),
+                    Some(finish),
+                    output,
+                );
+            }
             if constructor.is_some_and(|constructor| {
                 matches!(
                     self.heap.get(constructor),
@@ -1402,7 +1774,7 @@ impl Vm {
             }) {
                 let finish = NativeSubclassFinish {
                     class,
-                    arguments: arguments.clone(),
+                    initialize: Some(arguments.clone()),
                 };
                 return self.invoke_builtin_type(
                     p,
@@ -1514,6 +1886,20 @@ impl Vm {
                     "int missing string argument when base is given",
                 ));
             }
+            if let Some(value) = argument.filter(|_| base.is_none()) {
+                if self.heap.special_method_call(value, "__int__")?.is_some()
+                    || self.heap.special_method_call(value, "__index__")?.is_some()
+                {
+                    return self.invoke_numeric_conversion(
+                        p,
+                        value,
+                        destination,
+                        super::RuntimeTypeKind::Int,
+                        finish,
+                        output,
+                    );
+                }
+            }
             self.registers[destination] = match argument {
                 None => Value::int(0).expect("zero is immediate"),
                 Some(value) if base.is_none() && value.as_bool().is_some() => {
@@ -1523,7 +1909,7 @@ impl Vm {
                 Some(value) if base.is_none() && self.heap.is_integer(value) => {
                     self.heap.native_value(value)
                 }
-                Some(value) => match self.heap.get(value)? {
+                Some(value) => match self.heap.get(self.heap.native_value(value))? {
                     Object::Float(value) if base.is_none() => {
                         self.heap
                             .int(BigInt::from_f64(value.trunc()).ok_or_else(|| {
@@ -1566,6 +1952,7 @@ impl Vm {
                 result,
                 keywords,
                 native: finish,
+                return_value: None,
             };
             if args.count() == 1 {
                 let source = args.positional(&self.registers, 0);
@@ -1658,9 +2045,23 @@ impl Vm {
             }
             RuntimeTypeKind::Int => unreachable!("int handled before unary constructors"),
             RuntimeTypeKind::Float => {
+                if let Some(value) = argument {
+                    if self.heap.special_method_call(value, "__float__")?.is_some()
+                        || self.heap.special_method_call(value, "__index__")?.is_some()
+                    {
+                        return self.invoke_numeric_conversion(
+                            p,
+                            value,
+                            destination,
+                            RuntimeTypeKind::Float,
+                            finish,
+                            output,
+                        );
+                    }
+                }
                 let value = match argument {
                     None => 0.0,
-                    Some(value) => match self.heap.get(value) {
+                    Some(value) => match self.heap.get(self.heap.native_value(value)) {
                         Ok(Object::Str(value)) => value.parse::<f64>().map_err(|_| {
                             Diagnostic::new("ValueError", "could not convert string to float")
                         })?,
@@ -1698,14 +2099,12 @@ impl Vm {
         };
         let native = self.registers[destination];
         let instance = self.heap.native_instance(finish.class, native)?;
-        self.finish_new(
-            p,
-            destination,
-            finish.class,
-            instance,
-            finish.arguments,
-            output,
-        )
+        if let Some(arguments) = finish.initialize {
+            self.finish_new(p, destination, finish.class, instance, arguments, output)
+        } else {
+            self.registers[destination] = instance;
+            Ok(())
+        }
     }
     pub(super) fn invoke_dict_construction(
         &mut self,
@@ -1993,12 +2392,18 @@ impl Vm {
             result,
             keywords,
             native,
+            return_value,
         } = state;
         for (key, value) in keywords {
             self.heap.dict_set(result, key, value)?;
         }
         self.registers[destination] = result;
-        self.finish_builtin_value(p, destination, native, output)
+        if let Some(return_value) = return_value {
+            self.registers[destination] = return_value;
+            Ok(())
+        } else {
+            self.finish_builtin_value(p, destination, native, output)
+        }
     }
     pub(super) fn invoke_iterable_collection(
         &mut self,
@@ -2012,7 +2417,11 @@ impl Vm {
             Ok(iterator) => {
                 let mut items = Vec::new();
                 while let Some(item) = self.heap.next(iterator)? {
-                    items.push(item);
+                    if let IterableCollectionKind::ListInit { owner, .. } = &kind {
+                        self.heap.append_list(*owner, item)?;
+                    } else {
+                        items.push(item);
+                    }
                 }
                 self.finish_iterable_collection(p, destination, kind, items, output)
             }
@@ -2063,7 +2472,11 @@ impl Vm {
     ) -> Result<()> {
         if self.heap.is_iterator(state.iterator) {
             while let Some(item) = self.heap.next(state.iterator)? {
-                state.items.push(item);
+                if let IterableCollectionKind::ListInit { owner, .. } = &state.kind {
+                    self.heap.append_list(*owner, item)?;
+                } else {
+                    state.items.push(item);
+                }
             }
             return self.finish_iterable_collection(
                 p,
@@ -2106,7 +2519,12 @@ impl Vm {
                     ReturnAction::CollectIterableNext(state);
                 return Ok(());
             }
-            state.items.push(self.registers[destination]);
+            let item = self.registers[destination];
+            if let IterableCollectionKind::ListInit { owner, .. } = &state.kind {
+                self.heap.append_list(*owner, item)?;
+            } else {
+                state.items.push(item);
+            }
         }
     }
     pub(super) fn finish_iterable_collection(
@@ -2122,6 +2540,10 @@ impl Vm {
             IterableCollectionKind::Tuple => (Object::Tuple(items), None),
             IterableCollectionKind::NativeList(finish) => (Object::List(items), Some(finish)),
             IterableCollectionKind::NativeTuple(finish) => (Object::Tuple(items), Some(finish)),
+            IterableCollectionKind::ListInit { result, .. } => {
+                self.registers[destination] = result;
+                return Ok(());
+            }
             IterableCollectionKind::Unpack { first, count } => {
                 if items.len() < count {
                     return Err(Diagnostic::new(
@@ -2176,14 +2598,46 @@ impl Vm {
             return Ok(());
         }
         let initializer = self.heap.attr(instance, "__init__")?;
+        let builtin = match self.heap.get(initializer)? {
+            Object::Builtin(builtin) => Some(*builtin),
+            Object::BoundMethod { function, .. } => match self.heap.get(*function)? {
+                Object::Builtin(builtin) => Some(*builtin),
+                _ => None,
+            },
+            _ => None,
+        };
+        if builtin == Some(Builtin::ObjectInit) {
+            if arguments.count() != 0 {
+                let constructor = self.heap.class_lookup(class, "__new__")?;
+                if constructor.is_some_and(|value| {
+                    matches!(
+                        self.heap.get(value),
+                        Ok(Object::Builtin(Builtin::ObjectNew))
+                    )
+                }) {
+                    return Err(Diagnostic::new("TypeError", "class accepts no arguments"));
+                }
+            }
+            self.registers[destination] = instance;
+            return Ok(());
+        }
+        if builtin.is_some_and(|builtin| matches!(builtin, Builtin::ListInit | Builtin::DictInit)) {
+            let mut initializer_arguments = arguments.clone();
+            initializer_arguments.receiver = Some(instance);
+            return self.invoke_native_initializer(
+                p,
+                builtin.expect("checked builtin initializer"),
+                destination,
+                &Arguments::Expanded(initializer_arguments),
+                instance,
+                output,
+            );
+        }
         if !matches!(
             self.heap.get(initializer)?,
             Object::Function { .. } | Object::BoundMethod { .. }
         ) {
-            return Err(Diagnostic::new(
-                "TypeError",
-                "__init__ must be a Tonic function",
-            ));
+            return Err(Diagnostic::new("TypeError", "__init__ must be callable"));
         }
         let depth = self.frames.len();
         self.invoke_target(
@@ -2341,7 +2795,7 @@ impl Vm {
         args: &Arguments<'_>,
         output: &mut dyn Write,
     ) -> Result<Value> {
-        if !matches!(builtin, Builtin::Print) && args.keyword_count() != 0 {
+        if !matches!(builtin, Builtin::Print | Builtin::ObjectInit) && args.keyword_count() != 0 {
             return Err(Diagnostic::new(
                 "TypeError",
                 "builtin does not accept keyword arguments",
@@ -2349,15 +2803,67 @@ impl Vm {
         }
         let count = args.count();
         match builtin {
-            Builtin::TypeNew => unreachable!("type.__new__ has a suspending call path"),
+            Builtin::TypeNew
+            | Builtin::IntNew
+            | Builtin::BoolNew
+            | Builtin::FloatNew
+            | Builtin::StrNew
+            | Builtin::ListNew
+            | Builtin::ListInit
+            | Builtin::TupleNew
+            | Builtin::DictNew
+            | Builtin::DictInit => unreachable!("builtin has a suspending call path"),
+            Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
             Builtin::ObjectNew => {
-                if count != 1 {
+                if count != 1 || args.keyword_count() != 0 {
                     return Err(Diagnostic::new(
                         "TypeError",
                         "object.__new__ expects one class argument",
                     ));
                 }
-                self.heap.instance(args.positional(&self.registers, 0))
+                let class = args.positional(&self.registers, 0);
+                if self.builtin_type_kind(class).is_some()
+                    || self.builtin_subclass_kind(class).is_some()
+                {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "object.__new__ cannot allocate native builtin storage",
+                    ));
+                }
+                self.heap.instance(class)
+            }
+            Builtin::ObjectInit => {
+                if count == 0 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "object.__init__ expects an instance",
+                    ));
+                }
+                if count != 1 || args.keyword_count() != 0 {
+                    let instance = args.positional(&self.registers, 0);
+                    let class = self.runtime_class(instance)?;
+                    let constructor = self.heap.class_lookup(class, "__new__")?;
+                    let initializer = self.heap.class_lookup(class, "__init__")?;
+                    let custom_new = !constructor.is_some_and(|value| {
+                        matches!(
+                            self.heap.get(value),
+                            Ok(Object::Builtin(Builtin::ObjectNew))
+                        )
+                    });
+                    let object_init = initializer.is_some_and(|value| {
+                        matches!(
+                            self.heap.get(value),
+                            Ok(Object::Builtin(Builtin::ObjectInit))
+                        )
+                    });
+                    if !(custom_new && object_init) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "object.__init__ expects only the instance",
+                        ));
+                    }
+                }
+                Ok(Value::NONE)
             }
             Builtin::Super => {
                 let (start_class, receiver) = match count {

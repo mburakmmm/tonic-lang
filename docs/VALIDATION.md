@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-23 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+24 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 44,
-native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 278 test.
+call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 46,
+native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 280 test.
 
-Differential corpus: 293 stdout vakası ve 123 exception türü vakası. Seed 42.
-Power/bitwise protokollerinden sonra debug/release × interpreter/JIT ×
+Differential corpus: 295 stdout vakası ve 130 exception türü vakası. Seed 42.
+Canonical builtin kurucularından sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -352,6 +352,14 @@ sonuçları kaynak sınırıyla kontrollü `MemoryError` üretir; bu opcode'lar 
 JIT kapsamı dışında kaldığında doğrulanmış exact-PC interpreter fallback'i
 kullanır. Debug/release × interpreter/JIT × normal/stress-GC
 differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+Canonical builtin constructor aşamasında toplam 280 Rust testi ile 295 stdout ve
+130 exception differential vakasına ulaşıldı. `object.__init__`, native builtin
+`__new__` descriptor'ları, list/dict reinitialization, custom native subclass
+`__new__` ve `int`/`float` conversion protokolleri her-allocation stress GC
+altında sınanır. Conversion continuation state'i class ve pending native finish
+değerlerini precise root olarak taşır; yanlış sonuç tipleri `TypeError` üretir.
+Debug/release × interpreter/JIT × normal/stress-GC matrisinin sekiz koşusu
+Python 3.14.6 ile eşleşmiştir.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote

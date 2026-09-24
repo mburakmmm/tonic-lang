@@ -208,12 +208,14 @@ impl Heap {
     pub fn root_object_class(
         &mut self,
         object_new: Value,
+        object_init: Value,
         object_getattribute: Value,
         object_setattr: Value,
         object_delattr: Value,
     ) -> Result<Value> {
         let value = self.namespace("object", Vec::new())?;
         self.namespace_set(value, "__new__", object_new)?;
+        self.namespace_set(value, "__init__", object_init)?;
         self.namespace_set(value, "__getattribute__", object_getattribute)?;
         self.namespace_set(value, "__setattr__", object_setattr)?;
         self.namespace_set(value, "__delattr__", object_delattr)?;
@@ -1256,7 +1258,10 @@ impl Heap {
                 | Builtin::ObjectDelAttr
                 | Builtin::TypeGetAttribute
                 | Builtin::TypeSetAttr
-                | Builtin::TypeDelAttr,
+                | Builtin::TypeDelAttr
+                | Builtin::ObjectInit
+                | Builtin::ListInit
+                | Builtin::DictInit,
             )) => DescriptorCall {
                 callable: value,
                 receiver: Some(descriptor),
@@ -1289,7 +1294,10 @@ impl Heap {
                 | Builtin::ObjectDelAttr
                 | Builtin::TypeGetAttribute
                 | Builtin::TypeSetAttr
-                | Builtin::TypeDelAttr,
+                | Builtin::TypeDelAttr
+                | Builtin::ObjectInit
+                | Builtin::ListInit
+                | Builtin::DictInit,
             )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
@@ -1705,6 +1713,7 @@ mod tests {
     fn class_namespace_and_instance_write_barriers_retain_young_values() {
         let mut heap = Heap::default();
         let object_new = heap.alloc(Object::Builtin(Builtin::ObjectNew)).unwrap();
+        let object_init = heap.alloc(Object::Builtin(Builtin::ObjectInit)).unwrap();
         let object_getattribute = heap
             .alloc(Object::Builtin(Builtin::ObjectGetAttribute))
             .unwrap();
@@ -1713,6 +1722,7 @@ mod tests {
         let object = heap
             .root_object_class(
                 object_new,
+                object_init,
                 object_getattribute,
                 object_setattr,
                 object_delattr,

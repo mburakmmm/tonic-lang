@@ -633,6 +633,7 @@ enum ReturnAction {
     AttributeGet(AttributeGet),
     BinaryProtocol(BinaryProtocol),
     UnaryProtocol(UnaryProtocol),
+    NumericConversion(NumericConversion),
     Setter,
 }
 #[derive(Clone, Copy)]
@@ -662,6 +663,18 @@ pub(super) struct UnaryProtocol {
     kind: UnaryProtocolKind,
     value: Value,
 }
+#[derive(Clone, Copy)]
+pub(super) enum NumericConversionKind {
+    Int,
+    Float,
+    IndexToInt,
+    IndexToFloat,
+}
+#[derive(Clone)]
+pub(super) struct NumericConversion {
+    kind: NumericConversionKind,
+    finish: Option<NativeSubclassFinish>,
+}
 #[derive(Clone)]
 pub(super) struct AttributeGet {
     owner: Value,
@@ -686,12 +699,13 @@ pub(super) enum IterableCollectionKind {
     Tuple,
     NativeList(NativeSubclassFinish),
     NativeTuple(NativeSubclassFinish),
+    ListInit { owner: Value, result: Value },
     Unpack { first: usize, count: usize },
 }
 #[derive(Clone)]
 pub(super) struct NativeSubclassFinish {
     class: Value,
-    arguments: ExpandedArgs,
+    initialize: Option<ExpandedArgs>,
 }
 #[derive(Clone)]
 pub(super) struct IterableCollection {
@@ -709,6 +723,7 @@ pub(super) struct DictConstructionStart {
     result: Value,
     keywords: Vec<(Value, Value)>,
     native: Option<NativeSubclassFinish>,
+    return_value: Option<Value>,
 }
 #[derive(Clone)]
 pub(super) struct DictConstruction {
@@ -866,8 +881,9 @@ impl DictConstructionStart {
             visit(*value);
         });
         if let Some(native) = &self.native {
-            native.trace(visit);
+            native.trace(&mut visit);
         }
+        self.return_value.iter().copied().for_each(visit);
     }
 }
 impl DictConstruction {
@@ -910,6 +926,11 @@ impl ReturnAction {
                 }
             }
             Self::UnaryProtocol(state) => visit(state.value),
+            Self::NumericConversion(state) => {
+                if let Some(finish) = &state.finish {
+                    finish.trace(visit);
+                }
+            }
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
@@ -977,13 +998,19 @@ impl ReturnAction {
 impl NativeSubclassFinish {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         visit(self.class);
-        self.arguments.trace(visit);
+        if let Some(arguments) = &self.initialize {
+            arguments.trace(visit);
+        }
     }
 }
 impl IterableCollectionKind {
-    fn trace(&self, visit: impl FnMut(Value)) {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
             Self::NativeList(state) | Self::NativeTuple(state) => state.trace(visit),
+            Self::ListInit { owner, result } => {
+                visit(*owner);
+                visit(*result);
+            }
             Self::List | Self::Tuple | Self::Unpack { .. } => {}
         }
     }
@@ -1118,6 +1145,7 @@ impl Vm {
         vm.register_native("fastmath", "array", 1, fastmath_array)?;
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
+        let object_init = vm.heap.alloc(Object::Builtin(Builtin::ObjectInit))?;
         let object_getattribute = vm
             .heap
             .alloc(Object::Builtin(Builtin::ObjectGetAttribute))?;
@@ -1129,6 +1157,7 @@ impl Vm {
         let type_delattr = vm.heap.alloc(Object::Builtin(Builtin::TypeDelAttr))?;
         vm.object_class = vm.heap.root_object_class(
             object_new,
+            object_init,
             object_getattribute,
             object_setattr,
             object_delattr,
@@ -1272,6 +1301,21 @@ impl Vm {
             stop_iteration,
             other_exceptions,
         };
+        for (class, name, builtin) in [
+            (vm.runtime_types.int, "__new__", Builtin::IntNew),
+            (vm.runtime_types.bool_, "__new__", Builtin::BoolNew),
+            (vm.runtime_types.float, "__new__", Builtin::FloatNew),
+            (vm.runtime_types.str_, "__new__", Builtin::StrNew),
+            (vm.runtime_types.list, "__new__", Builtin::ListNew),
+            (vm.runtime_types.list, "__init__", Builtin::ListInit),
+            (vm.runtime_types.tuple, "__new__", Builtin::TupleNew),
+            (vm.runtime_types.dict, "__new__", Builtin::DictNew),
+            (vm.runtime_types.dict, "__init__", Builtin::DictInit),
+            (vm.runtime_types.range, "__new__", Builtin::RangeNew),
+        ] {
+            let value = vm.heap.alloc(Object::Builtin(builtin))?;
+            vm.heap.set_attr(class, name, value)?;
+        }
         vm.builtins.push(("object".into(), vm.object_class));
         vm.builtins.push(("type".into(), vm.type_class));
         for (name, value) in [
@@ -2807,6 +2851,7 @@ impl Vm {
                         let mut binary_protocol = None;
                         let mut binary_negate = false;
                         let mut unary_protocol = None;
+                        let mut numeric_conversion = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
@@ -2815,7 +2860,12 @@ impl Vm {
                                 iterable_start = Some((kind, value));
                             }
                             ReturnAction::CollectIterableNext(mut state) => {
-                                state.items.push(value);
+                                if let IterableCollectionKind::ListInit { owner, .. } = &state.kind
+                                {
+                                    self.heap.append_list(*owner, value)?;
+                                } else {
+                                    state.items.push(value);
+                                }
                                 iterable_next = Some(state);
                             }
                             ReturnAction::ExpandIterableStart(resume_pc) => {
@@ -2911,6 +2961,9 @@ impl Vm {
                                     unary_protocol = Some(state);
                                 }
                             }
+                            ReturnAction::NumericConversion(state) => {
+                                numeric_conversion = Some(state);
+                            }
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -2933,7 +2986,8 @@ impl Vm {
                             || dict_pair_next.is_some()
                             || binary_protocol.is_some()
                             || binary_negate
-                            || unary_protocol.is_some();
+                            || unary_protocol.is_some()
+                            || numeric_conversion.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
@@ -2943,6 +2997,8 @@ impl Vm {
                             } else if let Some(state) = unary_protocol {
                                 self.registers[dest] =
                                     self.unary_fallback(state.kind, state.value)?;
+                            } else if let Some(state) = numeric_conversion {
+                                self.finish_numeric_conversion(p, dest, value, state, output)?;
                             } else if let Some((class, arguments)) = finish_new {
                                 self.finish_new(p, dest, class, value, arguments, output)?;
                             } else if let Some((build, mapping)) = class_prepare {

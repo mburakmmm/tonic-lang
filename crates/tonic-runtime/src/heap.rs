@@ -29,6 +29,17 @@ pub(crate) enum Builtin {
     Property,
     Super,
     ObjectNew,
+    ObjectInit,
+    IntNew,
+    BoolNew,
+    FloatNew,
+    StrNew,
+    ListNew,
+    ListInit,
+    TupleNew,
+    DictNew,
+    DictInit,
+    RangeNew,
     ObjectGetAttribute,
     ObjectSetAttr,
     ObjectDelAttr,
@@ -473,6 +484,29 @@ impl Heap {
         values.push(value);
         let growth = values.capacity() - old_capacity;
         self.bytes += growth * std::mem::size_of::<Value>();
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(())
+    }
+    pub(crate) fn replace_list(&mut self, owner: Value, values: Vec<Value>) -> Result<()> {
+        let owner = self.native_value(owner);
+        if !matches!(self.get(owner)?, Object::List(_)) {
+            return Err(Diagnostic::new("TypeError", "expected list"));
+        }
+        values
+            .iter()
+            .copied()
+            .for_each(|value| self.write_barrier(owner, value));
+        let before = self.get(owner)?.estimated_bytes();
+        let Object::List(current) = self.get_mut(owner)? else {
+            unreachable!("validated list changed kind")
+        };
+        *current = values;
+        let after = self.get(owner)?.estimated_bytes();
+        if after >= before {
+            self.bytes += after - before;
+        } else {
+            self.bytes -= before - after;
+        }
         self.peak_bytes = self.peak_bytes.max(self.bytes);
         Ok(())
     }

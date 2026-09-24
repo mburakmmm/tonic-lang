@@ -1313,6 +1313,57 @@ print(list(l),tuple(t),dict(d))
 print(SpecialInt(2)+1)
 print(type(int(i)).__name__,type(float(f)).__name__,type(str(s)).__name__)
 ''',
+'''class Source:
+    def __init__(self,values): self.values=values; self.index=0
+    def __iter__(self): return self
+    def __next__(self):
+        if self.index==len(self.values): raise StopIteration()
+        value=self.values[self.index]; self.index+=1; return value
+class I(int):
+    def __new__(cls,value):
+        self=int.__new__(cls,value+1); self.before=value; return self
+    def __init__(self,value): self.after=value
+class T(tuple):
+    def __new__(cls,values): return tuple.__new__(cls,values)
+class L(list):
+    def __new__(cls,values):
+        self=list.__new__(cls,'ignored',marker=True); self.empty=len(self); return self
+class CustomList(list):
+    def __init__(self,values):
+        self.empty=len(self); list.__init__(self,values)
+class D(dict):
+    def __new__(cls,*args,**keywords):
+        self=dict.__new__(cls,'ignored',marker=True); self.empty=len(self); return self
+i=I(4); t=T(Source([1,2])); l=L(Source([3,4])); c=CustomList(Source([5,6]))
+d=D(Source([('x',7)]),y=8)
+print(i,i.before,i.after,type(i).__name__,t,type(t).__name__)
+print(l,l.empty,type(l).__name__,c,c.empty,type(c).__name__,d,d.empty,type(d).__name__)
+list.__init__(l,Source([9,10])); dict.__init__(d,d,z=11)
+print(l,d,int.__new__==int.__new__,list.__init__==list.__init__)
+print(bool.__new__(bool,1),list(range.__new__(range,1,4)))
+''',
+'''class Convert:
+    def __int__(self): return 41
+    def __float__(self): return 2.5
+class IndexOnly:
+    def __index__(self): return 7
+class BoolIndex:
+    def __index__(self): return True
+class OverrideInt(int):
+    def __int__(self): return 99
+class OverrideFloat(float):
+    def __float__(self): return 3.5
+class PlainFloat(float): pass
+class PlainStr(str): pass
+class Constructed(int):
+    def __new__(cls,value): return int.__new__(cls,value)
+print(int(Convert()),float(Convert()),int(IndexOnly()),float(IndexOnly()))
+print(int(BoolIndex()),float(BoolIndex()))
+print(int(OverrideInt(2)),float(OverrideFloat(2.0)))
+print(int(PlainFloat(3.8)),int(PlainStr('12')),float(PlainStr('2.5')))
+value=Constructed(IndexOnly())
+print(value,type(value).__name__)
+''',
 '''class Number:
     def __init__(self,value):
         self.value=value
@@ -1426,6 +1477,13 @@ ERRORS = [
     ('1 << -1', 'ValueError'),
     ('1.0 | 2', 'TypeError'),
     ('0 ** -1', 'ZeroDivisionError'),
+    ('int.__new__(str,1)', 'TypeError'),
+    ('object.__new__(int)', 'TypeError'),
+    ('list.__init__(1,[])', 'TypeError'),
+    ('dict.__init__([],{})', 'TypeError'),
+    ('class C:\n    def __int__(self): return 1.0\nint(C())', 'TypeError'),
+    ('class C:\n    def __float__(self): return 1\nfloat(C())', 'TypeError'),
+    ('class C:\n    def __index__(self): return 1.0\nint(C())', 'TypeError'),
     ('class C(1):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B(A,A):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    print("body")', 'TypeError'),

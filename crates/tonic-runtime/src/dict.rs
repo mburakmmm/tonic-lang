@@ -203,6 +203,22 @@ impl Heap {
         }
         Ok(())
     }
+    pub(crate) fn dict_clear(&mut self, owner: Value) -> Result<()> {
+        let owner = self.native_value(owner);
+        let Object::Dict(dict) = self.get_mut(owner)? else {
+            return Err(Diagnostic::new("TypeError", "expected dict"));
+        };
+        let before = dict.estimated_bytes();
+        dict.entries.clear();
+        dict.index.clear();
+        dict.version = dict
+            .version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict version exhausted"))?;
+        let after = dict.estimated_bytes();
+        self.bytes -= before - after;
+        Ok(())
+    }
     pub fn set_item(&mut self, owner: Value, key: Value, value: Value) -> Result<()> {
         let owner = self.native_value(owner);
         if matches!(self.get(owner)?, Object::Dict(_)) {

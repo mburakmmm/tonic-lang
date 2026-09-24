@@ -50,7 +50,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | VM | 8-byte register instructions, verifier, yeniden kullanılan geçici registerlar, açık frame stack, fuel/recursion limitleri |
 | Interop | ABI v1 C table/panic guard; typed buffer; callback/reentry; foreign wrapper/vtable, precise trace ve deferred exactly-once destructor; staged shutdown |
 | Sınıflar | class scope, `__init__`, bound/unbound metot, private mangling, C3 multiple inheritance, class attribute rebinding |
-| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; class MRO lookup ve askıya alınabilir VM continuation |
+| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; operator dispatch; `int`/`float` için askıya alınabilir `__int__`/`__float__`/`__index__`; class MRO lookup ve VM continuation |
 | Decorator/descriptor dilimi | function/class decorators, `staticmethod`, `classmethod`, property, custom `__get__/__set__/__delete__`, otomatik `__set_name__`, metaclass seçimi ve `__prepare__/__new__/__init__` zinciri |
 | M3 | class/instance, ortak shapes + slotlar, dictionary fallback, canlı mappingproxy ve canonical builtin type nesneleri |
 | Bellek | precise generational tracing, nursery/old ayrımı, write barrier, remembered set, cycle collection, compaction ve stress GC |
@@ -68,8 +68,10 @@ biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
 `and/or` operand döndürür ve kısa devre yapar. Builtin isimleri yeniden bağlanabilir.
 `print`, `range`, `len`, `abs`, `object`, `isinstance`, `issubclass`, `getattr`,
 `setattr`, `hasattr` sağlanır. Type-check builtin'lerinin classinfo argümanı
-Tonic kullanıcı sınıfları, `object` ve bunlardan oluşan tuple'lardır; henüz
-`int/str/type` gibi genel builtin type nesneleri yoktur.
+Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlardan
+oluşan tuple'ları kabul eder. `object.__init__`, int/bool/float/str/list/tuple/
+dict/range `__new__` ve list/dict `__init__` descriptor'ları doğrudan çağrılabilir;
+native builtin alt sınıfları kendi `__new__` metotlarıyla backing oluşturabilir.
 `import` yalnızca kayıtlı native modülleri
 bulur; `import fastmath as fm` desteklenir.
 `fastmath.array(list_or_tuple)` sayıları tek seferde non-moving C-contiguous f64
@@ -92,7 +94,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 278 Rust testi ile 293 stdout ve 123 exception türü
+Güncel yerel matris 280 Rust testi ile 295 stdout ve 130 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -319,6 +321,8 @@ Native builtin alt sınıf ve operator protokol sözleşmesi:
 [ADR 0066](docs/adr/0066-native-subclasses-and-operator-protocols.md).
 Power, bitwise ve in-place protokol sözleşmesi:
 [ADR 0067](docs/adr/0067-power-bitwise-protocols.md).
+Canonical builtin kurucu ve numeric conversion sözleşmesi:
+[ADR 0068](docs/adr/0068-canonical-builtin-construction.md).
 
 Kuralların analizi: [ANALYSIS.md](docs/ANALYSIS.md).
 Kararlar/riskler: [ADR 0001](docs/adr/0001-bootstrap.md).
