@@ -42,10 +42,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 46,
-native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 280 test.
+call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 47,
+native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 281 test.
 
-Differential corpus: 295 stdout vakası ve 130 exception türü vakası. Seed 42.
+Differential corpus: 296 stdout vakası ve 136 exception türü vakası. Seed 42.
 Canonical builtin kurucularından sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -360,6 +360,14 @@ altında sınanır. Conversion continuation state'i class ve pending native fini
 değerlerini precise root olarak taşır; yanlış sonuç tipleri `TypeError` üretir.
 Debug/release × interpreter/JIT × normal/stress-GC matrisinin sekiz koşusu
 Python 3.14.6 ile eşleşmiştir.
+Index conversion aşamasında toplam 281 Rust testi ile 296 stdout ve 136 exception
+differential vakasına ulaşıldı. `range`, scalar/slice sequence erişimi, list
+set/delete, explicit int base ve length/truth yolları guest `__index__` metodunu
+normal VM frame'inde çalıştırır. Continuation state range argümanlarını, slice
+bileşenlerini, container owner/değerlerini, int string argümanını ve truth jump
+operandını precise root olarak taşır. Dict anahtarları ve custom `__getitem__`
+dönüşüm sınırının dışında kalır. Yanlış sonuç tipi, negatif length ve invalid
+arbitrary-precision int base hata yolları CPython oracle'ıyla karşılaştırılır.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote

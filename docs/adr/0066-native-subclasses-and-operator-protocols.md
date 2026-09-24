@@ -6,8 +6,9 @@ Kısmen uygulandı. Bu karar varsayılan kurucu yolundaki `int`, `float`, `str`,
 `list`, `tuple` ve `dict` alt sınıflarının native depolamasını; temel binary,
 reflected, in-place, rich-comparison, unary ve `abs` protokollerini kapsar.
 Power/bitwise kapsamı ADR 0067, canonical builtin constructor ile `int`/`float`
-conversion kapsamı ADR 0068 ile tamamlanmıştır. Kalan `__index__` tüketicileri,
-hash ve container içi suspending element comparison ayrı açık kapsamdır.
+conversion kapsamı ADR 0068, kalan yürütülebilir `__index__` tüketicileri ADR
+0069 ile tamamlanmıştır. Hash ve container içi suspending element comparison
+ayrı açık kapsamdır.
 
 ## Karar
 

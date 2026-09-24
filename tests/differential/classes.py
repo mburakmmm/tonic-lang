@@ -1364,6 +1364,28 @@ print(int(PlainFloat(3.8)),int(PlainStr('12')),float(PlainStr('2.5')))
 value=Constructed(IndexOnly())
 print(value,type(value).__name__)
 ''',
+'''class Index:
+    def __init__(self,value): self.value=value
+    def __index__(self): return self.value
+class BoolIndex:
+    def __index__(self): return True
+class Sized:
+    def __len__(self): return Index(3)
+class BoolSized:
+    def __len__(self): return True
+class Box:
+    def __getitem__(self,key): return type(key).__name__
+print(list(range(Index(1),Index(8),Index(2))))
+values=[10,20,30,40]
+print(values[Index(2)],(1,2,3)[Index(-1)],'abcd'[Index(1)])
+values[Index(-1)]=9
+del values[Index(1)]
+print(values,[0,1,2,3,4,5][Index(1):Index(6):Index(2)])
+print(int('101',Index(2)),len(Sized()),bool(Sized()),len(BoolSized()))
+print([7,8][BoolIndex()])
+key=Index(0); mapping={key:'identity'}
+print(mapping[key],Box()[Index(1)])
+''',
 '''class Number:
     def __init__(self,value):
         self.value=value
@@ -1484,6 +1506,12 @@ ERRORS = [
     ('class C:\n    def __int__(self): return 1.0\nint(C())', 'TypeError'),
     ('class C:\n    def __float__(self): return 1\nfloat(C())', 'TypeError'),
     ('class C:\n    def __index__(self): return 1.0\nint(C())', 'TypeError'),
+    ('class C:\n    def __index__(self): return 1.0\nrange(C())', 'TypeError'),
+    ('class C:\n    def __index__(self): return 1.0\n[1][C()]', 'TypeError'),
+    ('class C:\n    def __index__(self): return 1.0\n[1][C():]', 'TypeError'),
+    ("class C:\n    def __index__(self): return 1.0\nint('10',C())", 'TypeError'),
+    ('class I:\n    def __index__(self): return -1\nclass C:\n    def __len__(self): return I()\nlen(C())', 'ValueError'),
+    ("int('10',10**100)", 'ValueError'),
     ('class C(1):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B(A,A):\n    print("body")', 'TypeError'),
     ('class A:\n    pass\nclass B:\n    pass\nclass X(A,B):\n    pass\nclass Y(B,A):\n    pass\nclass Z(X,Y):\n    print("body")', 'TypeError'),

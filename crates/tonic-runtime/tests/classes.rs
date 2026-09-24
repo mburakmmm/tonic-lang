@@ -885,6 +885,76 @@ print(value,type(value).__name__)"#;
 }
 
 #[test]
+fn index_protocol_consumers_suspend_and_preserve_dispatch_boundaries() {
+    let source = r#"class Index:
+    def __init__(self,value): self.value=value
+    def __index__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value
+class BoolIndex:
+    def __index__(self): return True
+class Sized:
+    def __len__(self): return Index(3)
+class BoolSized:
+    def __len__(self): return True
+class Box:
+    def __getitem__(self,key): return type(key).__name__
+print(list(range(Index(1),Index(8),Index(2))))
+values=[10,20,30,40]
+print(values[Index(2)],(1,2,3)[Index(-1)],'abcd'[Index(1)])
+values[Index(-1)]=9
+del values[Index(1)]
+print(values,[0,1,2,3,4,5][Index(1):Index(6):Index(2)])
+print(int('101',Index(2)),len(Sized()),bool(Sized()),len(BoolSized()))
+print([7,8][BoolIndex()])
+key=Index(0); mapping={key:'identity'}
+print(mapping[key],Box()[Index(1)])"#;
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(
+        &compile(source, "index-protocol-consumers").unwrap(),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(
+        output,
+        b"[1, 3, 5, 7]\n30 3 b\n[10, 30, 9] [1, 3, 5]\n5 3 True 1\n8\nidentity Index\n"
+    );
+
+    for (source, kind) in [
+        (
+            "class C:\n    def __index__(self): return 1.0\nrange(C())",
+            "TypeError",
+        ),
+        (
+            "class C:\n    def __index__(self): return 1.0\n[1][C()]",
+            "TypeError",
+        ),
+        (
+            "class C:\n    def __index__(self): return 1.0\n[1][C():]",
+            "TypeError",
+        ),
+        (
+            "class C:\n    def __index__(self): return 1.0\nint('10',C())",
+            "TypeError",
+        ),
+        (
+            "class I:\n    def __index__(self): return -1\nclass C:\n    def __len__(self): return I()\nlen(C())",
+            "ValueError",
+        ),
+        ("int('10',10**100)", "ValueError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "invalid-index-result").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn numeric_and_comparison_protocols_suspend_reflect_and_fallback() {
     let source = r#"class Number:
     def __init__(self,value):

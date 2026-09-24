@@ -11,7 +11,7 @@ use crate::{
     value::Value,
 };
 use num_bigint::BigInt;
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use std::io::Write;
 use tonic_core::{
     ast::SymbolId,
@@ -322,8 +322,12 @@ impl Vm {
                             self.frames.last_mut().expect("__len__ frame").action =
                                 super::ReturnAction::Length;
                         } else {
-                            self.registers[destination] =
-                                self.validate_length(self.registers[destination])?;
+                            self.finish_length(
+                                p,
+                                destination,
+                                self.registers[destination],
+                                output,
+                            )?;
                         }
                         return Ok(());
                     }
@@ -1041,21 +1045,39 @@ impl Vm {
             self.frames.last_mut().expect("truth protocol frame").action =
                 super::ReturnAction::Truth { protocol, action };
         } else {
-            self.finish_truth(destination, self.registers[destination], protocol, action)?;
+            self.finish_truth(
+                p,
+                destination,
+                self.registers[destination],
+                protocol,
+                action,
+                output,
+            )?;
         }
         Ok(())
     }
     pub(super) fn finish_truth(
         &mut self,
+        p: &Program,
         destination: usize,
         value: Value,
         protocol: super::TruthProtocol,
         action: super::TruthAction,
+        output: &mut dyn Write,
     ) -> Result<()> {
         let truth = match protocol {
             super::TruthProtocol::Bool => value
                 .as_bool()
                 .ok_or_else(|| Diagnostic::new("TypeError", "__bool__ should return bool"))?,
+            super::TruthProtocol::Length if !self.heap.is_integer(value) => {
+                return self.invoke_index_conversion(
+                    p,
+                    value,
+                    destination,
+                    super::IndexContinuation::Truth(action),
+                    output,
+                )
+            }
             super::TruthProtocol::Length => self.checked_length(value)? != 0,
         };
         self.apply_truth(destination, truth, action);
@@ -1332,13 +1354,16 @@ impl Vm {
         }
     }
     fn checked_length(&self, value: Value) -> Result<i64> {
-        if !self.heap.is_integer(value) {
+        let length = if let Some(value) = value.as_bool() {
+            i64::from(value)
+        } else if self.heap.is_integer(value) {
+            self.heap.to_i64(value)?
+        } else {
             return Err(Diagnostic::new(
                 "TypeError",
                 "__len__ returned a non-integer value",
             ));
-        }
-        let length = self.heap.to_i64(value)?;
+        };
         if length < 0 {
             return Err(Diagnostic::new(
                 "ValueError",
@@ -1350,6 +1375,219 @@ impl Vm {
     pub(super) fn validate_length(&mut self, value: Value) -> Result<Value> {
         let length = self.checked_length(value)?;
         self.heap.i64(length)
+    }
+    pub(super) fn finish_length(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if self.heap.is_integer(value) || value.as_bool().is_some() {
+            self.registers[destination] = self.validate_length(value)?;
+            return Ok(());
+        }
+        self.invoke_index_conversion(
+            p,
+            value,
+            destination,
+            super::IndexContinuation::Length,
+            output,
+        )
+    }
+    pub(super) fn invoke_index_conversion(
+        &mut self,
+        p: &Program,
+        source: Value,
+        destination: usize,
+        continuation: super::IndexContinuation,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if source.as_bool().is_some() || self.heap.is_integer(source) {
+            let value = self.normalize_index_result(source)?;
+            return self.finish_index_conversion(
+                p,
+                destination,
+                value,
+                super::IndexConversion { continuation },
+                output,
+            );
+        }
+        let call = self
+            .heap
+            .special_method_call(source, "__index__")?
+            .ok_or_else(|| {
+                Diagnostic::new("TypeError", "object cannot be interpreted as an integer")
+            })?;
+        let state = super::IndexConversion { continuation };
+        let depth = self.frames.len();
+        self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            },
+            output,
+        )?;
+        if self.frames.len() > depth {
+            self.frames
+                .last_mut()
+                .expect("index conversion frame")
+                .action = super::ReturnAction::IndexConversion(state);
+            Ok(())
+        } else {
+            let value = self.normalize_index_result(self.registers[destination])?;
+            self.finish_index_conversion(p, destination, value, state, output)
+        }
+    }
+    fn normalize_index_result(&self, value: Value) -> Result<Value> {
+        if let Some(value) = value.as_bool() {
+            return Ok(Value::int(i64::from(value)).expect("bool is an immediate integer"));
+        }
+        if self.heap.is_integer(value) {
+            return Ok(self.heap.native_value(value));
+        }
+        Err(Diagnostic::new(
+            "TypeError",
+            "__index__ returned a non-integer value",
+        ))
+    }
+    pub(super) fn finish_index_conversion(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        state: super::IndexConversion,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let value = self.normalize_index_result(value)?;
+        match state.continuation {
+            super::IndexContinuation::Length => {
+                self.registers[destination] = self.validate_length(value)?;
+                Ok(())
+            }
+            super::IndexContinuation::Truth(action) => {
+                let truth = self.checked_length(value)? != 0;
+                self.apply_truth(destination, truth, action);
+                Ok(())
+            }
+            super::IndexContinuation::Range(mut state) => {
+                state.values[state.next] = value;
+                state.next += 1;
+                self.continue_range_construction(p, destination, state, output)
+            }
+            super::IndexContinuation::IntBase(state) => {
+                self.finish_int_base(p, destination, state, value, output)
+            }
+            super::IndexContinuation::GetItem { owner } => {
+                self.registers[destination] = self.heap.item(owner, value)?;
+                Ok(())
+            }
+            super::IndexContinuation::SetItem { owner, value: item } => {
+                self.heap.set_item(owner, value, item)?;
+                self.registers[destination] = Value::NONE;
+                Ok(())
+            }
+            super::IndexContinuation::DelItem { owner } => {
+                self.heap.delete_item(owner, value)?;
+                self.registers[destination] = Value::NONE;
+                Ok(())
+            }
+            super::IndexContinuation::Slice(mut state) => {
+                state.components[state.next] = value;
+                state.next += 1;
+                self.continue_slice_conversion(p, destination, state, output)
+            }
+        }
+    }
+    pub(super) fn continue_range_construction(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: super::RangeConstruction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if state.next < state.count {
+            let source = state.values[state.next];
+            return self.invoke_index_conversion(
+                p,
+                source,
+                destination,
+                super::IndexContinuation::Range(state),
+                output,
+            );
+        }
+        let first = self.heap.to_i64(state.values[0])?;
+        let (start, stop) = if state.count == 1 {
+            (0, first)
+        } else {
+            (first, self.heap.to_i64(state.values[1])?)
+        };
+        let step = if state.count == 3 {
+            self.heap.to_i64(state.values[2])?
+        } else {
+            1
+        };
+        if step == 0 {
+            return Err(Diagnostic::new("ValueError", "range step must not be zero"));
+        }
+        self.registers[destination] = self.heap.alloc(Object::Range { start, stop, step })?;
+        Ok(())
+    }
+    pub(super) fn continue_slice_conversion(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: super::SliceConversion,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        while state.next < state.components.len() {
+            if state.components[state.next] == Value::NONE {
+                state.next += 1;
+                continue;
+            }
+            let source = state.components[state.next];
+            return self.invoke_index_conversion(
+                p,
+                source,
+                destination,
+                super::IndexContinuation::Slice(state),
+                output,
+            );
+        }
+        let slice = self.heap.alloc(Object::Slice(state.components))?;
+        self.registers[destination] = self.heap.item(state.owner, slice)?;
+        Ok(())
+    }
+    fn finish_int_base(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: super::IntBaseConversion,
+        base: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let base = self
+            .heap
+            .integer(base)?
+            .to_i64()
+            .ok_or_else(invalid_int_base)
+            .and_then(validate_int_base)?;
+        let argument = self.heap.native_value(state.argument);
+        let Object::Str(value) = self.heap.get(argument)? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "int with explicit base requires a string",
+            ));
+        };
+        self.registers[destination] = self.heap.int(
+            parse_int_literal(value, base)
+                .ok_or_else(|| Diagnostic::new("ValueError", "invalid literal for int"))?,
+        )?;
+        self.finish_builtin_value(p, destination, state.finish, output)
     }
     fn runtime_type_for_kind(&self, kind: super::RuntimeTypeKind) -> Value {
         match kind {
@@ -1833,25 +2071,20 @@ impl Vm {
                     "range expects 1 to 3 positional arguments",
                 ));
             }
-            let first = self.heap.to_i64(args.positional(&self.registers, 0))?;
-            let (start, stop) = if args.count() == 1 {
-                (0, first)
-            } else {
-                (
-                    first,
-                    self.heap.to_i64(args.positional(&self.registers, 1))?,
-                )
-            };
-            let step = if args.count() == 3 {
-                self.heap.to_i64(args.positional(&self.registers, 2))?
-            } else {
-                1
-            };
-            if step == 0 {
-                return Err(Diagnostic::new("ValueError", "range step must not be zero"));
+            let mut values = [Value::NONE; 3];
+            for (index, slot) in values.iter_mut().take(args.count()).enumerate() {
+                *slot = args.positional(&self.registers, index);
             }
-            self.registers[destination] = self.heap.alloc(Object::Range { start, stop, step })?;
-            return Ok(());
+            return self.continue_range_construction(
+                p,
+                destination,
+                super::RangeConstruction {
+                    values,
+                    count: args.count(),
+                    next: 0,
+                },
+                output,
+            );
         }
         if kind == super::RuntimeTypeKind::Int {
             if args.count() > 2 || args.keyword_count() > 1 {
@@ -1860,9 +2093,7 @@ impl Vm {
                     "int expects at most two arguments",
                 ));
             }
-            let mut base = (args.count() == 2)
-                .then(|| self.heap.to_i64(args.positional(&self.registers, 1)))
-                .transpose()?;
+            let mut base = (args.count() == 2).then(|| args.positional(&self.registers, 1));
             if args.keyword_count() == 1 {
                 let (name, value) = args.keyword(p, &self.registers, 0);
                 if name != "base" {
@@ -1877,16 +2108,28 @@ impl Vm {
                         "int got multiple values for base",
                     ));
                 }
-                base = Some(self.heap.to_i64(value)?);
+                base = Some(value);
             }
             let argument = (args.count() >= 1).then(|| args.positional(&self.registers, 0));
-            if base.is_some() && argument.is_none() {
-                return Err(Diagnostic::new(
-                    "TypeError",
-                    "int missing string argument when base is given",
-                ));
+            if let Some(base) = base {
+                let argument = argument.ok_or_else(|| {
+                    Diagnostic::new(
+                        "TypeError",
+                        "int missing string argument when base is given",
+                    )
+                })?;
+                return self.invoke_index_conversion(
+                    p,
+                    base,
+                    destination,
+                    super::IndexContinuation::IntBase(super::IntBaseConversion {
+                        argument,
+                        finish,
+                    }),
+                    output,
+                );
             }
-            if let Some(value) = argument.filter(|_| base.is_none()) {
+            if let Some(value) = argument {
                 if self.heap.special_method_call(value, "__int__")?.is_some()
                     || self.heap.special_method_call(value, "__index__")?.is_some()
                 {
@@ -1902,32 +2145,22 @@ impl Vm {
             }
             self.registers[destination] = match argument {
                 None => Value::int(0).expect("zero is immediate"),
-                Some(value) if base.is_none() && value.as_bool().is_some() => {
+                Some(value) if value.as_bool().is_some() => {
                     Value::int(i64::from(value.as_bool().expect("checked bool")))
                         .expect("bool integer is immediate")
                 }
-                Some(value) if base.is_none() && self.heap.is_integer(value) => {
-                    self.heap.native_value(value)
-                }
+                Some(value) if self.heap.is_integer(value) => self.heap.native_value(value),
                 Some(value) => match self.heap.get(self.heap.native_value(value))? {
-                    Object::Float(value) if base.is_none() => {
+                    Object::Float(value) => {
                         self.heap
                             .int(BigInt::from_f64(value.trunc()).ok_or_else(|| {
                                 Diagnostic::new("OverflowError", "cannot convert float to integer")
                             })?)?
                     }
                     Object::Str(value) => {
-                        let base = validate_int_base(base.unwrap_or(10))?;
-                        self.heap
-                            .int(parse_int_literal(value, base).ok_or_else(|| {
-                                Diagnostic::new("ValueError", "invalid literal for int")
-                            })?)?
-                    }
-                    _ if base.is_some() => {
-                        return Err(Diagnostic::new(
-                            "TypeError",
-                            "int with explicit base requires a string",
-                        ))
+                        self.heap.int(parse_int_literal(value, 10).ok_or_else(|| {
+                            Diagnostic::new("ValueError", "invalid literal for int")
+                        })?)?
                     }
                     _ => return Err(Diagnostic::new("TypeError", "cannot convert value to int")),
                 },
@@ -3248,11 +3481,11 @@ fn validate_int_base(base: i64) -> Result<u32> {
     if base == 0 || (2..=36).contains(&base) {
         Ok(base as u32)
     } else {
-        Err(Diagnostic::new(
-            "ValueError",
-            "int base must be 0 or between 2 and 36",
-        ))
+        Err(invalid_int_base())
     }
+}
+fn invalid_int_base() -> Diagnostic {
+    Diagnostic::new("ValueError", "int base must be 0 or between 2 and 36")
 }
 
 fn parse_int_literal(text: &str, requested_base: u32) -> Option<BigInt> {

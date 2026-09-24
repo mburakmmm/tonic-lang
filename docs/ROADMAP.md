@@ -96,8 +96,10 @@ sonra alınır.
     - [x] `int`/`float` constructor'larında suspending `__int__`/`__float__` ve
       `__index__` fallback'i; dönüş tipi doğrulaması, bool normalizasyonu ve
       custom native `__new__` tamamlaması.
-    - [ ] Slice/range/indexleme gibi kalan `__index__` tüketicileri, `__hash__`
-      protokolü ve container içi suspending element comparison.
+    - [x] `range`, list/tuple/string/range scalar index, list set/delete, slice
+      bileşenleri, `int(..., base=...)` ve `__len__` sonucu için suspending
+      `__index__`; bool/native-int normalizasyonu ve precise continuation roots.
+    - [ ] `__hash__` protokolü ve container içi suspending element comparison.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

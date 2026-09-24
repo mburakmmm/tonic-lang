@@ -4,8 +4,8 @@
 
 Uygulandı. Bu karar `object.__init__`, int/bool/float/str/list/tuple/dict/range
 `__new__`, list/dict `__init__`, native builtin alt sınıflarında custom `__new__`
-ve `int`/`float` constructor conversion protokollerini kapsar. Slice, range ve
-indeksleme gibi kalan `__index__` tüketicileri ile `__hash__` ayrı açık kapsamdır.
+ve `int`/`float` constructor conversion protokollerini kapsar. Kalan yürütülebilir
+`__index__` tüketicileri ADR 0069'dadır; `__hash__` ayrı açık kapsamdır.
 
 ## Karar
 

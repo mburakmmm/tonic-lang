@@ -634,6 +634,7 @@ enum ReturnAction {
     BinaryProtocol(BinaryProtocol),
     UnaryProtocol(UnaryProtocol),
     NumericConversion(NumericConversion),
+    IndexConversion(IndexConversion),
     Setter,
 }
 #[derive(Clone, Copy)]
@@ -674,6 +675,38 @@ pub(super) enum NumericConversionKind {
 pub(super) struct NumericConversion {
     kind: NumericConversionKind,
     finish: Option<NativeSubclassFinish>,
+}
+#[derive(Clone)]
+pub(super) struct IndexConversion {
+    continuation: IndexContinuation,
+}
+#[derive(Clone)]
+pub(super) enum IndexContinuation {
+    Length,
+    Truth(TruthAction),
+    Range(RangeConstruction),
+    IntBase(IntBaseConversion),
+    GetItem { owner: Value },
+    SetItem { owner: Value, value: Value },
+    DelItem { owner: Value },
+    Slice(SliceConversion),
+}
+#[derive(Clone)]
+pub(super) struct RangeConstruction {
+    values: [Value; 3],
+    count: usize,
+    next: usize,
+}
+#[derive(Clone)]
+pub(super) struct IntBaseConversion {
+    argument: Value,
+    finish: Option<NativeSubclassFinish>,
+}
+#[derive(Clone)]
+pub(super) struct SliceConversion {
+    owner: Value,
+    components: [Value; 3],
+    next: usize,
 }
 #[derive(Clone)]
 pub(super) struct AttributeGet {
@@ -743,7 +776,7 @@ enum TruthProtocol {
     Length,
 }
 #[derive(Clone, Copy)]
-enum TruthAction {
+pub(super) enum TruthAction {
     Not,
     Return,
     Jump {
@@ -931,6 +964,7 @@ impl ReturnAction {
                     finish.trace(visit);
                 }
             }
+            Self::IndexConversion(state) => state.continuation.trace(visit),
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
@@ -1000,6 +1034,31 @@ impl NativeSubclassFinish {
         visit(self.class);
         if let Some(arguments) = &self.initialize {
             arguments.trace(visit);
+        }
+    }
+}
+impl IndexContinuation {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Length => {}
+            Self::Truth(TruthAction::Jump { original, .. }) => visit(*original),
+            Self::Truth(TruthAction::Not | TruthAction::Return) => {}
+            Self::Range(state) => state.values[..state.count].iter().copied().for_each(visit),
+            Self::IntBase(state) => {
+                visit(state.argument);
+                if let Some(finish) = &state.finish {
+                    finish.trace(visit);
+                }
+            }
+            Self::GetItem { owner } | Self::DelItem { owner } => visit(*owner),
+            Self::SetItem { owner, value } => {
+                visit(*owner);
+                visit(*value);
+            }
+            Self::Slice(state) => {
+                visit(state.owner);
+                state.components.iter().copied().for_each(visit);
+            }
         }
     }
 }
@@ -2852,6 +2911,8 @@ impl Vm {
                         let mut binary_negate = false;
                         let mut unary_protocol = None;
                         let mut numeric_conversion = None;
+                        let mut index_conversion = None;
+                        let mut length_result = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
@@ -2890,7 +2951,7 @@ impl Vm {
                                 state.items.push(value);
                                 dict_pair_next = Some(state);
                             }
-                            ReturnAction::Length => value = self.validate_length(value)?,
+                            ReturnAction::Length => length_result = Some(value),
                             ReturnAction::Truth { protocol, action } => {
                                 finish_truth = Some((protocol, action));
                             }
@@ -2964,6 +3025,9 @@ impl Vm {
                             ReturnAction::NumericConversion(state) => {
                                 numeric_conversion = Some(state);
                             }
+                            ReturnAction::IndexConversion(state) => {
+                                index_conversion = Some(state);
+                            }
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -2987,11 +3051,15 @@ impl Vm {
                             || binary_protocol.is_some()
                             || binary_negate
                             || unary_protocol.is_some()
-                            || numeric_conversion.is_some();
+                            || numeric_conversion.is_some()
+                            || index_conversion.is_some()
+                            || length_result.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
-                                self.finish_truth(dest, value, protocol, action)?;
+                                self.finish_truth(p, dest, value, protocol, action, output)?;
+                            } else if let Some(value) = length_result {
+                                self.finish_length(p, dest, value, output)?;
                             } else if binary_negate {
                                 self.invoke_truth(p, value, dest, TruthAction::Not, output)?;
                             } else if let Some(state) = unary_protocol {
@@ -2999,6 +3067,8 @@ impl Vm {
                                     self.unary_fallback(state.kind, state.value)?;
                             } else if let Some(state) = numeric_conversion {
                                 self.finish_numeric_conversion(p, dest, value, state, output)?;
+                            } else if let Some(state) = index_conversion {
+                                self.finish_index_conversion(p, dest, value, state, output)?;
                             } else if let Some((class, arguments)) = finish_new {
                                 self.finish_new(p, dest, class, value, arguments, output)?;
                             } else if let Some((build, mapping)) = class_prepare {
@@ -3527,7 +3597,18 @@ impl Vm {
                                 self.registers[a] = Value::NONE;
                             }
                         } else {
-                            self.heap.set_item(owner, key, value)?;
+                            let storage = self.heap.native_value(owner);
+                            if matches!(self.heap.get(storage)?, Object::List(_)) {
+                                self.invoke_index_conversion(
+                                    p,
+                                    key,
+                                    a,
+                                    IndexContinuation::SetItem { owner, value },
+                                    output,
+                                )?;
+                            } else {
+                                self.heap.set_item(owner, key, value)?;
+                            }
                         }
                     }
                     Op::DelItem => {
@@ -3553,7 +3634,18 @@ impl Vm {
                                 self.registers[a] = Value::NONE;
                             }
                         } else {
-                            self.heap.delete_item(owner, key)?;
+                            let storage = self.heap.native_value(owner);
+                            if matches!(self.heap.get(storage)?, Object::List(_)) {
+                                self.invoke_index_conversion(
+                                    p,
+                                    key,
+                                    a,
+                                    IndexContinuation::DelItem { owner },
+                                    output,
+                                )?;
+                            } else {
+                                self.heap.delete_item(owner, key)?;
+                            }
                         }
                     }
                     Op::DictMerge => self.heap.dict_merge(self.read(a)?, self.read(b)?)?,
@@ -3585,7 +3677,45 @@ impl Vm {
                                 output,
                             )?;
                         } else {
-                            self.registers[a] = self.heap.item(owner, key)?;
+                            let storage = self.heap.native_value(owner);
+                            let sequence = matches!(
+                                self.heap.get(storage)?,
+                                Object::Tuple(_)
+                                    | Object::List(_)
+                                    | Object::Str(_)
+                                    | Object::Range { .. }
+                            );
+                            if sequence {
+                                if let Ok(Object::Slice(components)) = self.heap.get(key) {
+                                    if matches!(
+                                        self.heap.get(storage)?,
+                                        Object::Tuple(_) | Object::List(_) | Object::Str(_)
+                                    ) {
+                                        self.continue_slice_conversion(
+                                            p,
+                                            a,
+                                            SliceConversion {
+                                                owner,
+                                                components: *components,
+                                                next: 0,
+                                            },
+                                            output,
+                                        )?;
+                                    } else {
+                                        self.registers[a] = self.heap.item(owner, key)?;
+                                    }
+                                } else {
+                                    self.invoke_index_conversion(
+                                        p,
+                                        key,
+                                        a,
+                                        IndexContinuation::GetItem { owner },
+                                        output,
+                                    )?;
+                                }
+                            } else {
+                                self.registers[a] = self.heap.item(owner, key)?;
+                            }
                         }
                     }
                     Op::Slice => {

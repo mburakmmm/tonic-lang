@@ -50,7 +50,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | VM | 8-byte register instructions, verifier, yeniden kullanılan geçici registerlar, açık frame stack, fuel/recursion limitleri |
 | Interop | ABI v1 C table/panic guard; typed buffer; callback/reentry; foreign wrapper/vtable, precise trace ve deferred exactly-once destructor; staged shutdown |
 | Sınıflar | class scope, `__init__`, bound/unbound metot, private mangling, C3 multiple inheritance, class attribute rebinding |
-| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; operator dispatch; `int`/`float` için askıya alınabilir `__int__`/`__float__`/`__index__`; class MRO lookup ve VM continuation |
+| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; operator dispatch; conversion, range, index/slice ve length için askıya alınabilir `__int__`/`__float__`/`__index__`; class MRO lookup ve VM continuation |
 | Decorator/descriptor dilimi | function/class decorators, `staticmethod`, `classmethod`, property, custom `__get__/__set__/__delete__`, otomatik `__set_name__`, metaclass seçimi ve `__prepare__/__new__/__init__` zinciri |
 | M3 | class/instance, ortak shapes + slotlar, dictionary fallback, canlı mappingproxy ve canonical builtin type nesneleri |
 | Bellek | precise generational tracing, nursery/old ayrımı, write barrier, remembered set, cycle collection, compaction ve stress GC |
@@ -94,7 +94,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 280 Rust testi ile 295 stdout ve 130 exception türü
+Güncel yerel matris 281 Rust testi ile 296 stdout ve 136 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -232,10 +232,13 @@ dict tabanlı `__prepare__`, `__new__/__init__` zinciri, canlı salt okunur clas
 `__dict__` mappingproxy, `for` için custom `__iter__/__next__` ve dict dışı
 class namespace mapping'leri desteklenir. `int`/`float`/`str`/`list`/`tuple`/
 `dict` alt sınıfları class kimliği ve instance alanlarını koruyan native backing
-storage kullanır. Aritmetik, power, bitwise, reflected/in-place dispatch, rich
+storage kullanır. Canonical constructor'lar ile conversion, range, sequence
+index/slice, list mutation, explicit int base ve length `__index__` tüketicileri
+normal VM frame'lerinde askıya alınabilir. Aritmetik, power, bitwise,
+reflected/in-place dispatch, rich
 comparison, unary ve `abs` protokolleri `NotImplemented` ile strict-subclass
-sırasını uygular. Canonical builtin `__new__`/`__init__`, conversion/index/hash
-ve container içi suspending comparison kapsamı hâlâ açıktır.
+sırasını uygular. `__hash__` ve container içi suspending comparison kapsamı
+hâlâ açıktır.
 Senkron context manager `__enter__/__exit__` özel-metot lookup'u, nested unwind,
 exception suppression, managed traceback aktarımı ve return/break/continue
 temizliğiyle desteklenir. `raise ... from ...`, örtük `__context__`, explicit
@@ -323,6 +326,8 @@ Power, bitwise ve in-place protokol sözleşmesi:
 [ADR 0067](docs/adr/0067-power-bitwise-protocols.md).
 Canonical builtin kurucu ve numeric conversion sözleşmesi:
 [ADR 0068](docs/adr/0068-canonical-builtin-construction.md).
+Index conversion tüketici sözleşmesi:
+[ADR 0069](docs/adr/0069-index-conversion-consumers.md).
 
 Kuralların analizi: [ANALYSIS.md](docs/ANALYSIS.md).
 Kararlar/riskler: [ADR 0001](docs/adr/0001-bootstrap.md).
