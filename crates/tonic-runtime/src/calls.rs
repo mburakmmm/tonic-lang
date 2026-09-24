@@ -6,6 +6,10 @@ use super::{
 };
 use crate::{
     dict::Dict,
+    hashing::{
+        hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish, sequence_start,
+        sequence_step,
+    },
     heap::{Builtin, Object},
     native::Context,
     value::Value,
@@ -18,6 +22,8 @@ use tonic_core::{
     bytecode::Program,
     diagnostic::{Diagnostic, Result},
 };
+
+const PROTOCOL_NESTING_LIMIT: usize = 32;
 
 #[derive(Clone, Default)]
 pub(crate) struct ExpandedArgs {
@@ -163,6 +169,17 @@ fn native_new_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
         Builtin::TupleNew => super::RuntimeTypeKind::Tuple,
         Builtin::DictNew => super::RuntimeTypeKind::Dict,
         Builtin::RangeNew => super::RuntimeTypeKind::Range,
+        _ => return None,
+    })
+}
+
+fn native_hash_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
+    Some(match builtin {
+        Builtin::IntHash => super::RuntimeTypeKind::Int,
+        Builtin::FloatHash => super::RuntimeTypeKind::Float,
+        Builtin::StrHash => super::RuntimeTypeKind::Str,
+        Builtin::TupleHash => super::RuntimeTypeKind::Tuple,
+        Builtin::RangeHash => super::RuntimeTypeKind::Range,
         _ => return None,
     })
 }
@@ -331,6 +348,41 @@ impl Vm {
                         }
                         return Ok(());
                     }
+                }
+                if matches!(builtin, Builtin::Hash | Builtin::ObjectHash)
+                    || native_hash_kind(builtin).is_some()
+                {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "hash operation expects one argument",
+                        ));
+                    }
+                    let value = args.positional(&self.registers, 0);
+                    return match builtin {
+                        Builtin::Hash => self.invoke_hash_protocol(
+                            p,
+                            value,
+                            destination,
+                            super::HashAction::Return,
+                            output,
+                        ),
+                        Builtin::ObjectHash => self.complete_hash(
+                            p,
+                            destination,
+                            hash_u64(value.raw()),
+                            super::HashAction::Return,
+                            output,
+                        ),
+                        _ => self.invoke_typed_native_hash(
+                            p,
+                            (builtin, value),
+                            destination,
+                            0,
+                            super::HashAction::Return,
+                            output,
+                        ),
+                    };
                 }
                 if matches!(builtin, Builtin::Abs) && args.keyword_count() == 0 && args.count() == 1
                 {
@@ -1026,7 +1078,7 @@ impl Vm {
         };
         let Some((call, protocol)) = protocol_call else {
             let truth = self.heap.truth(value)?;
-            self.apply_truth(destination, truth, action);
+            self.apply_truth(p, destination, truth, action, output)?;
             return Ok(());
         };
         let depth = self.frames.len();
@@ -1080,10 +1132,16 @@ impl Vm {
             }
             super::TruthProtocol::Length => self.checked_length(value)? != 0,
         };
-        self.apply_truth(destination, truth, action);
-        Ok(())
+        self.apply_truth(p, destination, truth, action, output)
     }
-    fn apply_truth(&mut self, destination: usize, truth: bool, action: super::TruthAction) {
+    fn apply_truth(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        truth: bool,
+        action: super::TruthAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
         match action {
             super::TruthAction::Not => self.registers[destination] = Value::bool(!truth),
             super::TruthAction::Return => self.registers[destination] = Value::bool(truth),
@@ -1098,7 +1156,11 @@ impl Vm {
                     self.jump(target, pc);
                 }
             }
+            super::TruthAction::Equality(action) => {
+                return self.complete_equality(p, destination, truth, action, output)
+            }
         }
+        Ok(())
     }
     fn operator_method_call(
         &self,
@@ -1220,6 +1282,7 @@ impl Vm {
             candidates,
             next: 0,
             negate_result: false,
+            completion: super::BinaryCompletion::Value,
         }))
     }
     pub(super) fn continue_binary_protocol(
@@ -1252,12 +1315,26 @@ impl Vm {
                 return Ok(());
             }
             if self.registers[destination] != Value::NOT_IMPLEMENTED {
-                if state.negate_result {
-                    let value = self.registers[destination];
-                    self.invoke_truth(p, value, destination, super::TruthAction::Not, output)?;
-                }
-                return Ok(());
+                let value = self.registers[destination];
+                return self.finish_binary_protocol_value(
+                    p,
+                    destination,
+                    value,
+                    state.negate_result,
+                    state.completion,
+                    output,
+                );
             }
+        }
+        if let super::BinaryCompletion::Equality(action) = state.completion {
+            return self.invoke_equality_fallback(
+                p,
+                state.left,
+                state.right,
+                destination,
+                action,
+                output,
+            );
         }
         self.registers[destination] = match state.op {
             tonic_core::bytecode::Op::InplaceAdd => {
@@ -1276,6 +1353,32 @@ impl Vm {
                 .binary(super::base_binary_op(state.op), state.left, state.right)?,
         };
         Ok(())
+    }
+    pub(super) fn finish_binary_protocol_value(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        negate: bool,
+        completion: super::BinaryCompletion,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match completion {
+            super::BinaryCompletion::Value if negate => {
+                self.invoke_truth(p, value, destination, super::TruthAction::Not, output)
+            }
+            super::BinaryCompletion::Value => Ok(()),
+            super::BinaryCompletion::Equality(action) => {
+                debug_assert!(!negate, "equality continuation uses the Eq protocol");
+                self.invoke_truth(
+                    p,
+                    value,
+                    destination,
+                    super::TruthAction::Equality(action),
+                    output,
+                )
+            }
+        }
     }
     pub(super) fn invoke_unary_protocol(
         &mut self,
@@ -1471,8 +1574,7 @@ impl Vm {
             }
             super::IndexContinuation::Truth(action) => {
                 let truth = self.checked_length(value)? != 0;
-                self.apply_truth(destination, truth, action);
-                Ok(())
+                self.apply_truth(p, destination, truth, action, output)
             }
             super::IndexContinuation::Range(mut state) => {
                 state.values[state.next] = value;
@@ -1753,7 +1855,14 @@ impl Vm {
                         Object::Dict(_)
                     ) {
                         if !self_source {
-                            self.heap.dict_merge(native, source)?;
+                            return self.invoke_dict_merge(
+                                p,
+                                destination,
+                                native,
+                                source,
+                                super::DictMergeFinish::Construction(start),
+                                output,
+                            );
                         }
                     } else {
                         return self.invoke_dict_construction(
@@ -2193,7 +2302,14 @@ impl Vm {
                     self.heap.get(self.heap.native_value(source))?,
                     Object::Dict(_)
                 ) {
-                    self.heap.dict_merge(result, source)?;
+                    return self.invoke_dict_merge(
+                        p,
+                        destination,
+                        result,
+                        source,
+                        super::DictMergeFinish::Construction(start),
+                        output,
+                    );
                 } else {
                     return self.invoke_dict_construction(p, destination, start, source, output);
                 }
@@ -2561,7 +2677,7 @@ impl Vm {
             while let Some(item) = self.heap.next(state.iterator)? {
                 state.items.push(item);
             }
-            return self.finish_dict_pair(state).map(Some);
+            return self.finish_dict_pair(p, destination, state, output);
         }
         loop {
             let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
@@ -2581,7 +2697,7 @@ impl Vm {
             ) {
                 Ok(()) => {}
                 Err(error) if error.kind == "StopIteration" => {
-                    return self.finish_dict_pair(state).map(Some)
+                    return self.finish_dict_pair(p, destination, state, output)
                 }
                 Err(error) => return Err(error),
             }
@@ -2597,8 +2713,11 @@ impl Vm {
     }
     pub(super) fn finish_dict_pair(
         &mut self,
+        p: &Program,
+        destination: usize,
         mut state: DictPairConstruction,
-    ) -> Result<DictConstruction> {
+        output: &mut dyn Write,
+    ) -> Result<Option<DictConstruction>> {
         if state.items.len() != 2 {
             return Err(Diagnostic::new(
                 "ValueError",
@@ -2609,10 +2728,19 @@ impl Vm {
                 ),
             ));
         }
-        self.heap
-            .dict_set(state.outer.start.result, state.items[0], state.items[1])?;
         state.outer.index += 1;
-        Ok(state.outer)
+        self.invoke_dict_operation(
+            p,
+            state.outer.start.result,
+            state.items[0],
+            destination,
+            super::DictOperationKind::SetAndContinue {
+                value: state.items[1],
+                state: Box::new(state.outer),
+            },
+            output,
+        )?;
+        Ok(None)
     }
     pub(super) fn finish_dict_construction(
         &mut self,
@@ -3021,6 +3149,910 @@ impl Vm {
         self.stats.peak_registers = self.stats.peak_registers.max(end);
         Ok(())
     }
+    pub(super) fn invoke_equality(
+        &mut self,
+        p: &Program,
+        left: Value,
+        right: Value,
+        destination: usize,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if left == right {
+            return self.complete_equality(p, destination, true, action, output);
+        }
+        if let Some(mut protocol) =
+            self.binary_protocol(tonic_core::bytecode::Op::Eq, left, right)?
+        {
+            protocol.completion = super::BinaryCompletion::Equality(action);
+            return self.continue_binary_protocol(p, destination, protocol, output);
+        }
+        self.invoke_equality_fallback(p, left, right, destination, action, output)
+    }
+
+    pub(super) fn invoke_equality_fallback(
+        &mut self,
+        p: &Program,
+        left: Value,
+        right: Value,
+        destination: usize,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let nested_depth = action.comparison_depth() + 1;
+        if left == right {
+            return self.complete_equality(p, destination, true, action, output);
+        }
+        if self.heap.is_integer(left)
+            || self.heap.is_float(left)
+            || self.heap.is_integer(right)
+            || self.heap.is_float(right)
+        {
+            let equal = self
+                .heap
+                .compare(tonic_core::bytecode::Op::Eq, left, right)?
+                .as_bool()
+                .expect("comparison returns bool");
+            return self.complete_equality(p, destination, equal, action, output);
+        }
+        let native_left = self.heap.native_value(left);
+        let native_right = self.heap.native_value(right);
+        enum EqualityFallback {
+            Ready(bool),
+            Sequence(Vec<Value>, Vec<Value>),
+        }
+        let fallback = match (self.heap.get(native_left), self.heap.get(native_right)) {
+            (Ok(Object::Str(left)), Ok(Object::Str(right))) => {
+                EqualityFallback::Ready(left == right)
+            }
+            (Ok(Object::Range { .. }), Ok(Object::Range { .. })) => {
+                let equal = self
+                    .heap
+                    .compare(tonic_core::bytecode::Op::Eq, native_left, native_right)?
+                    .as_bool()
+                    .expect("range comparison returns bool");
+                EqualityFallback::Ready(equal)
+            }
+            (Ok(Object::Tuple(left)), Ok(Object::Tuple(right)))
+            | (Ok(Object::List(left)), Ok(Object::List(right))) => {
+                EqualityFallback::Sequence(left.clone(), right.clone())
+            }
+            (Ok(Object::Slice(left)), Ok(Object::Slice(right))) => {
+                EqualityFallback::Sequence(left.to_vec(), right.to_vec())
+            }
+            (
+                Ok(Object::BoundMethod {
+                    function: left_function,
+                    receiver: left_receiver,
+                }),
+                Ok(Object::BoundMethod {
+                    function: right_function,
+                    receiver: right_receiver,
+                }),
+            ) => EqualityFallback::Sequence(
+                vec![*left_function, *left_receiver],
+                vec![*right_function, *right_receiver],
+            ),
+            (Ok(Object::Dict(_)), Ok(Object::Dict(_))) => {
+                return self.begin_dict_equality(
+                    p,
+                    destination,
+                    native_left,
+                    native_right,
+                    action,
+                    output,
+                );
+            }
+            _ => EqualityFallback::Ready(false),
+        };
+        match fallback {
+            EqualityFallback::Ready(equal) => {
+                self.complete_equality(p, destination, equal, action, output)
+            }
+            EqualityFallback::Sequence(left, right) => self.begin_equality_sequence(
+                p,
+                destination,
+                (left, right),
+                nested_depth,
+                action,
+                output,
+            ),
+        }
+    }
+
+    pub(super) fn invoke_order_comparison(
+        &mut self,
+        p: &Program,
+        left: Value,
+        right: Value,
+        destination: usize,
+        order: (tonic_core::bytecode::Op, usize),
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let (op, depth) = order;
+        if let Some(protocol) = self.binary_protocol(op, left, right)? {
+            return self.continue_binary_protocol(p, destination, protocol, output);
+        }
+        let native_left = self.heap.native_value(left);
+        let native_right = self.heap.native_value(right);
+        let sequences = match (self.heap.get(native_left), self.heap.get(native_right)) {
+            (Ok(Object::Tuple(left)), Ok(Object::Tuple(right)))
+            | (Ok(Object::List(left)), Ok(Object::List(right))) => {
+                Some((left.clone(), right.clone()))
+            }
+            _ => None,
+        };
+        if let Some((left, right)) = sequences {
+            if depth > PROTOCOL_NESTING_LIMIT {
+                return Err(Diagnostic::new(
+                    "RecursionError",
+                    "comparison nesting limit exceeded",
+                ));
+            }
+            self.continue_sequence_order(
+                p,
+                destination,
+                super::SequenceOrder {
+                    left,
+                    right,
+                    index: 0,
+                    op,
+                    depth,
+                },
+                output,
+            )
+        } else {
+            self.registers[destination] = self.heap.compare(op, left, right)?;
+            Ok(())
+        }
+    }
+
+    fn continue_sequence_order(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: super::SequenceOrder,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let Some((&left, &right)) = state
+            .left
+            .get(state.index)
+            .zip(state.right.get(state.index))
+        else {
+            let ordering = state.left.len().cmp(&state.right.len());
+            let result = match state.op {
+                tonic_core::bytecode::Op::Lt => ordering.is_lt(),
+                tonic_core::bytecode::Op::Le => ordering.is_le(),
+                tonic_core::bytecode::Op::Gt => ordering.is_gt(),
+                tonic_core::bytecode::Op::Ge => ordering.is_ge(),
+                _ => unreachable!("sequence ordering requires an ordering opcode"),
+            };
+            self.registers[destination] = Value::bool(result);
+            return Ok(());
+        };
+        self.invoke_equality(
+            p,
+            left,
+            right,
+            destination,
+            super::EqualityAction::SequenceOrder(state),
+            output,
+        )
+    }
+
+    fn begin_equality_sequence(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        values: (Vec<Value>, Vec<Value>),
+        depth: usize,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if depth > PROTOCOL_NESTING_LIMIT {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "comparison nesting limit exceeded",
+            ));
+        }
+        let (left, right) = values;
+        if left.len() != right.len() {
+            return self.complete_equality(p, destination, false, action, output);
+        }
+        let Some((&first_left, &first_right)) = left.first().zip(right.first()) else {
+            return self.complete_equality(p, destination, true, action, output);
+        };
+        self.invoke_equality(
+            p,
+            first_left,
+            first_right,
+            destination,
+            super::EqualityAction::Sequence {
+                left,
+                right,
+                next: 1,
+                depth,
+                outer: Box::new(action),
+            },
+            output,
+        )
+    }
+
+    pub(super) fn complete_equality(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        equal: bool,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match action {
+            super::EqualityAction::Return { negate } => {
+                self.registers[destination] = Value::bool(if negate { !equal } else { equal });
+                Ok(())
+            }
+            super::EqualityAction::Sequence {
+                left,
+                right,
+                next,
+                depth,
+                outer,
+            } => {
+                if !equal {
+                    return self.complete_equality(p, destination, false, *outer, output);
+                }
+                if let Some((&next_left, &next_right)) = left.get(next).zip(right.get(next)) {
+                    self.invoke_equality(
+                        p,
+                        next_left,
+                        next_right,
+                        destination,
+                        super::EqualityAction::Sequence {
+                            left,
+                            right,
+                            next: next + 1,
+                            depth,
+                            outer,
+                        },
+                        output,
+                    )
+                } else {
+                    self.complete_equality(p, destination, true, *outer, output)
+                }
+            }
+            super::EqualityAction::DictCandidate { state, index } => {
+                if self.heap.dict_version(state.start.owner)? != state.version {
+                    return Err(Diagnostic::new(
+                        "RuntimeError",
+                        "dictionary changed during key comparison",
+                    ));
+                }
+                if equal {
+                    self.finish_dict_operation(p, destination, state, Some(index), output)
+                } else {
+                    self.continue_dict_operation(p, destination, state, output)
+                }
+            }
+            super::EqualityAction::DictEntries {
+                left,
+                right,
+                entries,
+                next,
+                left_version,
+                right_version,
+                depth,
+                outer,
+            } => {
+                if self.heap.dict_version(left)? != left_version
+                    || self.heap.dict_version(right)? != right_version
+                {
+                    return Err(Diagnostic::new(
+                        "RuntimeError",
+                        "dictionary changed during comparison",
+                    ));
+                }
+                if !equal {
+                    return self.complete_equality(p, destination, false, *outer, output);
+                }
+                if let Some((key, expected)) = entries.get(next).copied() {
+                    self.invoke_dict_operation(
+                        p,
+                        right,
+                        key,
+                        destination,
+                        super::DictOperationKind::CompareValue {
+                            expected,
+                            action: Box::new(super::EqualityAction::DictEntries {
+                                left,
+                                right,
+                                entries,
+                                next: next + 1,
+                                left_version,
+                                right_version,
+                                depth,
+                                outer,
+                            }),
+                        },
+                        output,
+                    )
+                } else {
+                    self.complete_equality(p, destination, true, *outer, output)
+                }
+            }
+            super::EqualityAction::SequenceOrder(mut state) => {
+                let left = state.left[state.index];
+                let right = state.right[state.index];
+                if equal {
+                    state.index += 1;
+                    self.continue_sequence_order(p, destination, state, output)
+                } else {
+                    self.invoke_order_comparison(
+                        p,
+                        left,
+                        right,
+                        destination,
+                        (state.op, state.depth + 1),
+                        output,
+                    )
+                }
+            }
+        }
+    }
+
+    fn begin_dict_equality(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        left: Value,
+        right: Value,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let depth = action.comparison_depth() + 1;
+        if depth > PROTOCOL_NESTING_LIMIT {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "comparison nesting limit exceeded",
+            ));
+        }
+        if self.heap.dict_len(left)? != self.heap.dict_len(right)? {
+            return self.complete_equality(p, destination, false, action, output);
+        }
+        let entries = self.heap.dict_entries(left)?;
+        let left_version = self.heap.dict_version(left)?;
+        let right_version = self.heap.dict_version(right)?;
+        let Some((key, expected)) = entries.first().copied() else {
+            return self.complete_equality(p, destination, true, action, output);
+        };
+        self.invoke_dict_operation(
+            p,
+            right,
+            key,
+            destination,
+            super::DictOperationKind::CompareValue {
+                expected,
+                action: Box::new(super::EqualityAction::DictEntries {
+                    left,
+                    right,
+                    entries,
+                    next: 1,
+                    left_version,
+                    right_version,
+                    depth,
+                    outer: Box::new(action),
+                }),
+            },
+            output,
+        )
+    }
+
+    pub(super) fn invoke_dict_operation(
+        &mut self,
+        p: &Program,
+        owner: Value,
+        key: Value,
+        destination: usize,
+        kind: super::DictOperationKind,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        self.invoke_hash_protocol(
+            p,
+            key,
+            destination,
+            super::HashAction::Dict(super::DictOperationStart { owner, key, kind }),
+            output,
+        )
+    }
+
+    pub(super) fn invoke_dict_merge(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        target: Value,
+        source: Value,
+        finish: super::DictMergeFinish,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let entries = self.heap.dict_entries(source)?;
+        self.continue_dict_merge(
+            p,
+            destination,
+            super::DictMergeState {
+                target,
+                entries,
+                next: 0,
+                finish,
+            },
+            output,
+        )
+    }
+
+    fn continue_dict_merge(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: super::DictMergeState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if let Some((key, value)) = state.entries.get(state.next).copied() {
+            state.next += 1;
+            return self.invoke_dict_operation(
+                p,
+                state.target,
+                key,
+                destination,
+                super::DictOperationKind::SetAndMerge {
+                    value,
+                    state: Box::new(state),
+                },
+                output,
+            );
+        }
+        match state.finish {
+            super::DictMergeFinish::Preserve => {
+                self.registers[destination] = state.target;
+                Ok(())
+            }
+            super::DictMergeFinish::Construction(start) => {
+                self.finish_dict_construction(p, destination, start, output)
+            }
+        }
+    }
+
+    fn begin_dict_operation(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        start: super::DictOperationStart,
+        hash: i64,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let version = self.heap.dict_version(start.owner)?;
+        let candidates = self.heap.dict_candidates(start.owner, hash)?;
+        let comparison_depth = match &start.kind {
+            super::DictOperationKind::CompareValue { action, .. } => action.comparison_depth(),
+            _ => 0,
+        };
+        self.continue_dict_operation(
+            p,
+            destination,
+            super::DictOperation {
+                start,
+                hash,
+                version,
+                candidates,
+                next: 0,
+                comparison_depth,
+            },
+            output,
+        )
+    }
+
+    fn continue_dict_operation(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: super::DictOperation,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if self.heap.dict_version(state.start.owner)? != state.version {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "dictionary changed during key comparison",
+            ));
+        }
+        if let Some(index) = state.candidates.get(state.next).copied() {
+            state.next += 1;
+            let (candidate, _) = self.heap.dict_entry_at(state.start.owner, index)?;
+            if candidate == state.start.key {
+                return self.finish_dict_operation(p, destination, state, Some(index), output);
+            }
+            return self.invoke_equality(
+                p,
+                candidate,
+                state.start.key,
+                destination,
+                super::EqualityAction::DictCandidate { state, index },
+                output,
+            );
+        }
+        self.finish_dict_operation(p, destination, state, None, output)
+    }
+
+    fn finish_dict_operation(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: super::DictOperation,
+        matched: Option<usize>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match state.start.kind {
+            super::DictOperationKind::Get => {
+                let index = matched.ok_or_else(|| {
+                    Diagnostic::new(
+                        "KeyError",
+                        self.heap
+                            .format(state.start.key, true)
+                            .unwrap_or_else(|_| "missing key".into()),
+                    )
+                })?;
+                self.registers[destination] = self.heap.dict_entry_at(state.start.owner, index)?.1;
+            }
+            super::DictOperationKind::Set(value) => {
+                self.heap.dict_set_hashed(
+                    state.start.owner,
+                    state.start.key,
+                    value,
+                    state.hash,
+                    matched,
+                )?;
+                self.registers[destination] = state.start.owner;
+            }
+            super::DictOperationKind::SetAndContinue {
+                value,
+                state: continuation,
+            } => {
+                self.heap.dict_set_hashed(
+                    state.start.owner,
+                    state.start.key,
+                    value,
+                    state.hash,
+                    matched,
+                )?;
+                return self.continue_dict_construction(p, destination, *continuation, output);
+            }
+            super::DictOperationKind::SetAndMerge {
+                value,
+                state: continuation,
+            } => {
+                self.heap.dict_set_hashed(
+                    state.start.owner,
+                    state.start.key,
+                    value,
+                    state.hash,
+                    matched,
+                )?;
+                return self.continue_dict_merge(p, destination, *continuation, output);
+            }
+            super::DictOperationKind::Delete => {
+                let index = matched.ok_or_else(|| {
+                    Diagnostic::new(
+                        "KeyError",
+                        self.heap
+                            .format(state.start.key, true)
+                            .unwrap_or_else(|_| "missing key".into()),
+                    )
+                })?;
+                self.heap.dict_delete_at(state.start.owner, index)?;
+                self.registers[destination] = state.start.owner;
+            }
+            super::DictOperationKind::CompareValue { expected, action } => {
+                let Some(index) = matched else {
+                    return self.complete_equality(p, destination, false, *action, output);
+                };
+                let actual = self.heap.dict_entry_at(state.start.owner, index)?.1;
+                return self.invoke_equality(p, actual, expected, destination, *action, output);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn invoke_hash_protocol(
+        &mut self,
+        p: &Program,
+        value: Value,
+        destination: usize,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        self.invoke_hash_protocol_at(p, value, destination, 0, action, output)
+    }
+
+    fn invoke_hash_protocol_at(
+        &mut self,
+        p: &Program,
+        value: Value,
+        destination: usize,
+        depth: usize,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if depth > PROTOCOL_NESTING_LIMIT {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "hash nesting limit exceeded",
+            ));
+        }
+        if let Some(call) = self.operator_method_call(value, "__hash__")? {
+            if call.callable == Value::NONE {
+                return Err(Diagnostic::new("TypeError", "unhashable type"));
+            }
+            match self.heap.get(call.callable) {
+                Ok(Object::Builtin(Builtin::ObjectHash)) => {
+                    return self.complete_hash(
+                        p,
+                        destination,
+                        hash_u64(value.raw()),
+                        action,
+                        output,
+                    );
+                }
+                Ok(Object::Builtin(builtin)) if native_hash_kind(*builtin).is_some() => {
+                    return self.invoke_typed_native_hash(
+                        p,
+                        (*builtin, value),
+                        destination,
+                        depth,
+                        action,
+                        output,
+                    );
+                }
+                _ => {}
+            }
+            let depth = self.frames.len();
+            self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [Value::UNBOUND; 3],
+                    count: 0,
+                },
+                output,
+            )?;
+            if self.frames.len() > depth {
+                self.frames.last_mut().expect("__hash__ frame").action =
+                    super::ReturnAction::Hash(action);
+            } else {
+                let result = self.registers[destination];
+                self.finish_hash_result(p, destination, result, action, output)?;
+            }
+            return Ok(());
+        }
+        self.invoke_native_hash(p, value, destination, depth, action, output)
+    }
+
+    fn invoke_typed_native_hash(
+        &mut self,
+        p: &Program,
+        target: (Builtin, Value),
+        destination: usize,
+        depth: usize,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let (builtin, value) = target;
+        let kind = native_hash_kind(builtin).expect("typed native hash builtin");
+        let native = self.heap.native_value(value);
+        let valid = match kind {
+            super::RuntimeTypeKind::Int => self.heap.is_integer(value),
+            super::RuntimeTypeKind::Float => {
+                matches!(self.heap.get(native), Ok(Object::Float(_)))
+            }
+            super::RuntimeTypeKind::Str => matches!(self.heap.get(native), Ok(Object::Str(_))),
+            super::RuntimeTypeKind::Tuple => {
+                matches!(self.heap.get(native), Ok(Object::Tuple(_)))
+            }
+            super::RuntimeTypeKind::Range => {
+                matches!(self.heap.get(native), Ok(Object::Range { .. }))
+            }
+            _ => unreachable!("only immutable native types expose typed hash builtins"),
+        };
+        if !valid {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "hash descriptor received an incompatible object",
+            ));
+        }
+        self.invoke_native_hash(p, native, destination, depth, action, output)
+    }
+
+    fn invoke_native_hash(
+        &mut self,
+        p: &Program,
+        value: Value,
+        destination: usize,
+        depth: usize,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if depth > PROTOCOL_NESTING_LIMIT {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "hash nesting limit exceeded",
+            ));
+        }
+        let value = self.heap.native_value(value);
+        let ready = if value == Value::NONE {
+            Some(0x421)
+        } else if value == Value::NOT_IMPLEMENTED {
+            Some(0x422)
+        } else if value == Value::UNBOUND {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "internal value is not hashable",
+            ));
+        } else if let Some(integer) = value.integer() {
+            Some(crate::hashing::normalize_i64(integer))
+        } else {
+            match self.heap.get(value)? {
+                Object::Int(integer) => Some(normalize_bigint(integer)),
+                Object::Float(number) if number.is_nan() => Some(hash_u64(value.raw())),
+                Object::Float(number) if number.is_finite() && number.fract() == 0.0 => Some(
+                    normalize_bigint(&BigInt::from_f64(*number).expect("finite integral float")),
+                ),
+                Object::Float(number) => Some(hash_u64(number.to_bits())),
+                Object::Str(string) => Some(hash_string(string)),
+                Object::Range { start, stop, step } => Some(hash_range(*start, *stop, *step)),
+                Object::Tuple(values) => {
+                    return self.begin_hash_sequence(
+                        p,
+                        destination,
+                        values.clone(),
+                        depth,
+                        action,
+                        output,
+                    );
+                }
+                Object::Slice(values) => {
+                    return self.begin_hash_sequence(
+                        p,
+                        destination,
+                        values.to_vec(),
+                        depth,
+                        action,
+                        output,
+                    );
+                }
+                Object::BoundMethod { function, receiver } => {
+                    return self.begin_hash_sequence(
+                        p,
+                        destination,
+                        vec![*function, *receiver],
+                        depth,
+                        action,
+                        output,
+                    );
+                }
+                Object::List(_)
+                | Object::Dict(_)
+                | Object::Buffer(_)
+                | Object::MappingProxy { .. } => {
+                    return Err(Diagnostic::new("TypeError", "unhashable type"));
+                }
+                _ => Some(hash_u64(value.raw())),
+            }
+        };
+        self.complete_hash(
+            p,
+            destination,
+            ready.expect("native hash branch produces a value"),
+            action,
+            output,
+        )
+    }
+
+    fn begin_hash_sequence(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        values: Vec<Value>,
+        depth: usize,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let Some(first) = values.first().copied() else {
+            return self.complete_hash(
+                p,
+                destination,
+                sequence_finish(sequence_start(), 0),
+                action,
+                output,
+            );
+        };
+        self.invoke_hash_protocol_at(
+            p,
+            first,
+            destination,
+            depth + 1,
+            super::HashAction::Sequence {
+                values,
+                next: 1,
+                accumulator: sequence_start(),
+                depth: depth + 1,
+                outer: Box::new(action),
+            },
+            output,
+        )
+    }
+
+    pub(super) fn finish_hash_result(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        result: Value,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if !self.heap.is_integer(result) {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "__hash__ method must return an integer",
+            ));
+        }
+        let hash = normalize_bigint(&self.heap.integer(result)?);
+        self.complete_hash(p, destination, hash, action, output)
+    }
+
+    fn complete_hash(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        hash: i64,
+        action: super::HashAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match action {
+            super::HashAction::Return => {
+                self.registers[destination] = self.heap.i64(hash)?;
+                Ok(())
+            }
+            super::HashAction::Dict(start) => {
+                self.begin_dict_operation(p, destination, start, hash, output)
+            }
+            super::HashAction::Sequence {
+                values,
+                next,
+                accumulator,
+                depth,
+                outer,
+            } => {
+                let accumulator = sequence_step(accumulator, hash);
+                if let Some(value) = values.get(next).copied() {
+                    self.invoke_hash_protocol_at(
+                        p,
+                        value,
+                        destination,
+                        depth,
+                        super::HashAction::Sequence {
+                            values,
+                            next: next + 1,
+                            accumulator,
+                            depth,
+                            outer,
+                        },
+                        output,
+                    )
+                } else {
+                    let hash = sequence_finish(accumulator, values.len());
+                    self.complete_hash(p, destination, hash, *outer, output)
+                }
+            }
+        }
+    }
+
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -3047,6 +4079,15 @@ impl Vm {
             | Builtin::DictNew
             | Builtin::DictInit => unreachable!("builtin has a suspending call path"),
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
+            Builtin::Hash
+            | Builtin::ObjectHash
+            | Builtin::IntHash
+            | Builtin::FloatHash
+            | Builtin::StrHash
+            | Builtin::TupleHash
+            | Builtin::RangeHash => {
+                unreachable!("hash builtin has a suspending call path")
+            }
             Builtin::ObjectNew => {
                 if count != 1 || args.keyword_count() != 0 {
                     return Err(Diagnostic::new(

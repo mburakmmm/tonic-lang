@@ -42,10 +42,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
-call binder/cache 12, closure 8, dict 7, GC integration 9, class integration 47,
-native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 281 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
+native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 284 test.
 
-Differential corpus: 296 stdout vakası ve 136 exception türü vakası. Seed 42.
+Differential corpus: 299 stdout vakası ve 147 exception türü vakası. Seed 42.
 Canonical builtin kurucularından sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -369,6 +369,18 @@ operandını precise root olarak taşır. Dict anahtarları ve custom `__getitem
 dönüşüm sınırının dışında kalır. Yanlış sonuç tipi, negatif length ve invalid
 arbitrary-precision int base hata yolları CPython oracle'ıyla karşılaştırılır.
 Run'lar arasında eski persistent callable yanlış code ID'ye bağlanamaz.
+
+Hash ve container comparison aşamasında toplam 284 Rust testi ile 299 stdout ve
+147 exception differential vakasına ulaşıldı. `hash`/`object.__hash__`, custom
+suspending `__hash__`, implicit `__hash__ = None`, builtin/native-subclass hash,
+tuple/slice/bound-method bileşimi ve logical identity yolları doğrulandı. Dict
+kovaları yalnız hash ile eşitlik kararı vermez; custom collision anahtarları get/
+set/delete, iterable constructor, dict copy, `**` merge ve dict equality sırasında
+normal guest `__eq__`/truth frame'lerinden geçer. List/tuple/dict/slice nested
+equality, list/tuple lexicographic order, cyclic comparison sınırı ve exact-int
+JIT guard miss sonrası exact-PC continuation yolu kapsanır. Debug/release workspace,
+clippy ve interpreter/JIT × normal/stress-GC differential matrisinin sekiz koşusu
+Python 3.14.6 ile eşleşmiştir.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.

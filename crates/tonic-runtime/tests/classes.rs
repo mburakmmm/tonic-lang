@@ -741,6 +741,19 @@ print(type(int(i)).__name__,type(float(f)).__name__,type(str(s)).__name__)"#;
     assert_eq!(output, b"5 int\n");
     assert!(vm.stats.jit_compiled >= 1);
     assert!(vm.stats.jit_deopts >= 1);
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile(
+                "a=[]\na+=(a,)\nb=[]\nb+=(b,)\nprint(a==b)",
+                "cyclic-sequence-comparison",
+            )
+            .unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "RecursionError");
 }
 
 #[test]
@@ -1077,4 +1090,109 @@ x=FallBack(); x|=1; print(x)"#;
         run(source),
         "1000 1100 11 9 2 80 1 -11\n77\n1 2 3 4 5 6 7 8 9 10 11\n99\n"
     );
+}
+
+#[test]
+fn hash_protocol_suspends_normalizes_and_respects_class_rules() {
+    let source = r#"print(hash(1)==hash(True),hash(1)==hash(1.0))
+print(hash((1,'x'))==hash((True,'x')))
+class Hasher:
+    def __init__(self,value): self.value=value
+    def __hash__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value
+h=Hasher(17)
+print(hash(h),hash((h,2))==hash((h,2)))
+class EqOnly:
+    def __eq__(self,other): return True
+print(EqOnly.__hash__==None)
+class IdentityDespiteEq:
+    def __eq__(self,other): return True
+    __hash__=object.__hash__
+a=IdentityDespiteEq(); b=IdentityDespiteEq()
+print(hash(a)==hash(a),hash(a)!=hash(b))
+class IntChild(int): pass
+class TupleChild(tuple): pass
+print(hash(IntChild(7))==hash(7),hash(TupleChild((1,2)))==hash((1,2)))
+print(hash(range(0,3,2))==hash(range(0,4,2)))"#;
+    assert_eq!(
+        run(source),
+        "True True\nTrue\n17 True\nTrue\nTrue True\nTrue True\nTrue\n"
+    );
+
+    assert_eq!(
+        run(
+            "class Capture:\n    def __getitem__(self,key): return key\na=Capture()[1:5:2]\nb=Capture()[1:5:2]\nprint(hash(a)==hash(b),a==b)\nd={a:'slice'}\nprint(d[b])",
+        ),
+        "True True\nslice\n"
+    );
+
+    for source in [
+        "hash([])",
+        "hash({})",
+        "hash((1,[]))",
+        "class C:\n    __hash__=None\nhash(C())",
+        "class C:\n    def __eq__(self,other): return True\nhash(C())",
+        "class C:\n    def __hash__(self): return 1.0\nhash(C())",
+        "int.__hash__('x')",
+        "float.__hash__(1)",
+        "str.__hash__(1)",
+        "tuple.__hash__([])",
+        "range.__hash__(1)",
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "hash-errors").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, "TypeError");
+    }
+}
+
+#[test]
+fn nested_sequence_equality_suspends_for_guest_elements() {
+    assert_eq!(
+        run(r#"class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value
+class Item:
+    def __init__(self,value): self.value=value
+    def __eq__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return Truth(self.value==other.value)
+    def __lt__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value<other.value
+print([Item(1),Item(2)]==[Item(1),Item(2)])
+print((Item(1),(Item(2),))==(Item(1),(Item(3),)))
+print([Item(1)]!=[Item(2)])"#,),
+        "True\nFalse\nTrue\n"
+    );
+
+    assert_eq!(
+        run(
+            "class Item:\n    def __init__(self,value): self.value=value\n    def __eq__(self,other): return self.value==other.value\n    def __lt__(self,other):\n        scratch=0.0\n        for i in range(20): scratch+=0.5\n        return self.value<other.value\nprint([Item(1),Item(2)]<[Item(1),Item(3)])\nprint(((Item(1),),(Item(2),))<((Item(1),),(Item(1),)))",
+        ),
+        "True\nFalse\n"
+    );
+
+    let program = compile(
+        "class Item:\n    def __init__(self,value): self.value=value\n    def __eq__(self,other): return self.value==other.value\ndef same(a,b): return a==b\nfor i in range(20): same(i,i)\nprint(same([Item(1)],[Item(1)]))",
+        "container-comparison-jit-deopt",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = 1;
+    vm.jit_min_instructions = 0;
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"True\n");
+    assert!(vm.stats.jit_compiled >= 1);
+    assert!(vm.stats.jit_deopts >= 1);
 }

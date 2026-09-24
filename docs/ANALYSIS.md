@@ -113,6 +113,14 @@ operandını döndürdüğü için continuation özgün değeri explicit root ol
 yalnız kontrol kararını protokol sonucundan üretir. `__bool__` exact bool ister;
 length fallback ortak signed/i64 doğrulamasını kullanır.
 
+Hash protokolü de normal guest-frame continuation modeline taşınmıştır. Runtime
+adresleri hash/identity olarak açılmaz; stable logical Value/handle kimliği,
+numeric canonicalization ve implementation-private string/sequence mixing
+kullanılır. Sözlük hash kovası yalnız aday kümesini daraltır; gerçek eşitlik
+suspending rich comparison ve truth zincirinden gelir. Aynı continuation motoru
+list/tuple/dict/slice nested equality ile list/tuple lexicographic ordering'i
+çalıştırır, bütün pending container ve elemanları precise root olarak izler.
+
 İlk gerçek JIT dilimi Cranelift 0.119'u ayrı `tonic-jit` crate'inde sabitler.
 Doğrulanmış leaf code object'leri immediate integer sabit/move, `+ - * // %`,
 unary, karşılaştırma, truthiness, branch ve loop işlemlerinde native koda çevrilir.

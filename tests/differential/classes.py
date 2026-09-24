@@ -1487,6 +1487,45 @@ class FallBack:
 x=FallBack(); x|=1; print(x)
 ''',
 ]
+CASES += [
+    '''print(hash(1)==hash(True),hash(1)==hash(1.0),hash((1,'x'))==hash((True,'x')))
+class H:
+    def __hash__(self): return -1
+print(hash(H())==-2,hash(range(0,3,2))==hash(range(0,4,2)))
+class EqOnly:
+    def __eq__(self,other): return True
+print(EqOnly.__hash__==None)
+class Capture:
+    def __getitem__(self,key): return key
+a=Capture()[1:5:2]; b=Capture()[1:5:2]
+print(hash(a)==hash(b),a==b,{a:'slice'}[b])
+''',
+    '''class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self): return self.value
+class Key:
+    def __init__(self,value): self.value=value
+    def __hash__(self): return 7
+    def __eq__(self,other): return Truth(self.value==other.value)
+a=Key(1); same=Key(1); other=Key(2)
+d={a:'first'}
+print(d[same],len(d))
+d[same]='updated'; d[other]='other'
+print(d[a],d[other],len(d))
+print({Key(4):Key(5)}=={Key(4):Key(5)})
+print(dict([(Key(8),'eight')])[Key(8)])
+print({**{Key(9):'nine'}}[Key(9)])
+''',
+    '''class Item:
+    def __init__(self,value): self.value=value
+    def __eq__(self,other): return self.value==other.value
+    def __lt__(self,other): return self.value<other.value
+print([Item(1),Item(2)]==[Item(1),Item(2)])
+print((Item(1),(Item(2),))==(Item(1),(Item(3),)))
+print([Item(1),Item(2)]<[Item(1),Item(3)])
+print(((Item(1),),(Item(2),))<((Item(1),),(Item(1),)))
+''',
+]
 ERRORS = [
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
@@ -1587,4 +1626,15 @@ ERRORS = [
     ('class MissingExit:\n    def __enter__(self):\n        pass\nwith MissingExit():\n    pass', 'TypeError'),
     ('class Bad:\n    def __iter__(self):\n        return 1\nfor value in Bad():\n    pass', 'TypeError'),
     ('class Bad:\n    def __iter__(self):\n        return self\nfor value in Bad():\n    pass', 'TypeError'),
+    ('hash([])', 'TypeError'),
+    ('hash((1,[]))', 'TypeError'),
+    ('class C:\n    def __eq__(self,other): return True\nhash(C())', 'TypeError'),
+    ('class C:\n    def __hash__(self): return 1.0\nhash(C())', 'TypeError'),
+    ("int.__hash__('x')", 'TypeError'),
+    ('float.__hash__(1)', 'TypeError'),
+    ('str.__hash__(1)', 'TypeError'),
+    ('tuple.__hash__([])', 'TypeError'),
+    ('range.__hash__(1)', 'TypeError'),
+    ("a=[]\na+=(a,)\nb=[]\nb+=(b,)\na==b", 'RecursionError'),
+    ("a={}\na['self']=a\nb={}\nb['self']=b\na==b", 'RecursionError'),
 ]

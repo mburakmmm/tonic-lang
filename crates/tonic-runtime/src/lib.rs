@@ -7,6 +7,7 @@ mod classes;
 mod dict;
 #[allow(unsafe_code)]
 mod foreign;
+mod hashing;
 mod heap;
 pub mod native;
 mod number;

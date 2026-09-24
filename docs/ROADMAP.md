@@ -99,7 +99,10 @@ sonra alınır.
     - [x] `range`, list/tuple/string/range scalar index, list set/delete, slice
       bileşenleri, `int(..., base=...)` ve `__len__` sonucu için suspending
       `__index__`; bool/native-int normalizasyonu ve precise continuation roots.
-    - [ ] `__hash__` protokolü ve container içi suspending element comparison.
+    - [x] `hash`/`object.__hash__`, suspending `__hash__`, `__eq__` tanımlayan
+      sınıflarda implicit unhashable kuralı; collision-aware dict lookup/mutation/
+      constructor/merge ve list/tuple/dict/slice içi suspending equality ile
+      lexicographic sequence comparison, precise roots ve JIT exact-PC deopt.
 - [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/

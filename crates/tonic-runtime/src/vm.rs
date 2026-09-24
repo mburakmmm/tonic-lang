@@ -635,7 +635,65 @@ enum ReturnAction {
     UnaryProtocol(UnaryProtocol),
     NumericConversion(NumericConversion),
     IndexConversion(IndexConversion),
+    Hash(HashAction),
     Setter,
+}
+#[derive(Clone)]
+pub(super) enum HashAction {
+    Return,
+    Dict(DictOperationStart),
+    Sequence {
+        values: Vec<Value>,
+        next: usize,
+        accumulator: i64,
+        depth: usize,
+        outer: Box<HashAction>,
+    },
+}
+#[derive(Clone)]
+pub(super) enum DictOperationKind {
+    Get,
+    Set(Value),
+    SetAndContinue {
+        value: Value,
+        state: Box<DictConstruction>,
+    },
+    SetAndMerge {
+        value: Value,
+        state: Box<DictMergeState>,
+    },
+    Delete,
+    CompareValue {
+        expected: Value,
+        action: Box<EqualityAction>,
+    },
+}
+#[derive(Clone)]
+pub(super) struct DictOperationStart {
+    owner: Value,
+    key: Value,
+    kind: DictOperationKind,
+}
+#[derive(Clone)]
+pub(super) struct DictOperation {
+    start: DictOperationStart,
+    hash: i64,
+    version: u64,
+    candidates: Vec<usize>,
+    next: usize,
+    comparison_depth: usize,
+}
+#[derive(Clone)]
+pub(super) enum DictMergeFinish {
+    Preserve,
+    Construction(DictConstructionStart),
+}
+#[derive(Clone)]
+pub(super) struct DictMergeState {
+    target: Value,
+    entries: Vec<(Value, Value)>,
+    next: usize,
+    finish: DictMergeFinish,
 }
 #[derive(Clone, Copy)]
 pub(super) struct BinaryCandidate {
@@ -651,6 +709,48 @@ pub(super) struct BinaryProtocol {
     candidates: Vec<BinaryCandidate>,
     next: usize,
     negate_result: bool,
+    completion: BinaryCompletion,
+}
+#[derive(Clone)]
+pub(super) enum BinaryCompletion {
+    Value,
+    Equality(EqualityAction),
+}
+#[derive(Clone)]
+pub(super) enum EqualityAction {
+    Return {
+        negate: bool,
+    },
+    Sequence {
+        left: Vec<Value>,
+        right: Vec<Value>,
+        next: usize,
+        depth: usize,
+        outer: Box<EqualityAction>,
+    },
+    DictCandidate {
+        state: DictOperation,
+        index: usize,
+    },
+    DictEntries {
+        left: Value,
+        right: Value,
+        entries: Vec<(Value, Value)>,
+        next: usize,
+        left_version: u64,
+        right_version: u64,
+        depth: usize,
+        outer: Box<EqualityAction>,
+    },
+    SequenceOrder(SequenceOrder),
+}
+#[derive(Clone)]
+pub(super) struct SequenceOrder {
+    left: Vec<Value>,
+    right: Vec<Value>,
+    index: usize,
+    op: Op,
+    depth: usize,
 }
 #[derive(Clone, Copy)]
 pub(super) enum UnaryProtocolKind {
@@ -775,7 +875,7 @@ enum TruthProtocol {
     Bool,
     Length,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum TruthAction {
     Not,
     Return,
@@ -785,6 +885,7 @@ pub(super) enum TruthAction {
         pc: usize,
         original: Value,
     },
+    Equality(EqualityAction),
 }
 struct SetNameCall {
     call: DescriptorCall,
@@ -957,6 +1058,7 @@ impl ReturnAction {
                     candidate.call.receiver.iter().copied().for_each(&mut visit);
                     visit(candidate.argument);
                 }
+                state.completion.trace(&mut visit);
             }
             Self::UnaryProtocol(state) => visit(state.value),
             Self::NumericConversion(state) => {
@@ -965,6 +1067,7 @@ impl ReturnAction {
                 }
             }
             Self::IndexConversion(state) => state.continuation.trace(visit),
+            Self::Hash(action) => action.trace(visit),
             Self::NamespaceLookup {
                 cell: Some(cell), ..
             } => visit(*cell),
@@ -979,14 +1082,7 @@ impl ReturnAction {
             | Self::DictPairStart(state)
             | Self::DictPairIteratorStart(state) => state.trace(visit),
             Self::DictPairNext(state) => state.trace(visit),
-            Self::Truth {
-                action: TruthAction::Jump { original, .. },
-                ..
-            } => visit(*original),
-            Self::Truth {
-                action: TruthAction::Not | TruthAction::Return,
-                ..
-            } => {}
+            Self::Truth { action, .. } => action.trace(visit),
             Self::Initializer(v) | Self::MetaclassInit(v) => visit(*v),
             Self::New { class, arguments } => {
                 visit(*class);
@@ -1029,6 +1125,120 @@ impl ReturnAction {
         count
     }
 }
+impl HashAction {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Return => {}
+            Self::Dict(state) => state.trace(visit),
+            Self::Sequence { values, outer, .. } => {
+                values.iter().copied().for_each(&mut visit);
+                outer.trace(visit);
+            }
+        }
+    }
+}
+impl DictOperationStart {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.owner);
+        visit(self.key);
+        match &self.kind {
+            DictOperationKind::Get | DictOperationKind::Delete => {}
+            DictOperationKind::Set(value) => visit(*value),
+            DictOperationKind::SetAndContinue { value, state } => {
+                visit(*value);
+                state.trace(visit);
+            }
+            DictOperationKind::SetAndMerge { value, state } => {
+                visit(*value);
+                state.trace(visit);
+            }
+            DictOperationKind::CompareValue { expected, action } => {
+                visit(*expected);
+                action.trace(visit);
+            }
+        }
+    }
+}
+impl DictOperation {
+    fn trace(&self, visit: impl FnMut(Value)) {
+        self.start.trace(visit);
+    }
+}
+impl DictMergeState {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.target);
+        self.entries.iter().for_each(|(key, value)| {
+            visit(*key);
+            visit(*value);
+        });
+        if let DictMergeFinish::Construction(state) = &self.finish {
+            state.trace(visit);
+        }
+    }
+}
+impl EqualityAction {
+    fn comparison_depth(&self) -> usize {
+        match self {
+            Self::Return { .. } => 0,
+            Self::Sequence { depth, .. } => *depth,
+            Self::DictCandidate { state, .. } => state.comparison_depth,
+            Self::DictEntries { depth, .. } => *depth,
+            Self::SequenceOrder(state) => state.depth,
+        }
+    }
+
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Return { .. } => {}
+            Self::Sequence {
+                left, right, outer, ..
+            } => {
+                left.iter().chain(right).copied().for_each(&mut visit);
+                outer.trace(visit);
+            }
+            Self::DictCandidate { state, .. } => state.trace(visit),
+            Self::DictEntries {
+                left,
+                right,
+                entries,
+                outer,
+                ..
+            } => {
+                visit(*left);
+                visit(*right);
+                entries.iter().for_each(|(key, value)| {
+                    visit(*key);
+                    visit(*value);
+                });
+                outer.trace(visit);
+            }
+            Self::SequenceOrder(state) => {
+                state
+                    .left
+                    .iter()
+                    .chain(&state.right)
+                    .copied()
+                    .for_each(visit);
+            }
+        }
+    }
+}
+impl BinaryCompletion {
+    fn trace(&self, visit: impl FnMut(Value)) {
+        if let Self::Equality(action) = self {
+            action.trace(visit);
+        }
+    }
+}
+impl TruthAction {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Not | Self::Return => {}
+            Self::Jump { original, .. } => visit(*original),
+            Self::Equality(action) => action.trace(visit),
+        }
+    }
+}
 impl NativeSubclassFinish {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         visit(self.class);
@@ -1041,8 +1251,7 @@ impl IndexContinuation {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
             Self::Length => {}
-            Self::Truth(TruthAction::Jump { original, .. }) => visit(*original),
-            Self::Truth(TruthAction::Not | TruthAction::Return) => {}
+            Self::Truth(action) => action.trace(visit),
             Self::Range(state) => state.values[..state.count].iter().copied().for_each(visit),
             Self::IntBase(state) => {
                 visit(state.argument);
@@ -1185,6 +1394,7 @@ impl Vm {
         for (name, builtin) in [
             ("print", Builtin::Print),
             ("len", Builtin::Len),
+            ("hash", Builtin::Hash),
             ("abs", Builtin::Abs),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
@@ -1205,6 +1415,7 @@ impl Vm {
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
         let object_init = vm.heap.alloc(Object::Builtin(Builtin::ObjectInit))?;
+        let object_hash = vm.heap.alloc(Object::Builtin(Builtin::ObjectHash))?;
         let object_getattribute = vm
             .heap
             .alloc(Object::Builtin(Builtin::ObjectGetAttribute))?;
@@ -1217,6 +1428,7 @@ impl Vm {
         vm.object_class = vm.heap.root_object_class(
             object_new,
             object_init,
+            object_hash,
             object_getattribute,
             object_setattr,
             object_delattr,
@@ -1374,6 +1586,20 @@ impl Vm {
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, name, value)?;
+        }
+        for (class, builtin) in [
+            (vm.runtime_types.int, Builtin::IntHash),
+            (vm.runtime_types.bool_, Builtin::IntHash),
+            (vm.runtime_types.float, Builtin::FloatHash),
+            (vm.runtime_types.str_, Builtin::StrHash),
+            (vm.runtime_types.tuple, Builtin::TupleHash),
+            (vm.runtime_types.range, Builtin::RangeHash),
+        ] {
+            let value = vm.heap.alloc(Object::Builtin(builtin))?;
+            vm.heap.set_attr(class, "__hash__", value)?;
+        }
+        for class in [vm.runtime_types.list, vm.runtime_types.dict] {
+            vm.heap.set_attr(class, "__hash__", Value::NONE)?;
         }
         vm.builtins.push(("object".into(), vm.object_class));
         vm.builtins.push(("type".into(), vm.type_class));
@@ -2529,9 +2755,9 @@ impl Vm {
                     self.cells.truncate(unwind.1);
                     self.arguments.truncate(unwind.2);
                     self.pending_classes.truncate(unwind.3);
-                    let result = self.finish_dict_pair(state).and_then(|outer| {
-                        self.continue_dict_construction(program, destination, outer, output)
-                    });
+                    let result = self
+                        .finish_dict_pair(program, destination, state, output)
+                        .map(|_| ());
                     if let Err(error) = result {
                         let caller = self.frames.last().ok_or_else(|| {
                             Diagnostic::new("BytecodeError", "dict pair lost caller frame")
@@ -2836,8 +3062,19 @@ impl Vm {
                         let right = self.read(c)?;
                         if let Some(state) = self.binary_protocol(op, left, right)? {
                             self.continue_binary_protocol(p, a, state, output)?;
+                        } else if matches!(op, Op::Eq | Op::Ne) {
+                            self.invoke_equality(
+                                p,
+                                left,
+                                right,
+                                a,
+                                EqualityAction::Return {
+                                    negate: op == Op::Ne,
+                                },
+                                output,
+                            )?;
                         } else {
-                            self.registers[a] = self.heap.compare(op, left, right)?;
+                            self.invoke_order_comparison(p, left, right, a, (op, 0), output)?;
                         }
                     }
                     Op::Neg | Op::Pos | Op::Invert => {
@@ -2908,10 +3145,11 @@ impl Vm {
                         let mut dict_pair_iterator_start = None;
                         let mut dict_pair_next = None;
                         let mut binary_protocol = None;
-                        let mut binary_negate = false;
+                        let mut binary_result = None;
                         let mut unary_protocol = None;
                         let mut numeric_conversion = None;
                         let mut index_conversion = None;
+                        let mut hash_action = None;
                         let mut length_result = None;
                         match frame.action {
                             ReturnAction::Value => {}
@@ -3014,7 +3252,7 @@ impl Vm {
                                 if value == Value::NOT_IMPLEMENTED {
                                     binary_protocol = Some(state);
                                 } else {
-                                    binary_negate = state.negate_result;
+                                    binary_result = Some((state.negate_result, state.completion));
                                 }
                             }
                             ReturnAction::UnaryProtocol(state) => {
@@ -3028,6 +3266,7 @@ impl Vm {
                             ReturnAction::IndexConversion(state) => {
                                 index_conversion = Some(state);
                             }
+                            ReturnAction::Hash(action) => hash_action = Some(action),
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -3049,10 +3288,11 @@ impl Vm {
                             || dict_pair_iterator_start.is_some()
                             || dict_pair_next.is_some()
                             || binary_protocol.is_some()
-                            || binary_negate
+                            || binary_result.is_some()
                             || unary_protocol.is_some()
                             || numeric_conversion.is_some()
                             || index_conversion.is_some()
+                            || hash_action.is_some()
                             || length_result.is_some();
                         if let Some(dest) = frame.destination {
                             self.registers[dest] = value;
@@ -3060,8 +3300,10 @@ impl Vm {
                                 self.finish_truth(p, dest, value, protocol, action, output)?;
                             } else if let Some(value) = length_result {
                                 self.finish_length(p, dest, value, output)?;
-                            } else if binary_negate {
-                                self.invoke_truth(p, value, dest, TruthAction::Not, output)?;
+                            } else if let Some((negate, completion)) = binary_result {
+                                self.finish_binary_protocol_value(
+                                    p, dest, value, negate, completion, output,
+                                )?;
                             } else if let Some(state) = unary_protocol {
                                 self.registers[dest] =
                                     self.unary_fallback(state.kind, state.value)?;
@@ -3069,6 +3311,8 @@ impl Vm {
                                 self.finish_numeric_conversion(p, dest, value, state, output)?;
                             } else if let Some(state) = index_conversion {
                                 self.finish_index_conversion(p, dest, value, state, output)?;
+                            } else if let Some(action) = hash_action {
+                                self.finish_hash_result(p, dest, value, action, output)?;
                             } else if let Some((class, arguments)) = finish_new {
                                 self.finish_new(p, dest, class, value, arguments, output)?;
                             } else if let Some((build, mapping)) = class_prepare {
@@ -3598,7 +3842,16 @@ impl Vm {
                             }
                         } else {
                             let storage = self.heap.native_value(owner);
-                            if matches!(self.heap.get(storage)?, Object::List(_)) {
+                            if matches!(self.heap.get(storage)?, Object::Dict(_)) {
+                                self.invoke_dict_operation(
+                                    p,
+                                    owner,
+                                    key,
+                                    a,
+                                    DictOperationKind::Set(value),
+                                    output,
+                                )?;
+                            } else if matches!(self.heap.get(storage)?, Object::List(_)) {
                                 self.invoke_index_conversion(
                                     p,
                                     key,
@@ -3635,7 +3888,16 @@ impl Vm {
                             }
                         } else {
                             let storage = self.heap.native_value(owner);
-                            if matches!(self.heap.get(storage)?, Object::List(_)) {
+                            if matches!(self.heap.get(storage)?, Object::Dict(_)) {
+                                self.invoke_dict_operation(
+                                    p,
+                                    owner,
+                                    key,
+                                    a,
+                                    DictOperationKind::Delete,
+                                    output,
+                                )?;
+                            } else if matches!(self.heap.get(storage)?, Object::List(_)) {
                                 self.invoke_index_conversion(
                                     p,
                                     key,
@@ -3648,7 +3910,14 @@ impl Vm {
                             }
                         }
                     }
-                    Op::DictMerge => self.heap.dict_merge(self.read(a)?, self.read(b)?)?,
+                    Op::DictMerge => self.invoke_dict_merge(
+                        p,
+                        a,
+                        self.read(a)?,
+                        self.read(b)?,
+                        DictMergeFinish::Preserve,
+                        output,
+                    )?,
                     Op::Tuple | Op::List => {
                         let end = b + i.c as usize;
                         for n in b..end {
@@ -3678,6 +3947,17 @@ impl Vm {
                             )?;
                         } else {
                             let storage = self.heap.native_value(owner);
+                            if matches!(self.heap.get(storage)?, Object::Dict(_)) {
+                                self.invoke_dict_operation(
+                                    p,
+                                    owner,
+                                    key,
+                                    a,
+                                    DictOperationKind::Get,
+                                    output,
+                                )?;
+                                return Ok(());
+                            }
                             let sequence = matches!(
                                 self.heap.get(storage)?,
                                 Object::Tuple(_)

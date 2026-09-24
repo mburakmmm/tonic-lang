@@ -173,6 +173,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__rrshift__"
                 | "__irshift__"
                 | "__eq__"
+                | "__hash__"
                 | "__ne__"
                 | "__lt__"
                 | "__le__"
@@ -209,6 +210,7 @@ impl Heap {
         &mut self,
         object_new: Value,
         object_init: Value,
+        object_hash: Value,
         object_getattribute: Value,
         object_setattr: Value,
         object_delattr: Value,
@@ -216,6 +218,7 @@ impl Heap {
         let value = self.namespace("object", Vec::new())?;
         self.namespace_set(value, "__new__", object_new)?;
         self.namespace_set(value, "__init__", object_init)?;
+        self.namespace_set(value, "__hash__", object_hash)?;
         self.namespace_set(value, "__getattribute__", object_getattribute)?;
         self.namespace_set(value, "__setattr__", object_setattr)?;
         self.namespace_set(value, "__delattr__", object_delattr)?;
@@ -624,6 +627,11 @@ impl Heap {
                 let wrapper = self.alloc(Object::StaticMethod(function))?;
                 self.namespace_set(namespace, "__new__", wrapper)?;
             }
+        }
+        if self.namespace_get(namespace, "__eq__")?.is_some()
+            && self.namespace_get(namespace, "__hash__")?.is_none()
+        {
+            self.namespace_set(namespace, "__hash__", Value::NONE)?;
         }
         let Object::Namespace(c) = self.get(namespace)? else {
             return Err(Diagnostic::new("BytecodeError", "invalid class completion"));
@@ -1260,6 +1268,12 @@ impl Heap {
                 | Builtin::TypeSetAttr
                 | Builtin::TypeDelAttr
                 | Builtin::ObjectInit
+                | Builtin::ObjectHash
+                | Builtin::IntHash
+                | Builtin::FloatHash
+                | Builtin::StrHash
+                | Builtin::TupleHash
+                | Builtin::RangeHash
                 | Builtin::ListInit
                 | Builtin::DictInit,
             )) => DescriptorCall {
@@ -1714,6 +1728,7 @@ mod tests {
         let mut heap = Heap::default();
         let object_new = heap.alloc(Object::Builtin(Builtin::ObjectNew)).unwrap();
         let object_init = heap.alloc(Object::Builtin(Builtin::ObjectInit)).unwrap();
+        let object_hash = heap.alloc(Object::Builtin(Builtin::ObjectHash)).unwrap();
         let object_getattribute = heap
             .alloc(Object::Builtin(Builtin::ObjectGetAttribute))
             .unwrap();
@@ -1723,6 +1738,7 @@ mod tests {
             .root_object_class(
                 object_new,
                 object_init,
+                object_hash,
                 object_getattribute,
                 object_setattr,
                 object_delattr,

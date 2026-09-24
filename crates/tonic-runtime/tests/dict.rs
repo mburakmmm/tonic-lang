@@ -2,10 +2,9 @@ use tonic_compiler::compile;
 use tonic_runtime::Vm;
 fn output(s: &str) -> String {
     let mut out = Vec::new();
-    Vm::new()
-        .unwrap()
-        .run(&compile(s, "dict").unwrap(), &mut out)
-        .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    vm.run(&compile(s, "dict").unwrap(), &mut out).unwrap();
     String::from_utf8(out).unwrap()
 }
 #[test]
@@ -73,4 +72,61 @@ fn literal_group_expressions_run_before_hash_errors() {
         );
         assert_eq!(out, b"1\n2\n");
     }
+}
+
+#[test]
+fn custom_hash_and_collision_equality_suspend_for_dictionary_operations() {
+    assert_eq!(
+        output(
+            r#"class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value
+class Key:
+    def __init__(self,value): self.value=value
+    def __hash__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return 7
+    def __eq__(self,other): return Truth(self.value==other.value)
+a=Key(1); same=Key(1); other=Key(2)
+d={a:'first'}
+print(d[same],len(d))
+d[same]='updated'
+d[other]='other'
+print(d[a],d[other],len(d))
+del d[same]
+print(d[other],len(d))
+print({Key(4):Key(5)}=={Key(4):Key(5)})
+print({Key(4):Key(5)}!={Key(4):Key(6)})
+built=dict([(Key(8),'eight')])
+print(built[Key(8)])
+copied=dict({Key(9):'nine'})
+unpacked={**{Key(10):'ten'}}
+print(copied[Key(9)],unpacked[Key(10)])
+initialized={}
+dict.__init__(initialized,{Key(11):'eleven'},named='keyword')
+print(initialized[Key(11)],initialized['named'])
+class One:
+    def __hash__(self): return hash(1)
+    def __eq__(self,other): return other==1
+print({1:'integer'}[One()])"#,
+        ),
+        "first 1\nupdated other 2\nother 1\nTrue\nTrue\neight\nnine ten\neleven keyword\ninteger\n"
+    );
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile(
+                "a={}\na['self']=a\nb={}\nb['self']=b\nprint(a==b)",
+                "cyclic-dict-comparison",
+            )
+            .unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "RecursionError");
 }
