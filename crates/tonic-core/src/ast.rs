@@ -13,6 +13,15 @@ pub struct Stmt {
     pub span: Span,
 }
 #[derive(Clone, Debug)]
+pub struct ImportAlias {
+    /// Increasing absolute module prefixes (`a`, `a.b`, `a.b.c`).
+    pub modules: Vec<SymbolId>,
+    pub bound: SymbolId,
+    /// An explicit alias binds the leaf module; otherwise Python binds the
+    /// top-level package for a dotted import.
+    pub bind_leaf: bool,
+}
+#[derive(Clone, Debug)]
 pub enum StmtKind {
     Assign(Vec<Target>, Expr),
     AugAssign(Target, BinaryOp, Expr),
@@ -53,7 +62,12 @@ pub enum StmtKind {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>, Vec<Stmt>),
     For(Target, Expr, Vec<Stmt>, Vec<Stmt>),
-    Import(Vec<(SymbolId, SymbolId)>),
+    Import(Vec<ImportAlias>),
+    ImportFrom {
+        /// Increasing absolute module prefixes, ending in the source module.
+        modules: Vec<SymbolId>,
+        names: Vec<(SymbolId, SymbolId)>,
+    },
     Global(Vec<SymbolId>),
     Nonlocal(Vec<SymbolId>),
     Break,

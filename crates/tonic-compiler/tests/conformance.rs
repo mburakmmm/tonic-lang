@@ -1,4 +1,4 @@
-use tonic_compiler::{compile, parse};
+use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
     ast::{ExprKind, StmtKind},
     bytecode::Op,
@@ -36,6 +36,7 @@ fn valid_python_forms() {
         "del object.attr",
         "class Meta(type):\n    pass\nclass X(metaclass=Meta):\n    pass",
         "def fail():\n    raise ValueError('boom')",
+        "import package.child\nimport package.child as child\nfrom package import value as answer",
     ] {
         compile(src, "x").unwrap();
     }
@@ -154,6 +155,8 @@ fn unsupported_syntax_is_explicit() {
         "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",
         "del x",
+        "from . import sibling",
+        "from package import *",
     ] {
         let e = compile(src, "x").unwrap_err();
         assert_eq!(e.kind, "UnsupportedSyntax", "{src}");
@@ -291,4 +294,50 @@ fn lambda_has_own_scope_span_and_function_bytecode() {
     let class_lambda = compile("class C:\n    f=lambda: __class__", "class-cell").unwrap();
     assert_eq!(class_lambda.program().code[1].cell_locals.len(), 1);
     assert_eq!(class_lambda.program().code[2].free_vars.len(), 1);
+}
+
+#[test]
+fn module_graph_links_symbols_code_and_nested_import_discovery() {
+    assert_eq!(
+        discover_imports(
+            "import first\nif True:\n    import package.second\ndef later():\n    from package import helper",
+            "main.tonic",
+        )
+        .unwrap(),
+        ["first", "package", "package.second", "package.helper"]
+    );
+    let linked = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import helper\nprint(helper.answer())",
+            ),
+            ModuleSource::new(
+                "helper",
+                "helper.tonic",
+                "value=40\ndef answer():\n    return value+2",
+            ),
+        ],
+    )
+    .unwrap();
+    let program = linked.program();
+    assert_eq!(program.modules.len(), 2);
+    assert_eq!(program.modules[0].code, 0);
+    assert!(program.modules[1].code > 0);
+    let helper_entry = usize::from(program.modules[1].code);
+    let child = program.code[helper_entry]
+        .functions
+        .first()
+        .expect("helper function site");
+    assert!(child.code > program.modules[1].code);
+    assert!(program.symbols.iter().any(|symbol| symbol == "helper"));
+    assert!(program.symbols.iter().any(|symbol| symbol == "value"));
+
+    let from = compile("from helper import answer as result", "from.tonic").unwrap();
+    assert!(from.program().code[0]
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ImportFrom as u16));
 }

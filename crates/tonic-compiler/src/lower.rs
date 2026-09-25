@@ -14,11 +14,18 @@ fn limit() -> Diagnostic {
 fn index(n: usize) -> Result<u16> {
     u16::try_from(n).map_err(|_| limit())
 }
-pub fn compile(module: Module) -> Result<Program> {
+pub fn compile(module: Module, name: &str, filename: &str) -> Result<Program> {
     let mut program = Program {
         version: BYTECODE_VERSION,
         symbols: module.symbols,
         code: Vec::new(),
+        modules: vec![ModuleInfo {
+            name: name.to_owned(),
+            filename: filename.to_owned(),
+            code: 0,
+            code_count: 0,
+            globals: Vec::new(),
+        }],
     };
     let scope = Scope::resolve(
         &Parameters::default(),
@@ -33,6 +40,11 @@ pub fn compile(module: Module) -> Result<Program> {
         &module.body,
         scope,
     )?;
+    program.modules[0].code_count = index(program.code.len())?;
+    program.modules[0].globals = (0..program.symbols.len())
+        .map(index)
+        .map(|result| result.map(SymbolId))
+        .collect::<Result<_>>()?;
     Ok(program)
 }
 fn build(
@@ -95,7 +107,8 @@ fn build(
             .first()
             .map(|statement| statement.span)
             .unwrap_or_default();
-        let module = lower.constant(Constant::Str("__main__".into()), span)?;
+        let module_name = lower.program.modules[0].name.clone();
+        let module = lower.constant(Constant::Str(module_name), span)?;
         let qualname = lower.constant(Constant::Str(lower.code.name.clone()), span)?;
         let doc = lower.constant(Constant::None, span)?;
         for (name, value) in [
@@ -860,9 +873,37 @@ impl Lower<'_> {
                 self.emit(Op::Jump, start, 0, 0, s)?;
             }
             StmtKind::Import(names) => {
-                for (module, bound) in names {
+                for alias in names {
+                    let mut first = None;
+                    let mut leaf = None;
+                    for module in &alias.modules {
+                        let r = self.alloc(1)?;
+                        self.emit(Op::Import, r, module.0, 0, s)?;
+                        first.get_or_insert(r);
+                        leaf = Some(r);
+                    }
+                    self.store(
+                        alias.bound,
+                        if alias.bind_leaf {
+                            leaf.expect("import has a module")
+                        } else {
+                            first.expect("import has a module")
+                        },
+                        s,
+                    )?;
+                }
+            }
+            StmtKind::ImportFrom { modules, names } => {
+                let mut module_register = None;
+                for module in modules {
                     let r = self.alloc(1)?;
                     self.emit(Op::Import, r, module.0, 0, s)?;
+                    module_register = Some(r);
+                }
+                let module_register = module_register.expect("from import has a module");
+                for (name, bound) in names {
+                    let r = self.alloc(1)?;
+                    self.emit(Op::ImportFrom, r, module_register, name.0, s)?;
                     self.store(*bound, r, s)?;
                 }
             }

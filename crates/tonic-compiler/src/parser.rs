@@ -9,10 +9,9 @@ use tonic_core::{
 
 pub fn parse(source: &str, filename: &str) -> Result<Module> {
     if source.len() > 1_048_576 {
-        return Err(Diagnostic::new(
-            "ResourceError",
-            "bootstrap source limit is 1 MiB",
-        ));
+        return Err(
+            Diagnostic::new("ResourceError", "bootstrap source limit is 1 MiB").in_file(filename),
+        );
     }
     // BOOTSTRAP: bound recursive parser/AST lowering and destruction depth.
     // Logical lines include bracket continuations; large flat modules remain valid.
@@ -36,6 +35,7 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
                 "ResourceError",
                 "bootstrap syntax complexity limit exceeded",
             )
+            .in_file(filename)
             .at(Span {
                 start: range.start().into(),
                 end: range.end().into(),
@@ -44,7 +44,9 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
     }
     let suite = py::Suite::parse(source, filename).map_err(|e| {
         let start = u32::from(e.offset);
-        Diagnostic::new("SyntaxError", e.error.to_string()).at(Span { start, end: start })
+        Diagnostic::new("SyntaxError", e.error.to_string())
+            .in_file(filename)
+            .at(Span { start, end: start })
     })?;
     let mut adapter = Adapter {
         symbols: Vec::new(),
@@ -52,7 +54,9 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
         depth: 0,
         class_name: None,
     };
-    let body = adapter.block(suite)?;
+    let body = adapter
+        .block(suite)
+        .map_err(|error| error.in_file(filename))?;
     Ok(Module {
         body,
         symbols: adapter.symbols,
@@ -306,15 +310,40 @@ impl Adapter {
             py::Stmt::Import(i) => {
                 let mut names = Vec::new();
                 for alias in i.names {
-                    if alias.name.as_str().contains('.') {
-                        return Err(unsupported(s, "dotted imports"));
-                    }
-                    let module = self.symbol(alias.name.as_str())?;
-                    let bound =
-                        self.symbol(alias.asname.as_ref().unwrap_or(&alias.name).as_str())?;
-                    names.push((module, bound));
+                    let modules = self.module_prefixes(alias.name.as_str())?;
+                    let explicit_alias = alias.asname.is_some();
+                    let bound_name = alias.asname.as_ref().map_or_else(
+                        || alias.name.as_str().split('.').next().unwrap(),
+                        |n| n.as_str(),
+                    );
+                    names.push(ImportAlias {
+                        modules,
+                        bound: self.symbol(bound_name)?,
+                        bind_leaf: explicit_alias,
+                    });
                 }
                 StmtKind::Import(names)
+            }
+            py::Stmt::ImportFrom(i) => {
+                if i.level.is_some_and(|level| level.to_u32() != 0) {
+                    return Err(unsupported(s, "relative imports"));
+                }
+                let module = i
+                    .module
+                    .as_ref()
+                    .ok_or_else(|| unsupported(s, "relative imports"))?;
+                let modules = self.module_prefixes(module.as_str())?;
+                let mut names = Vec::with_capacity(i.names.len());
+                for alias in i.names {
+                    if alias.name.as_str() == "*" {
+                        return Err(unsupported(s, "star imports"));
+                    }
+                    let name = self.symbol(alias.name.as_str())?;
+                    let bound =
+                        self.symbol(alias.asname.as_ref().unwrap_or(&alias.name).as_str())?;
+                    names.push((name, bound));
+                }
+                StmtKind::ImportFrom { modules, names }
             }
             py::Stmt::Break(_) => StmtKind::Break,
             py::Stmt::Global(g) => StmtKind::Global(
@@ -334,6 +363,21 @@ impl Adapter {
             _ => return Err(unsupported(s, "statement")),
         };
         Ok(Stmt { kind, span: s })
+    }
+    fn module_prefixes(&mut self, name: &str) -> Result<Vec<SymbolId>> {
+        let mut prefixes = Vec::new();
+        let mut prefix = String::new();
+        for component in name.split('.') {
+            if component.is_empty() {
+                return Err(Diagnostic::new("SyntaxError", "empty import component"));
+            }
+            if !prefix.is_empty() {
+                prefix.push('.');
+            }
+            prefix.push_str(component);
+            prefixes.push(self.symbol(&prefix)?);
+        }
+        Ok(prefixes)
     }
     fn parameters(&mut self, args: py::Arguments, s: Span) -> Result<Parameters> {
         let mut params = Parameters {

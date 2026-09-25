@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-24 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+25 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 6, compiler/parser 14, core verifier 9, Cranelift JIT 16, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 15, core verifier 9, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 72, CPython bridge 15 ve HPy manifest 5; toplam 284 test.
+native handles 5, language/runtime 76, CPython bridge 15 ve HPy manifest 5; toplam 292 test.
 
 Differential corpus: 299 stdout vakası ve 147 exception türü vakası. Seed 42.
-Canonical builtin kurucularından sonra debug/release × interpreter/JIT ×
+Kaynak modül bağlayıcısından sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -63,6 +63,11 @@ Instance ve metaclass `__getattribute__`/`__setattr__`/`__delattr__`, canonical
 `object`/`type` delegasyonu, metaclass data/non-data descriptor sırası,
 `AttributeError` sonrası `__getattr__`, `getattr` default, `hasattr`, `delattr`,
 hook rebinding ve JIT/cache bypass engeli stress GC altında kapsanır.
+Kaynak modül testleri `.tonic`/`.py` çözümleme, package init, dotted/from import,
+circular partial state, tek seferlik cache, izole/versioned global, başarısız import
+rollback/retry, doğru imported-file tanısı ve stress GC köklerini kapsar. Import
+edilen hot fonksiyonun Cranelift'e yükseldiği ve `module.attr` değişiminden sonra
+güncel global slotu okuduğu sayaçlarla ayrıca doğrulanır.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython

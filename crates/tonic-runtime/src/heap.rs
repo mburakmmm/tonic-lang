@@ -372,6 +372,10 @@ impl Heap {
         let Object::Module(members) = self.get_mut(owner)? else {
             return Err(Diagnostic::new("TypeError", "expected module"));
         };
+        if let Some((_, current)) = members.iter_mut().find(|(member, _)| member == name) {
+            *current = value;
+            return Ok(());
+        }
         let before = members.capacity() * std::mem::size_of::<(String, Value)>();
         let name = name.to_owned();
         let name_bytes = name.capacity();
@@ -379,6 +383,38 @@ impl Heap {
         self.bytes +=
             members.capacity() * std::mem::size_of::<(String, Value)>() - before + name_bytes;
         self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(())
+    }
+    pub fn delete_module_member(&mut self, owner: Value, name: &str) -> Result<()> {
+        let Object::Module(members) = self.get_mut(owner)? else {
+            return Err(Diagnostic::new("TypeError", "expected module"));
+        };
+        let Some(index) = members.iter().position(|(member, _)| member == name) else {
+            return Err(Diagnostic::new(
+                "AttributeError",
+                format!("module has no attribute '{name}'"),
+            ));
+        };
+        let (removed, _) = members.remove(index);
+        self.bytes = self.bytes.saturating_sub(removed.capacity());
+        Ok(())
+    }
+    pub fn reset_module_members(&mut self, owner: Value) -> Result<()> {
+        let removed_bytes = {
+            let Object::Module(members) = self.get_mut(owner)? else {
+                return Err(Diagnostic::new("TypeError", "expected module"));
+            };
+            let mut removed_bytes = 0;
+            members.retain(|(name, _)| {
+                let retain = matches!(name.as_str(), "__name__" | "__file__");
+                if !retain {
+                    removed_bytes += name.capacity();
+                }
+                retain
+            });
+            removed_bytes
+        };
+        self.bytes = self.bytes.saturating_sub(removed_bytes);
         Ok(())
     }
     pub fn cell(&self, owner: Value) -> Result<Value> {

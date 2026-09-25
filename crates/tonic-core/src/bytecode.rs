@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 13;
+pub const BYTECODE_VERSION: u16 = 14;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -69,6 +69,7 @@ pub enum Op {
     Dict = 56,
     SetItem = 57,
     DictMerge = 58,
+    ImportFrom = 59,
     Import = 60,
     Attr = 61,
     SetAttr = 62,
@@ -152,6 +153,7 @@ impl TryFrom<u16> for Op {
             56 => Self::Dict,
             57 => Self::SetItem,
             58 => Self::DictMerge,
+            59 => Self::ImportFrom,
             60 => Self::Import,
             61 => Self::Attr,
             62 => Self::SetAttr,
@@ -265,6 +267,15 @@ pub struct Program {
     pub version: u16,
     pub symbols: Vec<String>,
     pub code: Vec<CodeObject>,
+    pub modules: Vec<ModuleInfo>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleInfo {
+    pub name: String,
+    pub filename: String,
+    pub code: u16,
+    pub code_count: u16,
+    pub globals: Vec<SymbolId>,
 }
 /// Immutable after validation; execution never accepts unverified instructions.
 #[derive(Clone, Debug)]
@@ -279,17 +290,52 @@ impl Program {
         let bad = |msg| Diagnostic::new("BytecodeError", msg);
         if self.version != BYTECODE_VERSION
             || self.code.is_empty()
+            || self.modules.is_empty()
             || self.code.len() > u16::MAX as usize
             || self.symbols.len() > u16::MAX as usize
         {
             return Err(bad("invalid program header"));
         }
-        if self.code[0].params != 0
-            || self.code[0].class_body
-            || !self.code[0].cell_locals.is_empty()
-            || !self.code[0].free_vars.is_empty()
-        {
-            return Err(bad("module cannot have parameters"));
+        let mut module_names = std::collections::HashSet::new();
+        let mut module_entries = std::collections::HashSet::new();
+        let mut module_globals = std::collections::HashSet::new();
+        for (index, module) in self.modules.iter().enumerate() {
+            if module.name.is_empty()
+                || module.filename.is_empty()
+                || !module_names.insert(module.name.as_str())
+                || !module_entries.insert(module.code)
+                || module.code as usize >= self.code.len()
+                || module.code_count == 0
+                || module.code as usize + module.code_count as usize > self.code.len()
+                || module.globals.iter().any(|symbol| {
+                    symbol.0 as usize >= self.symbols.len() || !module_globals.insert(symbol.0)
+                })
+                || (index == 0 && module.code != 0)
+            {
+                return Err(bad("invalid module table"));
+            }
+            let entry = &self.code[module.code as usize];
+            if entry.params != 0
+                || entry.class_body
+                || !entry.cell_locals.is_empty()
+                || !entry.free_vars.is_empty()
+            {
+                return Err(bad("module cannot have parameters"));
+            }
+        }
+        let mut covered_code = vec![false; self.code.len()];
+        for module in &self.modules {
+            for slot in &mut covered_code
+                [module.code as usize..module.code as usize + module.code_count as usize]
+            {
+                if *slot {
+                    return Err(bad("overlapping module code ranges"));
+                }
+                *slot = true;
+            }
+        }
+        if covered_code.iter().any(|covered| !covered) {
+            return Err(bad("module code ranges do not cover the program"));
         }
         for code in &self.code {
             if code.class_body && code.params != 0 {
@@ -360,7 +406,7 @@ impl Program {
                 }
             }
             for site in &code.functions {
-                if site.code == 0 || site.code as usize >= self.code.len() {
+                if module_entries.contains(&site.code) || site.code as usize >= self.code.len() {
                     return Err(bad("function code out of bounds"));
                 }
                 let child = &self.code[site.code as usize];
@@ -515,6 +561,11 @@ impl Program {
                         if i.c != 0 {
                             return Err(bad("nonzero reserved operand"));
                         }
+                    }
+                    Op::ImportFrom => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        sym(i.c)?;
                     }
                     Op::DelAttr => {
                         reg(i.a)?;

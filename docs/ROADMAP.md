@@ -103,7 +103,15 @@ sonra alınır.
       sınıflarda implicit unhashable kuralı; collision-aware dict lookup/mutation/
       constructor/merge ve list/tuple/dict/slice içi suspending equality ile
       lexicographic sequence comparison, precise roots ve JIT exact-PC deopt.
-- [ ] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
+- [x] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
+  - [x] Bytecode v14 module table, disjoint private global slotları, code/symbol
+    relocation ve verifier sahiplik/aralık kontrolleri.
+  - [x] `.tonic`/`.py` dosya çözümleme, package `__init__`, dotted import,
+    `from ... import ...`, parent-child bağlama ve doğru imported-file tanısı.
+  - [x] Tembel module object, tek seferlik/circular yükleme, başarısız import
+    rollback/retry ve checked module version güncellemeleri.
+  - [x] Import edilen hot fonksiyonlarda Cranelift yürütme ve module attribute
+    mutation sonrasında güncel global slot okuması.
 - [x] Exception objects/handlers/traceback state, try/raise/finally/with.
   - [x] Canonical BaseException/Exception/TypeError/ValueError/RuntimeError/
     StopIteration type nesneleri, managed exception instance'ı, user subclass,

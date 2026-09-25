@@ -11,6 +11,7 @@ pub struct Span {
 pub struct Diagnostic {
     pub kind: String,
     pub message: String,
+    pub filename: Option<String>,
     pub span: Option<Span>,
     pub trace: Vec<(String, Span)>,
 }
@@ -19,12 +20,17 @@ impl Diagnostic {
         Self {
             kind: kind.into(),
             message: message.into(),
+            filename: None,
             span: None,
             trace: Vec::new(),
         }
     }
     pub fn at(mut self, span: Span) -> Self {
         self.span = Some(span);
+        self
+    }
+    pub fn in_file(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
         self
     }
     pub fn render(&self, filename: &str, source: &str) -> String {

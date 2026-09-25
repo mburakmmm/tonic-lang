@@ -1,9 +1,20 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 fn tonic(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tonic"))
         .args(args)
         .output()
         .unwrap()
+}
+fn temp_project() -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "tonic-module-test-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }
 #[test]
 fn execute_file() {
@@ -109,4 +120,80 @@ fn jit_executes_leaf_loops_and_deoptimizes_to_the_interpreter() {
     assert!(fuel.status.success());
     assert_eq!(fuel.stdout, b"4950\n");
     assert!(String::from_utf8_lossy(&fuel.stderr).contains("jit_calls: 0"));
+}
+
+#[test]
+fn file_execution_resolves_tonic_and_python_source_modules() {
+    let project = temp_project();
+    std::fs::write(
+        project.join("main.tonic"),
+        "import alpha\nimport alpha\nprint(alpha.answer(),alpha.from_beta)",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("alpha.tonic"),
+        "print('load-alpha')\nvalue=40\nimport beta\nfrom_beta=beta.seen\ndef answer(): return value+2",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("beta.py"),
+        "print('load-beta')\nimport alpha\nseen=alpha.value",
+    )
+    .unwrap();
+    let main = project.join("main.tonic");
+    let out = tonic(&[main.to_str().unwrap()]);
+    std::fs::remove_dir_all(project).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"load-alpha\nload-beta\n42 40\n");
+}
+
+#[test]
+fn file_execution_resolves_packages_dotted_and_from_imports() {
+    let project = temp_project();
+    std::fs::create_dir(project.join("package")).unwrap();
+    std::fs::write(
+        project.join("main.tonic"),
+        "from package import child as first\nfrom package import answer\nimport package.child as leaf\nimport package.child\nprint(answer,first.value,leaf.value,package.child.value)",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package/__init__.tonic"),
+        "print('load-package')\nanswer=40",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package/child.py"),
+        "print('load-child')\nvalue=2",
+    )
+    .unwrap();
+    let main = project.join("main.tonic");
+    let out = tonic(&["--jit", main.to_str().unwrap()]);
+    std::fs::remove_dir_all(project).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"load-package\nload-child\n40 2 2 2\n");
+}
+
+#[test]
+fn imported_module_errors_render_the_imported_filename() {
+    let project = temp_project();
+    let main = project.join("main.tonic");
+    let dependency = project.join("dependency.tonic");
+    std::fs::write(&main, "import dependency").unwrap();
+    std::fs::write(&dependency, "value=1//0").unwrap();
+    let out = tonic(&[main.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    std::fs::remove_dir_all(project).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr.contains(&format!("{}:1:", dependency.display())),
+        "{stderr}"
+    );
 }

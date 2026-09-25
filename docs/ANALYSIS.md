@@ -257,6 +257,26 @@ demote veya promote eder. Type/module/function altyapısı, başka runtime proxy
 4.096 düğüm veya 16.384 kenar sınırı conservative retention'a gider. Ayrıntı
 [ADR 0048](adr/0048-cpython-cross-collector-graph-tracing.md) içindedir.
 
+## Kaynak modül dilimi
+
+Genel kaynak modül hattı bytecode v14 ile tek doğrulanmış program içinde birden
+fazla modül taşır. Linker code identity'lerini ve canonical local/attribute
+symbol'lerini paylaşırken global operandları modül başına private slotlara ayırır.
+Bu ayrım mevcut düz register/global dizisi ile Cranelift ABI'sini değiştirmeden
+Python tarzı ad alanı izolasyonu sağlar. Verifier modül code aralıklarını ve global
+sahipliğini trust boundary'de denetler.
+
+CLI giriş dizininden `.tonic`, `.py` ve package `__init__` kaynaklarını çözer;
+dotted import önekleri ile `from` alt modül adaylarını graph'a ekler. Runtime
+module object'leri yalnız gerçekten import edildiğinde ayırır. Böylece circular
+import için `Initializing` nesne kimliği korunurken import kullanmayan tek dosyalı
+programların önceki allocation bütçesi değişmez. Başarısız import kısmi global ve
+parent bağlantılarını geri alır. Global/member mutation tek sınırdan geçer ve
+module version'ı artırır. Import edilen normal fonksiyonlar JIT'e uygundur;
+materialized global slot doğrudan güncellendiği için module attribute rebinding
+native kodda stale değer üretmez. Ayrıntı
+[ADR 0071](adr/0071-source-module-linker-and-loader.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

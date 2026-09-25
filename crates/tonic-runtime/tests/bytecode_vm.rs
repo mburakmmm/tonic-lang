@@ -1,6 +1,6 @@
 use tonic_core::{
     ast::Constant,
-    bytecode::{CallSite, CodeObject, Instr, Op, Program, BYTECODE_VERSION},
+    bytecode::{CallSite, CodeObject, Instr, ModuleInfo, Op, Program, BYTECODE_VERSION},
     diagnostic::Span,
 };
 use tonic_runtime::Vm;
@@ -8,6 +8,13 @@ fn program(instructions: Vec<Instr>) -> Program {
     Program {
         version: BYTECODE_VERSION,
         symbols: vec!["x".into()],
+        modules: vec![ModuleInfo {
+            name: "__main__".into(),
+            filename: "direct".into(),
+            code: 0,
+            code_count: 1,
+            globals: vec![tonic_core::ast::SymbolId(0)],
+        }],
         code: vec![CodeObject {
             class_body: false,
             name: "direct".into(),

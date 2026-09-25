@@ -3,6 +3,13 @@ fn program() -> Program {
     Program {
         version: BYTECODE_VERSION,
         symbols: vec!["x".into()],
+        modules: vec![ModuleInfo {
+            name: "__main__".into(),
+            filename: "test.tonic".into(),
+            code: 0,
+            code_count: 1,
+            globals: vec![tonic_core::ast::SymbolId(0)],
+        }],
         code: vec![CodeObject {
             class_body: false,
             name: "test".into(),
@@ -108,6 +115,12 @@ fn rejects_opcode_operands_and_metadata() {
     let mut p = program();
     p.code[0].instructions[0] = Instr::new(Op::ContextEnter, 0, 1, 2);
     variants.push(p);
+    let mut p = program();
+    p.modules[0].globals.push(tonic_core::ast::SymbolId(0));
+    variants.push(p);
+    let mut p = program();
+    p.code[0].instructions[0] = Instr::new(Op::ImportFrom, 0, 1, 1);
+    variants.push(p);
     for p in variants {
         assert!(p.verify().is_err());
     }
@@ -143,6 +156,7 @@ fn closure_and_signature_metadata() {
     child.locals = vec![SymbolId(0)];
     child.free_vars = vec![SymbolId(0)];
     p.code.extend([parent, child]);
+    p.modules[0].code_count = 3;
     p.clone().verify().unwrap();
 
     let mut variants = Vec::new();
@@ -234,6 +248,7 @@ fn class_namespace_opcodes_and_metadata_are_checked() {
     body.class_body = true;
     body.instructions[0] = Instr::new(Op::LoadName, 0, 0, 0);
     valid.code.push(body);
+    valid.modules[0].code_count = 2;
     valid.clone().verify().unwrap();
     let mut bad = valid.clone();
     bad.code[0].instructions[0] = Instr::new(Op::LoadName, 0, 0, 0);

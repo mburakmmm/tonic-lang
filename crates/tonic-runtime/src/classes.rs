@@ -1529,6 +1529,9 @@ impl Heap {
         attributes.cached_slot(shape, slot)
     }
     pub fn set_attr(&mut self, owner: Value, name: &str, value: Value) -> Result<()> {
+        if matches!(self.get(owner), Ok(Object::Module(_))) {
+            return self.add_module_member(owner, name, value);
+        }
         if let Some(class) = self.get(owner)?.instance_class() {
             if self.class(class)?.root {
                 return Err(missing(name));
@@ -1601,6 +1604,9 @@ impl Heap {
         Ok(())
     }
     pub fn del_attr(&mut self, owner: Value, name: &str) -> Result<()> {
+        if matches!(self.get(owner), Ok(Object::Module(_))) {
+            return self.delete_module_member(owner, name);
+        }
         if let Some(class) = self.get(owner)?.instance_class() {
             if self.class(class)?.root
                 || matches!(

@@ -881,6 +881,10 @@ impl Vm {
         destination: usize,
         output: &mut dyn Write,
     ) -> Result<()> {
+        if self.store_module_attribute(p, owner, name, value)? {
+            self.registers[destination] = Value::NONE;
+            return Ok(());
+        }
         if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
             if let Some(setter) = self.heap.metaclass_property_setter(owner, name)? {
                 return self.invoke_setter_call(
@@ -976,6 +980,10 @@ impl Vm {
         destination: usize,
         output: &mut dyn Write,
     ) -> Result<()> {
+        if self.delete_module_attribute(p, owner, name)? {
+            self.registers[destination] = Value::NONE;
+            return Ok(());
+        }
         if matches!(self.heap.get(owner), Ok(Object::Class(_))) {
             if let Some(deleter) = self.heap.metaclass_property_deleter(owner, name)? {
                 return self.invoke_setter_call(

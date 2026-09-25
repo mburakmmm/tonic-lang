@@ -126,6 +126,17 @@ struct Frame {
     jit_resume: bool,
     jit_expanded_resume_depth: Option<usize>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceModuleState {
+    Uninitialized,
+    Initializing,
+    Loaded,
+}
+struct SourceModuleRuntime {
+    object: Option<Value>,
+    state: SourceModuleState,
+    version: u64,
+}
 enum JitEntry {
     Untried,
     Unsupported,
@@ -636,6 +647,7 @@ enum ReturnAction {
     NumericConversion(NumericConversion),
     IndexConversion(IndexConversion),
     Hash(HashAction),
+    Import(usize),
     Setter,
 }
 #[derive(Clone)]
@@ -1041,6 +1053,7 @@ impl ReturnAction {
             | Self::IteratorNext { .. }
             | Self::ExpandIterableStart(_)
             | Self::Length
+            | Self::Import(_)
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
             Self::CollectIterableStart(kind) => kind.trace(visit),
@@ -1299,6 +1312,10 @@ pub struct Vm {
     pub(crate) handles: HandleTable,
     natives: Vec<NativeDef>,
     modules: HashMap<String, Value>,
+    source_modules: Vec<SourceModuleRuntime>,
+    source_module_names: HashMap<String, usize>,
+    global_owners: Vec<Option<usize>>,
+    global_defined: Vec<bool>,
     builtins: Vec<(String, Value)>,
     globals: Vec<Value>,
     constants: Vec<Vec<Value>>,
@@ -1356,6 +1373,10 @@ impl Vm {
             handles: HandleTable::default(),
             natives: Vec::new(),
             modules: HashMap::new(),
+            source_modules: Vec::new(),
+            source_module_names: HashMap::new(),
+            global_owners: Vec::new(),
+            global_defined: Vec::new(),
             builtins: Vec::new(),
             globals: Vec::new(),
             constants: Vec::new(),
@@ -1758,6 +1779,7 @@ impl Vm {
                 let span = code.spans[pc];
                 if error.span.is_none() {
                     error.span = Some(span);
+                    error.filename = Some(module_filename(&program, frame.code).to_owned());
                 }
                 error.trace.push((code.name.clone(), span));
             }
@@ -1907,6 +1929,10 @@ impl Vm {
         self.jit_roots.clear();
         self.jit_cache.clear();
         self.active_program = None;
+        self.source_modules.clear();
+        self.source_module_names.clear();
+        self.global_owners.clear();
+        self.global_defined.clear();
         self.modules.clear();
         self.builtins.clear();
         self.natives.clear();
@@ -1969,6 +1995,11 @@ impl Vm {
             roots.extend_from_slice(constants);
         }
         roots.extend(self.modules.values().copied());
+        roots.extend(
+            self.source_modules
+                .iter()
+                .filter_map(|module| module.object),
+        );
         roots.extend(self.builtins.iter().map(|(_, v)| *v));
         roots.extend(self.runtime_types.roots());
         roots.extend(self.pending_exception);
@@ -2118,6 +2149,11 @@ impl Vm {
             + self.globals.len()
             + self.constants.iter().map(Vec::len).sum::<usize>()
             + self.modules.len()
+            + self
+                .source_modules
+                .iter()
+                .filter(|module| module.object.is_some())
+                .count()
             + self.builtins.len()
             + self.runtime_types.roots().len()
             + self
@@ -2175,6 +2211,10 @@ impl Vm {
         self.pending_exception = None;
         self.constants.clear();
         self.globals.clear();
+        self.source_modules.clear();
+        self.source_module_names.clear();
+        self.global_owners.clear();
+        self.global_defined.clear();
         self.jit_cache = (0..program.code.len()).map(|_| JitEntry::Untried).collect();
         self.jit_code_budget_used = 0;
         self.jit_hotness = vec![0; program.code.len()];
@@ -2229,6 +2269,46 @@ impl Vm {
                     .unwrap_or(Value::UNBOUND),
             );
         }
+        self.global_owners.resize(program.symbols.len(), None);
+        self.global_defined.resize(program.symbols.len(), false);
+        for (module_id, module) in program.modules.iter().enumerate() {
+            if self.modules.contains_key(&module.name) {
+                return Err(Diagnostic::new(
+                    "ImportError",
+                    format!(
+                        "source module '{}' conflicts with a native module",
+                        module.name
+                    ),
+                ));
+            }
+            self.source_module_names
+                .insert(module.name.clone(), module_id);
+            self.source_modules.push(SourceModuleRuntime {
+                object: None,
+                state: if module_id == 0 {
+                    SourceModuleState::Initializing
+                } else {
+                    SourceModuleState::Uninitialized
+                },
+                version: 0,
+            });
+            for symbol in &module.globals {
+                let index = usize::from(symbol.0);
+                self.global_owners[index] = Some(module_id);
+                match program.symbols[index].as_str() {
+                    "__name__" => {
+                        self.globals[index] = self.heap.alloc(Object::Str(module.name.clone()))?;
+                        self.global_defined[index] = true;
+                    }
+                    "__file__" => {
+                        self.globals[index] =
+                            self.heap.alloc(Object::Str(module.filename.clone()))?;
+                        self.global_defined[index] = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
         self.jit_globals
             .extend(self.globals.iter().copied().map(Value::raw));
         for code in &program.code {
@@ -2260,6 +2340,11 @@ impl Vm {
                 None,
             )
             .and_then(|_| self.execute(program, output));
+        if result.is_ok() {
+            if let Some(module) = self.source_modules.first_mut() {
+                module.state = SourceModuleState::Loaded;
+            }
+        }
         self.stats.heap_allocations = self.heap.allocations - allocations;
         self.stats.buffer_exports = self.heap.buffer_exports - buffer_exports;
         self.stats.buffer_copies = self.heap.buffer_copies - buffer_copies;
@@ -2280,6 +2365,7 @@ impl Vm {
                 let span = code.spans[pc];
                 if e.span.is_none() {
                     e.span = Some(span);
+                    e.filename = Some(module_filename(program, frame.code).to_owned());
                 }
                 e.trace.push((code.name.clone(), span));
             }
@@ -2304,6 +2390,352 @@ impl Vm {
         } else {
             Ok(v)
         }
+    }
+    fn store_global(&mut self, program: &Program, index: usize, value: Value) -> Result<()> {
+        self.globals[index] = value;
+        self.jit_globals[index] = value.raw();
+        self.global_defined[index] = true;
+        if let Some(module_id) = self.global_owners[index] {
+            let name = &program.symbols[index];
+            let module = &mut self.source_modules[module_id];
+            if let Some(object) = module.object {
+                self.heap.add_module_member(object, name, value)?;
+            }
+            module.version = module.version.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "module global version exhausted")
+            })?;
+        }
+        Ok(())
+    }
+    fn clear_global(&mut self, program: &Program, index: usize) -> Result<()> {
+        self.globals[index] = Value::UNBOUND;
+        self.jit_globals[index] = Value::UNBOUND.raw();
+        self.global_defined[index] = false;
+        if let Some(module_id) = self.global_owners[index] {
+            let name = &program.symbols[index];
+            let module = &mut self.source_modules[module_id];
+            if let Some(object) = module.object {
+                if self.heap.attr(object, name).is_ok() {
+                    self.heap.delete_module_member(object, name)?;
+                }
+            }
+            module.version = module.version.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "module global version exhausted")
+            })?;
+        }
+        Ok(())
+    }
+    pub fn module_version(&self, name: &str) -> Option<u64> {
+        self.source_module_names
+            .get(name)
+            .map(|module| self.source_modules[*module].version)
+    }
+    pub(super) fn store_module_attribute(
+        &mut self,
+        program: &Program,
+        owner: Value,
+        name: &str,
+        value: Value,
+    ) -> Result<bool> {
+        let Some(module_id) = self
+            .source_modules
+            .iter()
+            .position(|module| module.object == Some(owner))
+        else {
+            return Ok(false);
+        };
+        let slot = program.modules[module_id]
+            .globals
+            .iter()
+            .map(|symbol| usize::from(symbol.0))
+            .find(|index| program.symbols[*index] == name);
+        if let Some(index) = slot {
+            self.store_global(program, index, value)?;
+        } else {
+            let module = &mut self.source_modules[module_id];
+            self.heap.add_module_member(owner, name, value)?;
+            module.version = module.version.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "module global version exhausted")
+            })?;
+        }
+        Ok(true)
+    }
+    pub(super) fn delete_module_attribute(
+        &mut self,
+        program: &Program,
+        owner: Value,
+        name: &str,
+    ) -> Result<bool> {
+        let Some(module_id) = self
+            .source_modules
+            .iter()
+            .position(|module| module.object == Some(owner))
+        else {
+            return Ok(false);
+        };
+        let slot = program.modules[module_id]
+            .globals
+            .iter()
+            .map(|symbol| usize::from(symbol.0))
+            .find(|index| program.symbols[*index] == name);
+        if let Some(index) = slot {
+            self.clear_global(program, index)?;
+        } else {
+            self.heap.delete_module_member(owner, name)?;
+            let module = &mut self.source_modules[module_id];
+            module.version = module.version.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "module global version exhausted")
+            })?;
+        }
+        Ok(true)
+    }
+    fn ensure_source_module_object(
+        &mut self,
+        program: &Program,
+        module_id: usize,
+    ) -> Result<Value> {
+        if let Some(object) = self.source_modules[module_id].object {
+            return Ok(object);
+        }
+        let metadata = &program.modules[module_id];
+        let object = self.heap.alloc(Object::Module(Vec::new()))?;
+        // Root the object before allocating metadata strings or copying members.
+        self.source_modules[module_id].object = Some(object);
+        let name_slot = metadata
+            .globals
+            .iter()
+            .map(|symbol| usize::from(symbol.0))
+            .find(|index| program.symbols[*index] == "__name__");
+        let file_slot = metadata
+            .globals
+            .iter()
+            .map(|symbol| usize::from(symbol.0))
+            .find(|index| program.symbols[*index] == "__file__");
+        let name = name_slot
+            .map(|index| self.globals[index])
+            .filter(|value| *value != Value::UNBOUND)
+            .map_or_else(|| self.heap.alloc(Object::Str(metadata.name.clone())), Ok)?;
+        self.heap.add_module_member(object, "__name__", name)?;
+        let filename = file_slot
+            .map(|index| self.globals[index])
+            .filter(|value| *value != Value::UNBOUND)
+            .map_or_else(
+                || self.heap.alloc(Object::Str(metadata.filename.clone())),
+                Ok,
+            )?;
+        self.heap.add_module_member(object, "__file__", filename)?;
+        for symbol in &metadata.globals {
+            let index = usize::from(symbol.0);
+            let value = self.globals[index];
+            let name = &program.symbols[index];
+            if self.global_defined[index]
+                && value != Value::UNBOUND
+                && !matches!(name.as_str(), "__name__" | "__file__")
+            {
+                self.heap.add_module_member(object, name, value)?;
+            }
+        }
+        Ok(object)
+    }
+    fn invoke_import(&mut self, program: &Program, name: &str, destination: usize) -> Result<()> {
+        if let Some(module_id) = self.source_module_names.get(name).copied() {
+            let object = self.ensure_source_module_object(program, module_id)?;
+            let module = &self.source_modules[module_id];
+            if matches!(
+                module.state,
+                SourceModuleState::Initializing | SourceModuleState::Loaded
+            ) {
+                self.attach_imported_module(program, name, object)?;
+                self.registers[destination] = object;
+                return Ok(());
+            }
+            self.source_modules[module_id].state = SourceModuleState::Initializing;
+            let code = usize::from(program.modules[module_id].code);
+            let result = self.enter_frame(
+                program,
+                code,
+                Some(destination),
+                Arguments::Direct {
+                    receiver: None,
+                    first: 0,
+                    count: 0,
+                    keywords: &[],
+                },
+                None,
+            );
+            if result.is_err() {
+                self.source_modules[module_id].state = SourceModuleState::Uninitialized;
+                return result;
+            }
+            self.frames.last_mut().expect("import module frame").action =
+                ReturnAction::Import(module_id);
+            return Ok(());
+        }
+        let object = *self.modules.get(name).ok_or_else(|| {
+            Diagnostic::new("ModuleNotFoundError", format!("no module named '{name}'"))
+        })?;
+        self.attach_imported_module(program, name, object)?;
+        self.registers[destination] = object;
+        Ok(())
+    }
+    fn invoke_import_from(
+        &mut self,
+        program: &Program,
+        module: Value,
+        name: &str,
+        destination: usize,
+    ) -> Result<()> {
+        match self.heap.attr(module, name) {
+            Ok(value) => {
+                self.registers[destination] = value;
+                return Ok(());
+            }
+            Err(error) if error.kind == "AttributeError" => {}
+            Err(error) => return Err(error),
+        }
+        let base = self
+            .source_modules
+            .iter()
+            .position(|source| source.object == Some(module))
+            .map(|module_id| program.modules[module_id].name.as_str())
+            .or_else(|| {
+                self.modules
+                    .iter()
+                    .find_map(|(candidate, value)| (*value == module).then_some(candidate.as_str()))
+            })
+            .ok_or_else(|| Diagnostic::new("ImportError", "import source is not a module"))?;
+        let child = format!("{base}.{name}");
+        if !self.source_module_names.contains_key(&child) && !self.modules.contains_key(&child) {
+            return Err(Diagnostic::new(
+                "ImportError",
+                format!("cannot import name '{name}' from '{base}'"),
+            ));
+        }
+        self.invoke_import(program, &child, destination)
+    }
+    fn attach_imported_module(
+        &mut self,
+        program: &Program,
+        name: &str,
+        object: Value,
+    ) -> Result<()> {
+        let Some((parent_name, child_name)) = name.rsplit_once('.') else {
+            return Ok(());
+        };
+        let (parent, source_parent) =
+            if let Some(module_id) = self.source_module_names.get(parent_name).copied() {
+                (
+                    self.ensure_source_module_object(program, module_id)?,
+                    Some(module_id),
+                )
+            } else if let Some(parent) = self.modules.get(parent_name).copied() {
+                (parent, None)
+            } else {
+                return Ok(());
+            };
+        if self.heap.attr(parent, child_name).ok() == Some(object) {
+            return Ok(());
+        }
+        self.heap.add_module_member(parent, child_name, object)?;
+        if let Some(module_id) = source_parent {
+            let module = &mut self.source_modules[module_id];
+            module.version = module.version.checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "module global version exhausted")
+            })?;
+            if let Some(index) = program.modules[module_id]
+                .globals
+                .iter()
+                .map(|symbol| usize::from(symbol.0))
+                .find(|index| program.symbols[*index] == child_name)
+            {
+                self.globals[index] = object;
+                self.jit_globals[index] = object.raw();
+                self.global_defined[index] = true;
+            }
+        }
+        Ok(())
+    }
+    fn reset_import_frames(&mut self, program: &Program, start: usize) -> Result<()> {
+        let mut modules = self.frames[start..]
+            .iter()
+            .filter_map(|frame| match frame.action {
+                ReturnAction::Import(module_id) => Some(module_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        modules.sort_unstable();
+        modules.dedup();
+        for module_id in modules.into_iter().rev() {
+            self.reset_source_module(program, module_id)?;
+        }
+        Ok(())
+    }
+    fn reset_source_module(&mut self, program: &Program, module_id: usize) -> Result<()> {
+        let metadata = &program.modules[module_id];
+        let object = self.source_modules[module_id].object;
+        if let (Some(object), Some((parent_name, child_name))) =
+            (object, metadata.name.rsplit_once('.'))
+        {
+            let parent = self
+                .source_module_names
+                .get(parent_name)
+                .and_then(|parent_id| self.source_modules[*parent_id].object)
+                .or_else(|| self.modules.get(parent_name).copied());
+            if let Some(parent) = parent {
+                if self.heap.attr(parent, child_name).ok() == Some(object) {
+                    self.heap.delete_module_member(parent, child_name)?;
+                    if let Some(parent_id) = self.source_module_names.get(parent_name).copied() {
+                        if let Some(index) = program.modules[parent_id]
+                            .globals
+                            .iter()
+                            .map(|symbol| usize::from(symbol.0))
+                            .find(|index| program.symbols[*index] == child_name)
+                        {
+                            self.globals[index] = Value::UNBOUND;
+                            self.jit_globals[index] = Value::UNBOUND.raw();
+                            self.global_defined[index] = false;
+                        }
+                        self.source_modules[parent_id].version = self.source_modules[parent_id]
+                            .version
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                Diagnostic::new("RuntimeError", "module global version exhausted")
+                            })?;
+                    }
+                }
+            }
+        }
+        if let Some(object) = object {
+            self.heap.reset_module_members(object)?;
+        }
+        for symbol in &metadata.globals {
+            let index = usize::from(symbol.0);
+            self.globals[index] = match program.symbols[index].as_str() {
+                "__name__" => match object {
+                    Some(object) => self.heap.attr(object, "__name__")?,
+                    None => self.heap.alloc(Object::Str(metadata.name.clone()))?,
+                },
+                "__file__" => match object {
+                    Some(object) => self.heap.attr(object, "__file__")?,
+                    None => self.heap.alloc(Object::Str(metadata.filename.clone()))?,
+                },
+                name => self
+                    .builtins
+                    .iter()
+                    .find_map(|(builtin, value)| (builtin == name).then_some(*value))
+                    .unwrap_or(Value::UNBOUND),
+            };
+            self.jit_globals[index] = self.globals[index].raw();
+            self.global_defined[index] =
+                matches!(program.symbols[index].as_str(), "__name__" | "__file__");
+        }
+        let module = &mut self.source_modules[module_id];
+        module.state = SourceModuleState::Uninitialized;
+        module.version = module
+            .version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "module global version exhausted"))?;
+        Ok(())
     }
     pub(super) fn builtin_type_kind(&self, class: Value) -> Option<RuntimeTypeKind> {
         [
@@ -2865,9 +3297,11 @@ impl Vm {
             self.heap.record_exception_trace(exception, traceback)?;
         }
         let Some((frame_index, region)) = selected else {
+            self.reset_import_frames(program, minimum_depth)?;
             self.pending_exception = Some(exception);
             return Ok(false);
         };
+        self.reset_import_frames(program, frame_index + 1)?;
         self.frames.truncate(frame_index + 1);
         let frame = self.frames.last_mut().expect("selected exception frame");
         let code = &program.code[frame.code];
@@ -3010,8 +3444,7 @@ impl Vm {
                     }
                     Op::StoreGlobal => {
                         let value = self.read(a)?;
-                        self.globals[i.b as usize] = value;
-                        self.jit_globals[i.b as usize] = value.raw();
+                        self.store_global(p, i.b as usize, value)?;
                     }
                     Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul => {
                         let left = self.read(b)?;
@@ -3267,6 +3700,15 @@ impl Vm {
                                 index_conversion = Some(state);
                             }
                             ReturnAction::Hash(action) => hash_action = Some(action),
+                            ReturnAction::Import(module_id) => {
+                                let name = p.modules[module_id].name.clone();
+                                let object = self.source_modules[module_id]
+                                    .object
+                                    .expect("imported module object");
+                                self.source_modules[module_id].state = SourceModuleState::Loaded;
+                                self.attach_imported_module(p, &name, object)?;
+                                value = object;
+                            }
                             ReturnAction::Setter => value = Value::NONE,
                         }
                         self.registers.truncate(frame.base);
@@ -3467,8 +3909,7 @@ impl Vm {
                     Op::ClearBinding => match i.a {
                         0 => self.registers[base + usize::from(i.b)] = Value::UNBOUND,
                         1 => {
-                            self.globals[usize::from(i.b)] = Value::UNBOUND;
-                            self.jit_globals[usize::from(i.b)] = Value::UNBOUND.raw();
+                            self.clear_global(p, usize::from(i.b))?;
                         }
                         2 => self
                             .heap
@@ -4081,12 +4522,12 @@ impl Vm {
                     }
                     Op::Import => {
                         let name = &p.symbols[i.b as usize];
-                        self.registers[a] = *self.modules.get(name).ok_or_else(|| {
-                            Diagnostic::new(
-                                "ModuleNotFoundError",
-                                format!("no registered native module '{name}'"),
-                            )
-                        })?;
+                        self.invoke_import(p, name, a)?;
+                    }
+                    Op::ImportFrom => {
+                        let module = self.read(b)?;
+                        let name = &p.symbols[i.c as usize];
+                        self.invoke_import_from(p, module, name, a)?;
                     }
                     Op::Attr => {
                         let object = self.read(b)?;
@@ -5168,7 +5609,12 @@ impl Vm {
         }
         let frame = self.frames.last_mut().expect("active frame");
         let resuming = frame.jit_resume;
-        if frame.code == 0 || (!resuming && (frame.ip != 0 || frame.jit_attempted)) {
+        if program
+            .modules
+            .iter()
+            .any(|module| usize::from(module.code) == frame.code)
+            || (!resuming && (frame.ip != 0 || frame.jit_attempted))
+        {
             return Ok(false);
         }
         frame.jit_resume = false;
@@ -5769,6 +6215,17 @@ impl Vm {
             Ok(())
         }
     }
+}
+
+fn module_filename(program: &Program, code: usize) -> &str {
+    program
+        .modules
+        .iter()
+        .find(|module| {
+            let start = usize::from(module.code);
+            (start..start + usize::from(module.code_count)).contains(&code)
+        })
+        .map_or("<unknown>", |module| module.filename.as_str())
 }
 
 impl Drop for Vm {

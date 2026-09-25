@@ -1,6 +1,8 @@
 use std::{
+    collections::{HashSet, VecDeque},
     env, fs,
     io::{self, Read},
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 use tonic_core::diagnostic::Diagnostic;
@@ -94,8 +96,12 @@ fn run() -> std::result::Result<(), (u8, String)> {
     } else {
         fs::read_to_string(&filename).map_err(|e| (2, format!("{filename}: {e}")))?
     };
-    let render = |e: Diagnostic| (1, e.render(&filename, &source));
-    let program = tonic_compiler::compile(&source, &filename).map_err(render)?;
+    let render = |e: Diagnostic| (1, render_diagnostic(&e, &filename, &source));
+    let program = if filename != "-" && filename != "<command>" {
+        compile_file_graph(&filename, source.clone()).map_err(render)?
+    } else {
+        tonic_compiler::compile(&source, &filename).map_err(render)?
+    };
     if dump {
         print!("{}", program.program().disassemble());
         return Ok(());
@@ -116,4 +122,65 @@ fn run() -> std::result::Result<(), (u8, String)> {
         eprintln!("{:?}", vm.stats);
     }
     Ok(())
+}
+
+fn render_diagnostic(error: &Diagnostic, fallback_filename: &str, fallback_source: &str) -> String {
+    let filename = error.filename.as_deref().unwrap_or(fallback_filename);
+    if filename == fallback_filename {
+        return error.render(filename, fallback_source);
+    }
+    match fs::read_to_string(filename) {
+        Ok(source) => error.render(filename, &source),
+        Err(_) => error.render(filename, ""),
+    }
+}
+
+fn compile_file_graph(
+    filename: &str,
+    source: String,
+) -> tonic_core::diagnostic::Result<tonic_core::bytecode::VerifiedProgram> {
+    let entry = Path::new(filename);
+    let root = entry.parent().unwrap_or_else(|| Path::new("."));
+    let mut sources = vec![tonic_compiler::ModuleSource::new(
+        "__main__", filename, source,
+    )];
+    let mut queued = HashSet::new();
+    let mut queue = VecDeque::new();
+    for import in tonic_compiler::discover_imports(&sources[0].source, filename)? {
+        if queued.insert(import.clone()) {
+            queue.push_back(import);
+        }
+    }
+    while let Some(name) = queue.pop_front() {
+        let Some(path) = resolve_module(root, &name) else {
+            continue;
+        };
+        let module_source = fs::read_to_string(&path).map_err(|error| {
+            Diagnostic::new("ImportError", format!("{}: {error}", path.display()))
+        })?;
+        let module_filename = path.to_string_lossy().into_owned();
+        for import in tonic_compiler::discover_imports(&module_source, &module_filename)? {
+            if queued.insert(import.clone()) {
+                queue.push_back(import);
+            }
+        }
+        sources.push(tonic_compiler::ModuleSource::new(
+            name,
+            module_filename,
+            module_source,
+        ));
+    }
+    tonic_compiler::compile_modules("__main__", &sources)
+}
+
+fn resolve_module(root: &Path, name: &str) -> Option<PathBuf> {
+    let relative = name.replace('.', "/");
+    [
+        root.join(format!("{relative}.tonic")),
+        root.join(format!("{relative}.py")),
+        root.join(&relative).join("__init__.tonic"),
+        root.join(relative).join("__init__.py"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }

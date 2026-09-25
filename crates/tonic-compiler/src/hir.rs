@@ -362,8 +362,13 @@ impl<'a> Scan<'a> {
                         .push((s.span.start, Child::Class(body, *class_cell)));
                 }
                 StmtKind::Import(names) => {
-                    for (_, name) in names {
-                        self.bind(*name);
+                    for alias in names {
+                        self.bind(alias.bound);
+                    }
+                }
+                StmtKind::ImportFrom { names, .. } => {
+                    for (_, bound) in names {
+                        self.bind(*bound);
                     }
                 }
                 StmtKind::Global(names) | StmtKind::Nonlocal(names) => {

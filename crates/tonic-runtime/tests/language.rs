@@ -1,4 +1,4 @@
-use tonic_compiler::compile;
+use tonic_compiler::{compile, compile_modules, ModuleSource};
 use tonic_core::diagnostic::{Diagnostic, Result};
 use tonic_runtime::{Context, ExecutionMode, Handle, Vm};
 fn output(source: &str) -> String {
@@ -1215,4 +1215,143 @@ fn cyclic_container_repr_and_trace_edges() {
     vm.run(&compile("a=[]\na += (a,)", "x").unwrap(), &mut Vec::new())
         .unwrap();
     assert!(vm.root_and_edge_counts().1 >= 2);
+}
+
+#[test]
+fn source_modules_isolate_versioned_globals_cache_once_and_support_cycles() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import alpha\nimport alpha\nimport beta\nprint(alpha.value,alpha.from_beta,beta.seen,hasattr(alpha,'print'))\nalpha.value='changed'\nprint(alpha.read())",
+            ),
+            ModuleSource::new(
+                "alpha",
+                "alpha.tonic",
+                "print('load-alpha')\nvalue='alpha-start'\nimport beta\nfrom_beta=beta.value\nvalue='alpha-done'\ndef read(): return value",
+            ),
+            ModuleSource::new(
+                "beta",
+                "beta.tonic",
+                "print('load-beta')\nimport alpha\nseen=alpha.value\nvalue='beta-done'",
+            ),
+        ],
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(
+        output,
+        b"load-alpha\nload-beta\nalpha-done beta-done alpha-start False\nchanged\n"
+    );
+    assert!(vm
+        .module_version("alpha")
+        .is_some_and(|version| version >= 4));
+    assert!(vm
+        .module_version("beta")
+        .is_some_and(|version| version >= 3));
+}
+
+#[test]
+fn source_packages_support_dotted_and_from_imports() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "from package import child as first\nfrom package import answer\nimport package.child as leaf\nimport package.child\nprint(answer,first.value,leaf.value,package.child.value,first.Exported.__module__,package.__name__,first.__name__,first.__file__)",
+            ),
+            ModuleSource::new(
+                "package",
+                "package/__init__.tonic",
+                "print('load-package')\nanswer=40",
+            ),
+            ModuleSource::new(
+                "package.child",
+                "package/child.tonic",
+                "print('load-child')\nvalue=2\nclass Exported:\n    pass",
+            ),
+        ],
+    )
+    .unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&program, &mut output).unwrap();
+        assert_eq!(
+            output,
+            b"load-package\nload-child\n40 2 2 2 package.child package package.child package/child.tonic\n"
+        );
+        assert!(vm
+            .module_version("package")
+            .is_some_and(|version| version >= 2));
+    }
+}
+
+#[test]
+fn failed_source_import_rolls_back_partial_globals_and_retries() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import control\ntry:\n    import flaky\nexcept ValueError:\n    print(control.attempts,hasattr(control.partial,'value'))\nimport flaky\nprint(control.attempts,flaky.value,control.partial.value)",
+            ),
+            ModuleSource::new(
+                "control",
+                "control.tonic",
+                "attempts=0\npartial=None",
+            ),
+            ModuleSource::new(
+                "flaky",
+                "flaky.tonic",
+                "import control\ncontrol.attempts+=1\nimport flaky\ncontrol.partial=flaky\nvalue='partial'\nif control.attempts==1:\n    raise ValueError('first')\nvalue='done'",
+            ),
+        ],
+    )
+    .unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&program, &mut output).unwrap();
+        assert_eq!(output, b"1 False\n2 done done\n");
+    }
+}
+
+#[test]
+fn jit_compiles_imported_functions_and_reads_mutated_module_globals() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import worker\ni=0\nwhile i<20:\n    result=worker.compute(1)\n    i+=1\nprint(result)\nworker.base=100\ni=0\nwhile i<20:\n    result=worker.compute(1)\n    i+=1\nprint(result)",
+            ),
+            ModuleSource::new(
+                "worker",
+                "worker.tonic",
+                "base=40\ndef compute(x):\n    x=x+base\n    x=x+1\n    x=x+1\n    x=x+1\n    x=x+1\n    x=x+1\n    return x",
+            ),
+        ],
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"46\n106\n");
+    assert!(vm.stats.jit_compiled >= 1, "{:?}", vm.stats);
+    assert!(vm.stats.jit_calls >= 1, "{:?}", vm.stats);
 }
