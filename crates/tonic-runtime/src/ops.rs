@@ -666,8 +666,11 @@ impl Heap {
             Object::Iterator { .. }
             | Object::RangeIterator { .. }
             | Object::DictIterator { .. }
-            | Object::MappingProxyIterator { .. } => return Ok(v),
-            Object::Generator(_) => return Ok(v),
+            | Object::MappingProxyIterator { .. }
+            | Object::CoroutineIterator { .. } => return Ok(v),
+            Object::Generator(frame) if frame.kind == crate::heap::GeneratorKind::Generator => {
+                return Ok(v)
+            }
             _ => return Err(Diagnostic::new("TypeError", "object is not iterable")),
         };
         self.alloc(object)
@@ -680,6 +683,7 @@ impl Heap {
                     | Object::RangeIterator { .. }
                     | Object::DictIterator { .. }
                     | Object::MappingProxyIterator { .. }
+                    | Object::CoroutineIterator { .. }
             )
         })
     }
@@ -759,6 +763,10 @@ impl Heap {
                 }
                 Ok(item)
             }
+            Object::CoroutineIterator { .. } => Err(Diagnostic::new(
+                "RuntimeError",
+                "coroutine iterator requires VM resume",
+            )),
             _ => Err(Diagnostic::new("TypeError", "object is not an iterator")),
         }
     }

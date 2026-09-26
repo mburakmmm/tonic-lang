@@ -195,6 +195,37 @@ run(ValueError)
 run(ValueError,'message')
 run(ValueError,(1,2),None)
 ''',
+'''async def inner(value):
+    return value+1
+async def outer():
+    value=await inner(41)
+    return [value]
+coroutine=outer()
+wrapper=coroutine.__await__()
+print(type(coroutine).__name__,type(wrapper).__name__,iter(wrapper)==wrapper)
+try:
+    iter(coroutine)
+except TypeError:
+    print('not-iterable')
+try:
+    wrapper.send(None)
+except StopIteration as error:
+    print(error.value,error.args)
+''',
+'''class Pause:
+    def __await__(self):
+        received=yield 'paused'
+        print('received',received)
+        return 40
+async def run():
+    return (await Pause())+2
+coroutine=run()
+print(coroutine.send(None))
+try:
+    coroutine.send('resume')
+except StopIteration as error:
+    print(error.value)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -221,4 +252,8 @@ ERRORS = [
 ('(lambda a:a)()', 'TypeError'),
 ('def bad():\n    yield 1\n    raise StopIteration("boom")\ng=bad()\nnext(g)\nnext(g)', 'RuntimeError'),
 ('def outer():\n    yield from [1,2]\ng=outer()\nnext(g)\ng.send(3)', 'AttributeError'),
+('async def invalid():\n    await 1\ninvalid().send(None)', 'TypeError'),
+('class Invalid:\n    def __await__(self):\n        return []\nasync def run():\n    await Invalid()\nrun().send(None)', 'TypeError'),
+('async def done():\n    return 1\ncoroutine=done()\ntry:\n    coroutine.send(None)\nexcept StopIteration:\n    pass\ncoroutine.send(None)', 'RuntimeError'),
+('async def bad():\n    raise StopIteration("escaped")\nbad().send(None)', 'RuntimeError'),
 ]

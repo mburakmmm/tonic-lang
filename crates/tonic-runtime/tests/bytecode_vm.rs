@@ -18,6 +18,7 @@ fn program(instructions: Vec<Instr>) -> Program {
         code: vec![CodeObject {
             class_body: false,
             generator: false,
+            coroutine: false,
             name: "direct".into(),
             params: 0,
             signature: Default::default(),

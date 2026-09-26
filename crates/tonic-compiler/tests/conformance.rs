@@ -149,7 +149,6 @@ fn invalid_python_forms() {
 fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
-        "async def f():\n    pass",
         "x=[i for i in range(3)]",
         "print(f'{1}')",
         "match x:\n    case 1:\n        pass",
@@ -221,6 +220,32 @@ fn yield_marks_only_its_lexical_function_as_generator() {
     for source in ["yield 1", "class C:\n    yield 1"] {
         assert!(compile(source, "bad-yield").is_err(), "accepted {source:?}");
     }
+}
+
+#[test]
+fn async_functions_and_await_have_owned_ast_and_coroutine_metadata() {
+    let source = "async def inner():\n    return 1\nasync def outer():\n    return await inner()";
+    let ast = parse(source, "coroutine").unwrap();
+    let StmtKind::Function { is_async, body, .. } = &ast.body[1].kind else {
+        panic!("async function")
+    };
+    assert!(*is_async);
+    let StmtKind::Return(Some(value)) = &body[0].kind else {
+        panic!("async return")
+    };
+    assert!(matches!(value.kind, ExprKind::Await(_)));
+
+    let program = compile(source, "coroutine").unwrap();
+    assert!(!program.program().code[0].coroutine);
+    assert!(program.program().code[1].coroutine);
+    assert!(program.program().code[2].coroutine);
+    assert!(program.program().code[2]
+        .instructions
+        .iter()
+        .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::GetAwaitable)));
+
+    let error = compile("async def values():\n    yield 1", "async-generator").unwrap_err();
+    assert_eq!(error.kind, "UnsupportedSyntax");
 }
 #[test]
 fn resource_limits_reject_deep_ast_before_parsing() {

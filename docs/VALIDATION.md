@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 16, core verifier 10, Cranelift JIT 16, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 17, core verifier 11, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 87, CPython bridge 15 ve HPy manifest 5; toplam 306 test.
+native handles 5, language/runtime 90, CPython bridge 15 ve HPy manifest 5; toplam 311 test.
 
-Differential corpus: 304 stdout vakası ve 149 exception türü vakası. Seed 42.
-Generator ilk diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 306 stdout vakası ve 153 exception türü vakası. Seed 42.
+Coroutine ilk diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -77,6 +77,11 @@ normal/stress GC altında hareketini; list/tuple/dict/for/unpack/`*args`
 tüketicilerini, generator kodunun JIT dışı kalmasını, ulaşılamayan askıdaki
 generator'ların collector-dışı logical close'unu, delege kapanma sırasını,
 unraisable hata yalıtımını ve shutdown finalization'ını doğrular.
+Coroutine corpus'u tembel `async def` çağrısını, nested exact-coroutine `await`
+delegasyonunu, özel `__await__` iterator'larını, `coroutine_wrapper` protokolünü,
+`send`/`throw`/`close`, geçersiz awaitable hata türlerini ve askıdaki coroutine'in
+await edilen iterator ile içten dışa logical close'unu kapsar. Aynı programlar
+interpreter/JIT-caller ve normal/stress GC yollarında çalıştırılır.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython

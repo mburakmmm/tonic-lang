@@ -30,6 +30,7 @@ pub enum StmtKind {
     Function {
         name: SymbolId,
         label: String,
+        is_async: bool,
         decorators: Vec<Expr>,
         params: Parameters,
         body: Vec<Stmt>,
@@ -120,6 +121,7 @@ pub enum ExprKind {
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
     Yield(Option<Box<Expr>>),
     YieldFrom(Box<Expr>),
+    Await(Box<Expr>),
     Lambda {
         params: Parameters,
         body: Box<Expr>,

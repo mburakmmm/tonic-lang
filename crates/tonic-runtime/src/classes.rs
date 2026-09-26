@@ -186,6 +186,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__int__"
                 | "__float__"
                 | "__index__"
+                | "__await__"
                 | "__module__"
                 | "__qualname__"
                 | "__doc__"
@@ -1280,7 +1281,8 @@ impl Heap {
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend
                 | Builtin::GeneratorThrow
-                | Builtin::GeneratorClose,
+                | Builtin::GeneratorClose
+                | Builtin::CoroutineAwait,
             )) => DescriptorCall {
                 callable: value,
                 receiver: Some(descriptor),
@@ -1321,7 +1323,8 @@ impl Heap {
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend
                 | Builtin::GeneratorThrow
-                | Builtin::GeneratorClose,
+                | Builtin::GeneratorClose
+                | Builtin::CoroutineAwait,
             )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
@@ -1434,6 +1437,16 @@ impl Heap {
             }
             Ok(Object::Generator(frame)) => {
                 let class = frame.class;
+                if name == "__class__" {
+                    return Ok(class);
+                }
+                let Some(value) = self.class_lookup(class, name)? else {
+                    return Err(missing(name));
+                };
+                return self.bind_descriptor(value, Some(owner), class);
+            }
+            Ok(Object::CoroutineIterator { class, .. }) => {
+                let class = *class;
                 if name == "__class__" {
                     return Ok(class);
                 }

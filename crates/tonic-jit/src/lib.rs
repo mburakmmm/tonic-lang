@@ -2001,6 +2001,8 @@ fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> 
             || !direct.target.cell_locals.is_empty()
             || !direct.target.free_vars.is_empty()
             || direct.target.class_body
+            || direct.target.generator
+            || direct.target.coroutine
             || !direct.float && !is_direct_call_inlineable(direct.target)
         {
             return Err(unsupported(
@@ -2099,7 +2101,11 @@ fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> 
 /// A deliberately small, side-effect-free subset can be re-executed from the
 /// caller's CALL PC if a guard fails, which makes deoptimization atomic.
 pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
-    if validate_structural_safety(code).is_err() {
+    if code.class_body
+        || code.generator
+        || code.coroutine
+        || validate_structural_safety(code).is_err()
+    {
         return false;
     }
     let mut returned = false;
@@ -2128,7 +2134,11 @@ pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
 /// unboxed as F64 for the complete direct leaf. This dataflow check prevents a
 /// generic or uninitialized value from reaching native float arithmetic.
 pub fn is_direct_float_leaf_inlineable(code: &CodeObject) -> bool {
-    if validate_structural_safety(code).is_err() {
+    if code.class_body
+        || code.generator
+        || code.coroutine
+        || validate_structural_safety(code).is_err()
+    {
         return false;
     }
     let mut floats = vec![false; code.registers as usize];
@@ -2383,7 +2393,12 @@ fn validate_supported(
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
 ) -> Result<(), Error> {
-    if code.class_body || !code.cell_locals.is_empty() || !code.free_vars.is_empty() {
+    if code.class_body
+        || code.generator
+        || code.coroutine
+        || !code.cell_locals.is_empty()
+        || !code.free_vars.is_empty()
+    {
         return Err(unsupported(
             0,
             None,

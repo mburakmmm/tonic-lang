@@ -33,6 +33,9 @@ The current implementation includes:
 - functions, closures, defaults, positional-only/keyword-only and variadic calls;
 - classes, C3 multiple inheritance, shapes, descriptors, properties and `super`;
 - canonical builtin constructors, native builtin subclasses, and suspending numeric/index conversion protocols;
+- synchronous generators with full `yield from` delegation, plus lazy `async def`
+  coroutines and exact/custom-awaitable `await` delegation;
+- source modules and packages with versioned globals, circular-import state, and rollback;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps;
@@ -46,10 +49,10 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Comprehensions, generators,
-async execution, structural matching, general filesystem
-imports, a full standard library, and several remaining protocols are still
-tracked in the [roadmap](docs/ROADMAP.md).
+The unsupported surface is reported explicitly. Comprehensions, async
+generators, `async for`/`async with`, an event-loop/task layer, structural
+matching, f-strings, a full standard library, and several remaining protocols
+are still tracked in the [roadmap](docs/ROADMAP.md).
 
 ## Architecture
 

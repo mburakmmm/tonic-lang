@@ -159,6 +159,45 @@ fn generator_finalization_closes_delegates_and_contains_unraisable_errors() {
         assert_eq!(vm.stats.generator_finalizer_errors, 1);
     }
 }
+
+#[test]
+fn coroutines_are_lazy_and_await_nested_tonic_coroutines() {
+    let source = "async def inner(value):\n    print('inner',value)\n    return value+1\nasync def outer():\n    print('outer-start')\n    value=await inner(41)\n    print('outer-result',value)\n    return [value]\nprobe=outer()\nwrapper=probe.__await__()\nprint(type(probe).__name__,type(wrapper).__name__,iter(wrapper)==wrapper)\nprint('probe-close',wrapper.close())\nasync def instant():\n    return ['wrapped']\nwrapped=instant().__await__()\ntry:\n    next(wrapped)\nexcept StopIteration as error:\n    print('wrapped',error.value,error.args)\ntry:\n    next(wrapped)\nexcept RuntimeError as error:\n    print(str(error))\ncoroutine=outer()\ntry:\n    iter(coroutine)\nexcept TypeError:\n    print('not-iterable')\ntry:\n    coroutine.send('early')\nexcept TypeError:\n    print('send-before-start')\ntry:\n    coroutine.send(None)\nexcept StopIteration as error:\n    print('result',error.value,error.args)\ntry:\n    coroutine.send(None)\nexcept RuntimeError as error:\n    print(str(error))";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"coroutine coroutine_wrapper True\nprobe-close None\nwrapped ['wrapped'] (['wrapped'],)\ncannot reuse already awaited coroutine\nnot-iterable\nsend-before-start\nouter-start\ninner 41\nouter-result 42\nresult [42] ([42],)\ncannot reuse already awaited coroutine\n",
+    );
+}
+
+#[test]
+fn custom_awaitables_suspend_and_forward_send_throw_and_close() {
+    let source = "class Pause:\n    def __init__(self,label):\n        self.label=label\n    def __await__(self):\n        try:\n            received=yield 'pause-'+self.label\n            print('received',self.label,received)\n            return 40\n        finally:\n            print('await-finally',self.label)\nasync def completed():\n    value=await Pause('complete')\n    return value+2\ncoroutine=completed()\nprint(coroutine.send(None))\ntry:\n    coroutine.send('resume')\nexcept StopIteration as error:\n    print('completed',error.value)\nasync def caught():\n    try:\n        await Pause('throw')\n    except ValueError as error:\n        return 'caught-'+str(error)\ncoroutine=caught()\nprint(coroutine.send(None))\ntry:\n    coroutine.throw(ValueError('boom'))\nexcept StopIteration as error:\n    print(error.value)\nasync def closing():\n    try:\n        await Pause('close')\n    finally:\n        print('outer-finally')\ncoroutine=closing()\nprint(coroutine.send(None),coroutine.close())\nasync def leaf():\n    return 5\nclass Proxy:\n    def __await__(self):\n        return leaf().__await__()\nasync def proxy():\n    return (await Proxy())+1\ntry:\n    proxy().send(None)\nexcept StopIteration as error:\n    print('proxy',error.value)\nprint('wrapper-list',list(leaf().__await__()))\nclass Invalid:\n    def __await__(self):\n        return []\nasync def invalid():\n    await Invalid()\ntry:\n    invalid().send(None)\nexcept TypeError:\n    print('invalid-awaitable')\nasync def invalid_value():\n    await 1\ntry:\n    invalid_value().send(None)\nexcept TypeError:\n    print('not-awaitable')\nasync def escaped_stop():\n    raise StopIteration('bad')\ntry:\n    escaped_stop().send(None)\nexcept RuntimeError as error:\n    print(str(error))";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"pause-complete\nreceived complete resume\nawait-finally complete\ncompleted 42\npause-throw\nawait-finally throw\ncaught-boom\nawait-finally close\nouter-finally\npause-close None\nproxy 6\nwrapper-list []\ninvalid-awaitable\nnot-awaitable\ncoroutine raised StopIteration\n",
+    );
+}
+
+#[test]
+fn unreachable_suspended_coroutines_close_awaited_iterators() {
+    let source = "class Pause:\n    def __await__(self):\n        try:\n            yield 'paused'\n        finally:\n            print('await-finally')\nasync def outer():\n    try:\n        await Pause()\n    finally:\n        print('outer-finally')\ndef abandon():\n    coroutine=outer()\n    print(coroutine.send(None))\nabandon()\nprint('body-complete')";
+    let program = compile(source, "coroutine-finalization").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"paused\nbody-complete\n");
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(
+            out,
+            b"paused\nbody-complete\nawait-finally\nouter-finally\n"
+        );
+        assert_eq!(vm.stats.generator_finalizers, 1);
+        assert_eq!(vm.stats.generator_finalizer_errors, 0);
+    }
+}
 #[test]
 fn exception_objects_and_explicit_raise() {
     assert_eq!(

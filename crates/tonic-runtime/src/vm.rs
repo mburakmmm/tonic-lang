@@ -3,7 +3,8 @@ pub(crate) mod calls;
 use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
     heap::{
-        Builtin, GeneratorFrame, GeneratorState, Heap, Object, SuspendedGenerator, TracebackEntry,
+        Builtin, GeneratorFrame, GeneratorKind, GeneratorState, Heap, Object, SuspendedGenerator,
+        TracebackEntry,
     },
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
@@ -612,6 +613,7 @@ struct FloatCallProfile {
 enum ReturnAction {
     Value,
     Iterator,
+    Awaitable,
     Next(Option<Value>),
     Close,
     IteratorNext {
@@ -966,6 +968,8 @@ struct RuntimeTypes {
     range: Value,
     function: Value,
     generator: Value,
+    coroutine: Value,
+    coroutine_wrapper: Value,
     base_exception: Value,
     exception: Value,
     type_error: Value,
@@ -1002,6 +1006,8 @@ impl RuntimeTypes {
             range: Value::UNBOUND,
             function: Value::UNBOUND,
             generator: Value::UNBOUND,
+            coroutine: Value::UNBOUND,
+            coroutine_wrapper: Value::UNBOUND,
             base_exception: Value::UNBOUND,
             exception: Value::UNBOUND,
             type_error: Value::UNBOUND,
@@ -1026,6 +1032,8 @@ impl RuntimeTypes {
             self.range,
             self.function,
             self.generator,
+            self.coroutine,
+            self.coroutine_wrapper,
             self.base_exception,
             self.exception,
             self.type_error,
@@ -1079,6 +1087,7 @@ impl ReturnAction {
         match self {
             Self::Value
             | Self::Iterator
+            | Self::Awaitable
             | Self::IteratorNext { .. }
             | Self::Close
             | Self::ExpandIterableStart(_)
@@ -1639,6 +1648,14 @@ impl Vm {
             generator: vm
                 .heap
                 .builtin_class("generator", vec![vm.object_class], vm.type_class)?,
+            coroutine: vm
+                .heap
+                .builtin_class("coroutine", vec![vm.object_class], vm.type_class)?,
+            coroutine_wrapper: vm.heap.builtin_class(
+                "coroutine_wrapper",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
             base_exception,
             exception,
             type_error,
@@ -1672,6 +1689,39 @@ impl Vm {
             (vm.runtime_types.generator, "send", Builtin::GeneratorSend),
             (vm.runtime_types.generator, "throw", Builtin::GeneratorThrow),
             (vm.runtime_types.generator, "close", Builtin::GeneratorClose),
+            (
+                vm.runtime_types.coroutine,
+                "__await__",
+                Builtin::CoroutineAwait,
+            ),
+            (vm.runtime_types.coroutine, "send", Builtin::GeneratorSend),
+            (vm.runtime_types.coroutine, "throw", Builtin::GeneratorThrow),
+            (vm.runtime_types.coroutine, "close", Builtin::GeneratorClose),
+            (
+                vm.runtime_types.coroutine_wrapper,
+                "__iter__",
+                Builtin::GeneratorIter,
+            ),
+            (
+                vm.runtime_types.coroutine_wrapper,
+                "__next__",
+                Builtin::GeneratorNext,
+            ),
+            (
+                vm.runtime_types.coroutine_wrapper,
+                "send",
+                Builtin::GeneratorSend,
+            ),
+            (
+                vm.runtime_types.coroutine_wrapper,
+                "throw",
+                Builtin::GeneratorThrow,
+            ),
+            (
+                vm.runtime_types.coroutine_wrapper,
+                "close",
+                Builtin::GeneratorClose,
+            ),
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, name, value)?;
@@ -2952,6 +3002,7 @@ impl Vm {
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
             Object::Generator(frame) => frame.class,
+            Object::CoroutineIterator { class, .. } => *class,
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -3041,12 +3092,20 @@ impl Vm {
         }
     }
 
+    fn iterator_resumable(&self, value: Value) -> Option<Value> {
+        if self.heap.is_generator(value) {
+            Some(value)
+        } else {
+            self.heap.coroutine_iterator_source(value)
+        }
+    }
+
     fn freeze_generator_call(&mut self, program: &Program, destination: usize) -> Result<()> {
         let frame = self.frames.pop().ok_or_else(|| {
             Diagnostic::new("BytecodeError", "generator call did not create a frame")
         })?;
         let metadata = &program.code[frame.code];
-        if !metadata.generator || frame.generator.is_some() {
+        if (!metadata.generator && !metadata.coroutine) || frame.generator.is_some() {
             return Err(Diagnostic::new(
                 "BytecodeError",
                 "invalid generator creation frame",
@@ -3057,7 +3116,16 @@ impl Vm {
         self.arguments.truncate(frame.argument_base);
         self.pending_classes.truncate(frame.pending_class_base);
         let generator = self.heap.alloc(Object::Generator(GeneratorFrame {
-            class: self.runtime_types.generator,
+            class: if metadata.coroutine {
+                self.runtime_types.coroutine
+            } else {
+                self.runtime_types.generator
+            },
+            kind: if metadata.coroutine {
+                GeneratorKind::Coroutine
+            } else {
+                GeneratorKind::Generator
+            },
             execution: self.execution,
             code: frame.code as u16,
             ip: 0,
@@ -3089,7 +3157,13 @@ impl Vm {
         }
         match self.heap.generator_state(generator) {
             Some(GeneratorState::Completed) => {
-                return Err(Diagnostic::new("StopIteration", String::new()))
+                return Err(
+                    if self.heap.generator_kind(generator) == Some(GeneratorKind::Coroutine) {
+                        Diagnostic::new("RuntimeError", "cannot reuse already awaited coroutine")
+                    } else {
+                        Diagnostic::new("StopIteration", String::new())
+                    },
+                )
             }
             Some(GeneratorState::Running) => {
                 return Err(Diagnostic::new("ValueError", "generator already executing"))
@@ -3112,7 +3186,7 @@ impl Vm {
             _ => return Err(Diagnostic::new("TypeError", "object is not a generator")),
         };
         if code >= program.code.len()
-            || !program.code[code].generator
+            || (!program.code[code].generator && !program.code[code].coroutine)
             || register_count != usize::from(program.code[code].registers)
             || cell_count
                 != program.code[code].cell_locals.len() + program.code[code].free_vars.len()
@@ -3419,8 +3493,15 @@ impl Vm {
             }
             if stop_iteration && frame.generator.is_some() && !completed_generator {
                 let generator = frame.generator.expect("checked generator frame");
+                let resumable =
+                    if self.heap.generator_kind(generator) == Some(GeneratorKind::Coroutine) {
+                        "coroutine"
+                    } else {
+                        "generator"
+                    };
                 self.heap.complete_generator(generator)?;
-                let converted = Diagnostic::new("RuntimeError", "generator raised StopIteration");
+                let converted =
+                    Diagnostic::new("RuntimeError", format!("{resumable} raised StopIteration"));
                 let converted_exception = self.exception_from_diagnostic(&converted)?;
                 self.heap
                     .set_exception_cause(converted_exception, Some(exception), true)?;
@@ -4158,6 +4239,7 @@ impl Vm {
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
+                            ReturnAction::Awaitable => self.validate_iterator(value)?,
                             ReturnAction::Next(_) => {}
                             ReturnAction::Close => {}
                             ReturnAction::IteratorNext { .. } => {}
@@ -5112,10 +5194,10 @@ impl Vm {
                     }
                     Op::Next => {
                         let iterator = self.read(b)?;
-                        if self.heap.is_generator(iterator) {
+                        if let Some(resumable) = self.iterator_resumable(iterator) {
                             match self.resume_generator(
                                 p,
-                                iterator,
+                                resumable,
                                 a,
                                 Value::NONE,
                                 ReturnAction::IteratorNext {
@@ -5127,7 +5209,7 @@ impl Vm {
                                 Err(error) if error.kind == "StopIteration" => {
                                     self.registers[a] = self
                                         .heap
-                                        .generator_return_value(iterator)
+                                        .generator_return_value(resumable)
                                         .unwrap_or(Value::NONE);
                                     self.jump(i.c as usize, pc);
                                 }
@@ -5166,8 +5248,45 @@ impl Vm {
                             return Err(Diagnostic::new("TypeError", "object is not an iterator"));
                         }
                     }
+                    Op::GetAwaitable => {
+                        let source = self.read(b)?;
+                        if self.heap.is_coroutine(source) {
+                            self.registers[a] = source;
+                        } else if let Some(call) =
+                            self.heap.special_method_call(source, "__await__")?
+                        {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [Value::UNBOUND; 3],
+                                    count: 0,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("__await__ frame").action =
+                                    ReturnAction::Awaitable;
+                            } else {
+                                self.validate_iterator(self.registers[a])?;
+                            }
+                        } else {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "object cannot be used in an await expression",
+                            ));
+                        }
+                    }
                     Op::YieldFrom => {
                         let iterator = self.read(b)?;
+                        let resumable = if self.heap.is_resumable(iterator) {
+                            Some(iterator)
+                        } else {
+                            self.heap.coroutine_iterator_source(iterator)
+                        };
                         let sent = self.read(a)?;
                         let injected = self
                             .frames
@@ -5187,10 +5306,10 @@ impl Vm {
                                 0,
                             )?;
                             if closing {
-                                if self.heap.is_generator(iterator) {
+                                if let Some(resumable) = resumable {
                                     self.resume_generator(
                                         p,
-                                        iterator,
+                                        resumable,
                                         a,
                                         Value::NONE,
                                         ReturnAction::YieldFromClose { exception },
@@ -5229,10 +5348,10 @@ impl Vm {
                                     self.pending_exception = Some(exception);
                                     return Err(diagnostic);
                                 }
-                            } else if self.heap.is_generator(iterator) {
+                            } else if let Some(resumable) = resumable {
                                 self.resume_generator(
                                     p,
-                                    iterator,
+                                    resumable,
                                     a,
                                     Value::NONE,
                                     ReturnAction::YieldFrom {
@@ -5292,10 +5411,10 @@ impl Vm {
                                 self.pending_exception = Some(exception);
                                 return Err(diagnostic);
                             }
-                        } else if self.heap.is_generator(iterator) {
+                        } else if let Some(resumable) = resumable {
                             match self.resume_generator(
                                 p,
-                                iterator,
+                                resumable,
                                 a,
                                 sent,
                                 ReturnAction::YieldFrom {
@@ -5701,6 +5820,7 @@ impl Vm {
             || !metadata.free_vars.is_empty()
             || metadata.class_body
             || metadata.generator
+            || metadata.coroutine
         {
             return None;
         }
@@ -6476,7 +6596,7 @@ impl Vm {
             return Ok(false);
         }
         let frame = self.frames.last_mut().expect("active frame");
-        if program.code[frame.code].generator {
+        if program.code[frame.code].generator || program.code[frame.code].coroutine {
             frame.jit_attempted = true;
             return Ok(false);
         }

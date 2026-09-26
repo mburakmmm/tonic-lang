@@ -59,6 +59,7 @@ fn build(
     let code = CodeObject {
         class_body: scope.class_body,
         generator: scope.generator,
+        coroutine: scope.coroutine,
         name,
         params: index(params.names().len())?,
         signature: Signature {
@@ -695,10 +696,18 @@ impl Lower<'_> {
             StmtKind::Function {
                 name,
                 label,
+                is_async,
                 decorators,
                 params,
                 body,
             } => {
+                debug_assert_eq!(
+                    *is_async,
+                    self.scope
+                        .children
+                        .iter()
+                        .any(|(span, child)| { *span == s.start && child.coroutine })
+                );
                 let decorators = decorators
                     .iter()
                     .map(|d| self.expr(d).map(|r| (r, d.span)))
@@ -943,6 +952,19 @@ impl Lower<'_> {
                 let result = self.constant(Constant::None, s)?;
                 let start = self.pc()?;
                 let exhausted = self.emit(Op::YieldFrom, result, iterator, 0, s)?;
+                self.emit(Op::Yield, result, result, 0, s)?;
+                self.emit(Op::Jump, start, 0, 0, s)?;
+                let end = self.pc()?;
+                self.patch(exhausted, end);
+                Ok(result)
+            }
+            ExprKind::Await(value) => {
+                let source = self.expr(value)?;
+                let awaitable = self.alloc(1)?;
+                self.emit(Op::GetAwaitable, awaitable, source, 0, s)?;
+                let result = self.constant(Constant::None, s)?;
+                let start = self.pc()?;
+                let exhausted = self.emit(Op::YieldFrom, result, awaitable, 0, s)?;
                 self.emit(Op::Yield, result, result, 0, s)?;
                 self.emit(Op::Jump, start, 0, 0, s)?;
                 let end = self.pc()?;

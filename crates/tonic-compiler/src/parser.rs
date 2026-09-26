@@ -52,6 +52,7 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
         symbols: Vec::new(),
         names: HashMap::new(),
         depth: 0,
+        async_function: false,
         class_name: None,
     };
     let body = adapter
@@ -79,6 +80,7 @@ struct Adapter {
     symbols: Vec<String>,
     names: HashMap<String, SymbolId>,
     depth: usize,
+    async_function: bool,
     class_name: Option<String>,
 }
 impl Adapter {
@@ -178,6 +180,7 @@ impl Adapter {
                     .collect::<Result<_>>()?;
                 let previous_class = self.class_name.replace(label.clone());
                 let previous_depth = std::mem::replace(&mut self.depth, 0);
+                let previous_async = std::mem::replace(&mut self.async_function, false);
                 self.symbol("__module__")?;
                 self.symbol("__qualname__")?;
                 self.symbol("__doc__")?;
@@ -198,6 +201,7 @@ impl Adapter {
                     body[0].kind = StmtKind::Assign(vec![Target::Name(doc)], expr);
                 }
                 self.depth = previous_depth;
+                self.async_function = previous_async;
                 self.class_name = previous_class;
                 StmtKind::Class {
                     name,
@@ -223,12 +227,41 @@ impl Adapter {
                     .collect::<Result<_>>()?;
                 let params = self.parameters(*f.args, s)?;
                 let name = self.symbol(f.name.as_str())?;
+                let previous_async = std::mem::replace(&mut self.async_function, false);
                 self.depth += 1;
                 let body = self.block(f.body)?;
                 self.depth -= 1;
+                self.async_function = previous_async;
                 StmtKind::Function {
                     name,
                     label,
+                    is_async: false,
+                    decorators,
+                    params,
+                    body,
+                }
+            }
+            py::Stmt::AsyncFunctionDef(f) => {
+                if f.returns.is_some() || !f.type_params.is_empty() {
+                    return Err(unsupported(s, "annotations/type parameters"));
+                }
+                let label = f.name.to_string();
+                let decorators = f
+                    .decorator_list
+                    .into_iter()
+                    .map(|d| self.expr(d))
+                    .collect::<Result<_>>()?;
+                let params = self.parameters(*f.args, s)?;
+                let name = self.symbol(f.name.as_str())?;
+                let previous_async = std::mem::replace(&mut self.async_function, true);
+                self.depth += 1;
+                let body = self.block(f.body)?;
+                self.depth -= 1;
+                self.async_function = previous_async;
+                StmtKind::Function {
+                    name,
+                    label,
+                    is_async: true,
                     decorators,
                     params,
                     body,
@@ -576,11 +609,21 @@ impl Adapter {
                 }
                 ExprKind::YieldFrom(Box::new(self.expr(*y.value)?))
             }
+            py::Expr::Await(await_) => {
+                if !self.async_function {
+                    return Err(
+                        Diagnostic::new("SyntaxError", "await outside async function").at(s),
+                    );
+                }
+                ExprKind::Await(Box::new(self.expr(*await_.value)?))
+            }
             py::Expr::Lambda(lambda) => {
                 let params = self.parameters(*lambda.args, s)?;
+                let previous_async = std::mem::replace(&mut self.async_function, false);
                 self.depth += 1;
                 let body = self.expr(*lambda.body)?;
                 self.depth -= 1;
+                self.async_function = previous_async;
                 ExprKind::Lambda {
                     params,
                     body: Box::new(body),

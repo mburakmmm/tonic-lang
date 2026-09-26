@@ -335,7 +335,7 @@ impl Vm {
                     ));
                 }
                 self.enter_frame(p, code, Some(destination), args, Some(callee))?;
-                if p.code[code].generator {
+                if p.code[code].generator || p.code[code].coroutine {
                     self.freeze_generator_call(p, destination)?;
                 }
             }
@@ -365,7 +365,9 @@ impl Vm {
                         ));
                     }
                     let source = args.positional(&self.registers, 0);
-                    if matches!(builtin, Builtin::GeneratorIter) && !self.heap.is_generator(source)
+                    if matches!(builtin, Builtin::GeneratorIter)
+                        && !self.heap.is_generator(source)
+                        && self.heap.coroutine_iterator_source(source).is_none()
                     {
                         return Err(Diagnostic::new(
                             "TypeError",
@@ -418,8 +420,10 @@ impl Vm {
                         ));
                     }
                     let iterator = args.positional(&self.registers, 0);
+                    let resumable = self.iterator_resumable(iterator);
                     if matches!(builtin, Builtin::GeneratorNext)
                         && !self.heap.is_generator(iterator)
+                        && resumable.is_none()
                     {
                         return Err(Diagnostic::new(
                             "TypeError",
@@ -427,10 +431,10 @@ impl Vm {
                         ));
                     }
                     let default = (args.count() == 2).then(|| args.positional(&self.registers, 1));
-                    if self.heap.is_generator(iterator) {
+                    if let Some(resumable) = resumable {
                         return match self.resume_generator(
                             p,
-                            iterator,
+                            resumable,
                             destination,
                             Value::NONE,
                             ReturnAction::Next(default),
@@ -494,6 +498,26 @@ impl Vm {
                     }
                     return Ok(());
                 }
+                if matches!(builtin, Builtin::CoroutineAwait) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "coroutine.__await__ expects no arguments",
+                        ));
+                    }
+                    let coroutine = args.positional(&self.registers, 0);
+                    if !self.heap.is_coroutine(coroutine) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "coroutine descriptor requires a coroutine",
+                        ));
+                    }
+                    self.registers[destination] = self.heap.alloc(Object::CoroutineIterator {
+                        class: self.runtime_types.coroutine_wrapper,
+                        coroutine,
+                    })?;
+                    return Ok(());
+                }
                 if matches!(builtin, Builtin::GeneratorSend) {
                     if args.keyword_count() != 0 || args.count() != 2 {
                         return Err(Diagnostic::new(
@@ -501,8 +525,12 @@ impl Vm {
                             "generator.send expects one value",
                         ));
                     }
-                    let generator = args.positional(&self.registers, 0);
-                    if !self.heap.is_generator(generator) {
+                    let receiver = args.positional(&self.registers, 0);
+                    let generator = self
+                        .heap
+                        .coroutine_iterator_source(receiver)
+                        .unwrap_or(receiver);
+                    if !self.heap.is_resumable(generator) {
                         return Err(Diagnostic::new(
                             "TypeError",
                             "generator descriptor requires a generator",
@@ -524,8 +552,12 @@ impl Vm {
                             "generator.throw expects one to three exception arguments",
                         ));
                     }
-                    let generator = args.positional(&self.registers, 0);
-                    if !self.heap.is_generator(generator) {
+                    let receiver = args.positional(&self.registers, 0);
+                    let generator = self
+                        .heap
+                        .coroutine_iterator_source(receiver)
+                        .unwrap_or(receiver);
+                    if !self.heap.is_resumable(generator) {
                         return Err(Diagnostic::new(
                             "TypeError",
                             "generator descriptor requires a generator",
@@ -681,7 +713,11 @@ impl Vm {
                             "generator.close expects no arguments",
                         ));
                     }
-                    let generator = args.positional(&self.registers, 0);
+                    let receiver = args.positional(&self.registers, 0);
+                    let generator = self
+                        .heap
+                        .coroutine_iterator_source(receiver)
+                        .unwrap_or(receiver);
                     let state = self.heap.generator_state(generator).ok_or_else(|| {
                         Diagnostic::new("TypeError", "generator descriptor requires a generator")
                     })?;
@@ -2940,10 +2976,10 @@ impl Vm {
         output: &mut dyn Write,
     ) -> Result<()> {
         loop {
-            let item = if self.heap.is_generator(state.iterator) {
+            let item = if let Some(resumable) = self.iterator_resumable(state.iterator) {
                 match self.resume_generator(
                     p,
-                    state.iterator,
+                    resumable,
                     destination,
                     Value::NONE,
                     ReturnAction::DictIterableNext(state.clone()),
@@ -3107,10 +3143,10 @@ impl Vm {
         mut state: DictPairConstruction,
         output: &mut dyn Write,
     ) -> Result<Option<DictConstruction>> {
-        if self.heap.is_generator(state.iterator) {
+        if let Some(resumable) = self.iterator_resumable(state.iterator) {
             return match self.resume_generator(
                 p,
-                state.iterator,
+                resumable,
                 destination,
                 Value::NONE,
                 ReturnAction::DictPairNext(state.clone()),
@@ -3279,10 +3315,10 @@ impl Vm {
         mut state: IterableCollection,
         output: &mut dyn Write,
     ) -> Result<()> {
-        if self.heap.is_generator(state.iterator) {
+        if let Some(resumable) = self.iterator_resumable(state.iterator) {
             return match self.resume_generator(
                 p,
-                state.iterator,
+                resumable,
                 destination,
                 Value::NONE,
                 ReturnAction::CollectIterableNext(state.clone()),
@@ -4550,7 +4586,8 @@ impl Vm {
             | Builtin::GeneratorNext
             | Builtin::GeneratorSend
             | Builtin::GeneratorThrow
-            | Builtin::GeneratorClose => {
+            | Builtin::GeneratorClose
+            | Builtin::CoroutineAwait => {
                 unreachable!("iterator builtin has a suspending call path")
             }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
@@ -4889,7 +4926,7 @@ impl Vm {
         output: &mut dyn Write,
     ) -> Result<bool> {
         match self.heap.iterator(source) {
-            Ok(iterator) if self.heap.is_generator(iterator) => {
+            Ok(iterator) if self.iterator_resumable(iterator).is_some() => {
                 let depth = self.frames.len();
                 self.continue_argument_expansion(
                     p,
@@ -4953,10 +4990,10 @@ impl Vm {
         state: ArgumentExpansion,
         output: &mut dyn Write,
     ) -> Result<()> {
-        if self.heap.is_generator(state.iterator) {
+        if let Some(resumable) = self.iterator_resumable(state.iterator) {
             return match self.resume_generator(
                 p,
-                state.iterator,
+                resumable,
                 destination,
                 Value::NONE,
                 ReturnAction::ExpandIterableNext(state),

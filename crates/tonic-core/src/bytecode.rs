@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 16;
+pub const BYTECODE_VERSION: u16 = 17;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -89,6 +89,7 @@ pub enum Op {
     ContextExit = 76,
     Yield = 77,
     YieldFrom = 78,
+    GetAwaitable = 79,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -175,6 +176,7 @@ impl TryFrom<u16> for Op {
             76 => Self::ContextExit,
             77 => Self::Yield,
             78 => Self::YieldFrom,
+            79 => Self::GetAwaitable,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -253,6 +255,7 @@ pub struct Signature {
 pub struct CodeObject {
     pub class_body: bool,
     pub generator: bool,
+    pub coroutine: bool,
     pub name: String,
     pub params: u16,
     pub signature: Signature,
@@ -323,6 +326,7 @@ impl Program {
             if entry.params != 0
                 || entry.class_body
                 || entry.generator
+                || entry.coroutine
                 || !entry.cell_locals.is_empty()
                 || !entry.free_vars.is_empty()
             {
@@ -344,7 +348,10 @@ impl Program {
             return Err(bad("module code ranges do not cover the program"));
         }
         for code in &self.code {
-            if code.class_body && (code.params != 0 || code.generator) {
+            if code.generator && code.coroutine {
+                return Err(bad("code cannot be both generator and coroutine"));
+            }
+            if code.class_body && (code.params != 0 || code.generator || code.coroutine) {
                 return Err(bad("class body cannot be a function"));
             }
             if code.instructions.is_empty()
@@ -650,8 +657,8 @@ impl Program {
                         }
                     }
                     Op::Yield => {
-                        if !code.generator {
-                            return Err(bad("yield outside generator code"));
+                        if !code.generator && !code.coroutine {
+                            return Err(bad("yield outside resumable code"));
                         }
                         reg(i.a)?;
                         reg(i.b)?;
@@ -660,12 +667,22 @@ impl Program {
                         }
                     }
                     Op::YieldFrom => {
-                        if !code.generator {
-                            return Err(bad("yield from outside generator code"));
+                        if !code.generator && !code.coroutine {
+                            return Err(bad("yield from outside resumable code"));
                         }
                         reg(i.a)?;
                         reg(i.b)?;
                         jump(i.c)?;
+                    }
+                    Op::GetAwaitable => {
+                        if !code.coroutine {
+                            return Err(bad("await outside coroutine code"));
+                        }
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
                     }
                     Op::Raise => {
                         if i.b > 2 || (i.b != 2 && i.c != 0) {

@@ -299,16 +299,41 @@ unwind zincirinde tutar. Açıkça kaçan `StopIteration` generator sınırında
 çağıran kod exact interpreter continuation ile güvenli biçimde devam eder.
 
 Tek-argümanlı modern `throw` yanında legacy `throw(type, value, traceback)` biçimi
-exception constructor ve traceback doğrulamasıyla desteklenir. Bu dilim tam
-coroutine aşaması değildir. Major/minor collector, ulaşılamayan askıdaki generator'ı
+exception constructor ve traceback doğrulamasıyla desteklenir. Major/minor
+collector, ulaşılamayan askıdaki generator'ı
 silmek yerine logical handle'ıyla finalization kökü olarak kuyruğa alır. VM collector
 dışında `GeneratorExit` enjekte eder; delege `yield from` zinciri içten dışa kapanır,
 `finally` çalışır ve fiziksel reclamation sonraki collection'a kalır. Normal instruction
 sınırında en fazla sekiz finalizer çalıştırılır; idle explicit collection ve shutdown
 kuyruğu tamamen boşaltır. Finalizer'dan kaçan guest exception ana yürütmeden yalıtılır
-ve sayaçlanır. Kullanıcı `__del__`/resurrection ve `async`/`await`/coroutine state
-machine açık kalır. Ayrıntı
+ve sayaçlanır. Kullanıcı `__del__`/resurrection açık kalır. Ayrıntı
 [ADR 0072](adr/0072-generator-frame-state-machine.md) dosyasındadır.
+
+## Coroutine ilk dilimi
+
+Bytecode v17, code nesnesindeki generator niteliğinden ayrı bir `coroutine`
+niteliği ve doğrulanmış `GET_AWAITABLE` opcode'u ekler. `async def` çağrısı
+gövdeyi çalıştırmadan, mevcut suspended-frame altyapısını coroutine türüyle
+yeniden kullanarak tembel bir `<coroutine object>` üretir. Exact Tonic coroutine
+`await` yolunda doğrudan sürülür; özel awaitable nesnelerde sınıf MRO'sundan
+`__await__` çağrılır ve dönen değerin iterator olduğu coroutine devam etmeden
+doğrulanır.
+
+Coroutine kendi başına genel iterable değildir. Açık `coroutine.__await__()`
+çağrısı, kaynak coroutine'i precise trace kenarıyla tutan ayrı bir
+`coroutine_wrapper` üretir. Wrapper kendi iterator'ıdır ve `next`, `send`,
+`throw`, `close` işlemlerini alttaki coroutine state machine'ine iletir. Await
+delegasyonu gönderilen değerleri, exception'ları, `StopIteration.value` dönüşünü
+ve kapanışı iç awaitable'dan dış coroutine'e taşır. Askıdaki register/cell,
+exception state ve aktif delege moving/stress GC altında köklenir. Ulaşılamayan
+askıdaki coroutine mevcut collector-dışı logical-finalization kuyruğunda kapanır;
+await edilen iterator önce, dış `finally` sonra çalışır.
+
+Coroutine code'u ve coroutine hedefli direct call Cranelift kapsamı dışında
+kalır. JIT'te çalışan çağıran kod generic çağrı sınırından interpreter resume
+yoluna güvenle geçer. Async generator, `async for`, `async with` ve
+event-loop/future/task protokolleri bu dilime dahil değildir. Ayrıntı
+[ADR 0073](adr/0073-coroutine-await-state-machine.md) dosyasındadır.
 
 ## Uygulama sırası ve kabul kapıları
 

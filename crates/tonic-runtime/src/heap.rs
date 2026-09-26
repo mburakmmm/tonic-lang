@@ -21,9 +21,16 @@ pub(crate) enum GeneratorState {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GeneratorKind {
+    Generator,
+    Coroutine,
+}
+
 #[derive(Debug)]
 pub(crate) struct GeneratorFrame {
     pub class: Value,
+    pub kind: GeneratorKind,
     pub execution: u64,
     pub code: u16,
     pub ip: usize,
@@ -73,6 +80,7 @@ pub(crate) enum Builtin {
     GeneratorSend,
     GeneratorThrow,
     GeneratorClose,
+    CoroutineAwait,
     Hash,
     Abs,
     IsInstance,
@@ -173,6 +181,10 @@ pub(crate) enum Object {
         defaults: Vec<Value>,
     },
     Generator(GeneratorFrame),
+    CoroutineIterator {
+        class: Value,
+        coroutine: Value,
+    },
     Cell(Value),
     Builtin(Builtin),
     Native(usize),
@@ -207,7 +219,8 @@ impl Object {
         match self {
             Self::Instance { class, .. }
             | Self::Exception { class, .. }
-            | Self::Generator(GeneratorFrame { class, .. }) => Some(*class),
+            | Self::Generator(GeneratorFrame { class, .. })
+            | Self::CoroutineIterator { class, .. } => Some(*class),
             _ => None,
         }
     }
@@ -311,6 +324,10 @@ impl Object {
                     .chain(&frame.yield_from)
                     .copied()
                     .for_each(visit);
+            }
+            Self::CoroutineIterator { class, coroutine } => {
+                visit(*class);
+                visit(*coroutine);
             }
             Self::Dict(dict) => {
                 for (key, value) in &dict.entries {
@@ -759,12 +776,46 @@ impl Heap {
     }
 
     pub(crate) fn is_generator(&self, value: Value) -> bool {
+        matches!(
+            self.try_get(value),
+            Some(Object::Generator(GeneratorFrame {
+                kind: GeneratorKind::Generator,
+                ..
+            }))
+        )
+    }
+
+    pub(crate) fn is_coroutine(&self, value: Value) -> bool {
+        matches!(
+            self.try_get(value),
+            Some(Object::Generator(GeneratorFrame {
+                kind: GeneratorKind::Coroutine,
+                ..
+            }))
+        )
+    }
+
+    pub(crate) fn is_resumable(&self, value: Value) -> bool {
         matches!(self.try_get(value), Some(Object::Generator(_)))
+    }
+
+    pub(crate) fn coroutine_iterator_source(&self, value: Value) -> Option<Value> {
+        match self.try_get(value) {
+            Some(Object::CoroutineIterator { coroutine, .. }) => Some(*coroutine),
+            _ => None,
+        }
     }
 
     pub(crate) fn generator_state(&self, value: Value) -> Option<GeneratorState> {
         match self.try_get(value) {
             Some(Object::Generator(frame)) => Some(frame.state),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn generator_kind(&self, value: Value) -> Option<GeneratorKind> {
+        match self.try_get(value) {
+            Some(Object::Generator(frame)) => Some(frame.kind),
             _ => None,
         }
     }
@@ -1205,7 +1256,11 @@ impl Heap {
                 self.format_depth(*step, true, path)?
             ),
             Object::Function { .. } => "<function>".into(),
-            Object::Generator(_) => "<generator object>".into(),
+            Object::Generator(frame) => match frame.kind {
+                GeneratorKind::Generator => "<generator object>".into(),
+                GeneratorKind::Coroutine => "<coroutine object>".into(),
+            },
+            Object::CoroutineIterator { .. } => "<coroutine_wrapper object>".into(),
             Object::Dict(dict) => {
                 if path.contains(&v) {
                     return Ok("{...}".into());

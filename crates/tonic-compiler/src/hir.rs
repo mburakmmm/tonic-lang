@@ -10,6 +10,7 @@ use tonic_core::{
 pub(crate) struct Scope {
     pub class_body: bool,
     pub generator: bool,
+    pub coroutine: bool,
     class_cell: Option<SymbolId>,
     pub globals: HashSet<SymbolId>,
     pub nonlocals: HashSet<SymbolId>,
@@ -25,13 +26,14 @@ impl Scope {
         module: bool,
         bound: &HashSet<SymbolId>,
     ) -> Result<Self> {
-        Self::resolve_kind(params, body, module, false, None, bound)
+        Self::resolve_kind(params, body, module, false, false, None, bound)
     }
     fn resolve_kind(
         params: &Parameters,
         body: &[Stmt],
         module: bool,
         class_body: bool,
+        coroutine: bool,
         class_cell: Option<SymbolId>,
         bound: &HashSet<SymbolId>,
     ) -> Result<Self> {
@@ -52,6 +54,13 @@ impl Scope {
                 return Err(Diagnostic::new("SyntaxError", "yield outside function").at(span));
             }
         }
+        if coroutine && scan.yield_span.is_some() {
+            return Err(Diagnostic::new(
+                "UnsupportedSyntax",
+                "async generators are not implemented yet",
+            )
+            .at(scan.yield_span.expect("checked async generator yield")));
+        }
         for name in &scan.nonlocals {
             if !bound.contains(name) {
                 return Err(Diagnostic::new(
@@ -64,6 +73,7 @@ impl Scope {
         let mut scope = Self {
             class_body,
             generator: scan.yield_span.is_some(),
+            coroutine,
             class_cell,
             globals: scan.globals.clone(),
             nonlocals: scan.nonlocals.clone(),
@@ -99,12 +109,15 @@ impl Scope {
         }
         for (span, child) in scan.children {
             let child = match child {
-                Child::Function(params, body) => Self::resolve(params, body, false, &child_bound)?,
+                Child::Function(params, body, coroutine) => {
+                    Self::resolve_kind(params, body, false, false, coroutine, None, &child_bound)?
+                }
                 Child::Class(body, class_cell) => Self::resolve_kind(
                     &Parameters::default(),
                     body,
                     false,
                     true,
+                    false,
                     Some(class_cell),
                     &child_bound,
                 )?,
@@ -174,7 +187,7 @@ struct Scan<'a> {
     yield_span: Option<Span>,
 }
 enum Child<'a> {
-    Function(&'a Parameters, &'a [Stmt]),
+    Function(&'a Parameters, &'a [Stmt], bool),
     Class(&'a [Stmt], SymbolId),
     Lambda(&'a Parameters, &'a Expr),
 }
@@ -262,6 +275,7 @@ impl<'a> Scan<'a> {
                 self.yield_span.get_or_insert(e.span);
                 self.expr(value);
             }
+            ExprKind::Await(value) => self.expr(value),
             ExprKind::Lambda { params, body } => {
                 for (_, default) in params.defaults() {
                     self.expr(default);
@@ -343,6 +357,7 @@ impl<'a> Scan<'a> {
                 }
                 StmtKind::Function {
                     name,
+                    is_async,
                     decorators,
                     params,
                     body,
@@ -356,7 +371,7 @@ impl<'a> Scan<'a> {
                     }
                     self.bind(*name);
                     self.children
-                        .push((s.span.start, Child::Function(params, body)));
+                        .push((s.span.start, Child::Function(params, body, *is_async)));
                 }
                 StmtKind::Class {
                     name,

@@ -2,10 +2,10 @@
 
 ## Durum
 
-Kısmen uygulandı. Bu karar senkron generator çekirdeğini, bytecode v16 `YIELD` /
+Uygulandı. Bu karar senkron generator çekirdeğini, bytecode v16 `YIELD` /
 `YIELD_FROM` opcode'larını, askıya alınmış kesin GC köklerini, tam senkron
-delegasyon protokolünü ve generator logical finalization'ını kapsar.
-Coroutine/async açık kalır.
+delegasyon protokolünü ve generator logical finalization'ını kapsar. Coroutine
+çekirdeği ayrı [ADR 0073](0073-coroutine-await-state-machine.md) kararındadır.
 
 ## Karar
 
@@ -76,8 +76,8 @@ ile fiziksel reclamation ayrı collection adımlarıdır. `Created`, `Running` v
 
 ## Açık kapsam
 
-- `async def`, `await`, async generator ve coroutine state machine ayrı bir
-  genişletme olarak eklenecektir.
+- Async generator ve async iteration/context protokolleri ADR 0073 sonrasında
+  ayrı genişletmeler olarak eklenecektir.
 - Genel kullanıcı `__del__`, resurrection ve unraisable hook politikası ayrı
   finalizer tasarımında ele alınacaktır.
 - Generator code'unun JIT edilmesi ancak deopt metadata ve suspended-root stack

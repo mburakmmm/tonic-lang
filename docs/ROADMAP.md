@@ -141,7 +141,12 @@ sonra alınır.
   - [x] Ulaşılamayan askıdaki generator'lar için collector-dışı logical close,
     finalization roots, delege kapatma, bastırılan hata sayaçları, safepoint başına
     sekiz öğelik bounded drain ve shutdown kapanışı.
-  - [ ] Async/await/coroutine ve async-generator state machine'i.
+  - [x] Bytecode v17 `async def`/`await`; tembel coroutine nesnesi, exact Tonic
+    coroutine ve özel `__await__` delegasyonu, ayrı GC-traced
+    `coroutine_wrapper`, `send`/`throw`/`close`, askıdaki frame/delege kökleri,
+    logical finalization ve JIT-caller interpreter fallback'i.
+  - [ ] Async generator, `async for`/`async with` ve event-loop/future/task
+    protokolleri.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
@@ -241,9 +246,10 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler kalan builtin protokolleri, module/import hattı,
-generator/coroutine state machine'leri ve HPy H1 shared-library loader/handle
-yüzeyidir. JIT'in desteklenen tier'ı x86-64/AArch64 debug-release, normal/stress
+Sıradaki çekirdek işler kalan builtin protokolleri, async generator ve async
+iteration/context protokolleri, genel kullanıcı finalizer semantiği ve HPy H1
+shared-library loader/handle yüzeyidir. JIT'in desteklenen tier'ı
+x86-64/AArch64 debug-release, normal/stress
 GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;
 desteklenmeyen bytecode generic interpreter fallback'inde kalır.
 HPy/aHPy kararının ayrıntıları
