@@ -120,6 +120,45 @@ fn generator_stop_iteration_is_converted_at_the_boundary() {
         "['inside']\nstart\ngenerator raised StopIteration\n"
     );
 }
+
+#[test]
+fn unreachable_suspended_generators_run_finally_outside_the_collector() {
+    let source = "def closing(label):\n    try:\n        yield label\n    finally:\n        print('finalized',label)\ndef abandon():\n    generator=closing('one')\n    print(next(generator))\nabandon()\nprint('body-complete')";
+    let program = compile(source, "generator-finalization").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"one\nbody-complete\n");
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(out, b"one\nbody-complete\nfinalized one\n");
+        assert_eq!(vm.stats.generator_finalizers, 1);
+        assert_eq!(vm.stats.generator_finalizer_errors, 0);
+        let reclaimed = vm.collect_garbage().unwrap().reclaimed;
+        assert!(reclaimed >= 1, "physical reclamation follows logical close");
+    }
+}
+
+#[test]
+fn generator_finalization_closes_delegates_and_contains_unraisable_errors() {
+    let source = "def inner():\n    try:\n        yield 'ready'\n    finally:\n        print('inner-finally')\ndef outer():\n    try:\n        yield from inner()\n    finally:\n        print('outer-finally')\ndef bad():\n    try:\n        yield 'bad-ready'\n    finally:\n        print('bad-finally')\n        raise ValueError('unraisable')\ndef abandon():\n    delegated=outer()\n    broken=bad()\n    print(next(delegated),next(broken))\nabandon()\ni=0\nwhile i<40:\n    marker=[i]\n    i+=1\nprint('body-complete')";
+    let program = compile(source, "delegated-generator-finalization").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"ready bad-ready\nbad-finally\ninner-finally\nouter-finally\nbody-complete\n"
+        );
+        assert_eq!(vm.stats.generator_finalizers, 2);
+        assert_eq!(vm.stats.generator_finalizer_errors, 1);
+    }
+}
 #[test]
 fn exception_objects_and_explicit_raise() {
     assert_eq!(

@@ -138,7 +138,10 @@ sonra alınır.
   - [x] Bytecode v16 `YIELD_FROM`; generator ve özel iterator delegelerine
     `send`/`throw`/`close` forwarding, dış handler/finally unwind'ı, tam legacy
     `throw(type, value, traceback)` imzası ve GC-traced `StopIteration.value`.
-  - [ ] Generator finalization ve async/await/coroutine state machine'i.
+  - [x] Ulaşılamayan askıdaki generator'lar için collector-dışı logical close,
+    finalization roots, delege kapatma, bastırılan hata sayaçları, safepoint başına
+    sekiz öğelik bounded drain ve shutdown kapanışı.
+  - [ ] Async/await/coroutine ve async-generator state machine'i.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
@@ -148,7 +151,11 @@ sonra alınır.
 - [x] Precise full-heap tracing GC, cycle toplama, compaction; slot/generation doğrulaması.
 - [x] Stress GC, generation exhaustion, cycle/movement, native roots ve mutation graph testleri.
 - [x] Nursery/old-generation ayrımı, write barrier ve remembered set; minor/major collection testleri.
-- [ ] Finalizer semantiği ve finalization roots; bounded pause tasarımı.
+- [ ] Genel finalizer semantiği ve finalization roots; bounded pause tasarımı.
+  - [x] Suspended generator finalization queue, precise roots ve safepoint başına
+    bounded logical close; fiziksel reclamation sonraki collection'a ayrılır.
+  - [ ] Kullanıcı `__del__`, resurrection, unraisable hook ve genel nesne
+    finalization sırası.
 - [x] Sabitlenmiş Cranelift 0.119 backend; immediate integer leaf numeric-loop bytecode'u, `--jit`, guard ve register-materialized deopt.
 - [x] Leaf JIT differential korpusu; guard/fallback, entry hotness ve ölçümlü küçük-fonksiyon kârlılık eşiği, bounded de-specialization, compile-time/code-size sayaçları.
 - [x] Opak runtime helper ABI; allocation üreten true division, kesin hata türü/PC dönüşü ve panic'in FFI sınırını aşmasını engelleyen trampoline.

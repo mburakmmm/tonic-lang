@@ -3,8 +3,9 @@
 ## Durum
 
 Kısmen uygulandı. Bu karar senkron generator çekirdeğini, bytecode v16 `YIELD` /
-`YIELD_FROM` opcode'larını, askıya alınmış kesin GC köklerini ve tam senkron
-delegasyon protokolünü kapsar. Coroutine/async ve finalization açık kalır.
+`YIELD_FROM` opcode'larını, askıya alınmış kesin GC köklerini, tam senkron
+delegasyon protokolünü ve generator logical finalization'ını kapsar.
+Coroutine/async açık kalır.
 
 ## Karar
 
@@ -63,21 +64,34 @@ Generator code'u Cranelift adaylığından ve direct-call specialization'dan har
 tutulur. JIT'te çalışan çağıran kod generic sınırdan interpreter generator frame'ine
 geçebilir.
 
+Major veya minor collector ulaşılamayan `Suspended` generator'ı sweep etmek yerine
+logical handle'ıyla finalization kuyruğuna alır ve bütün frame grafiğini precise root
+olarak işaretler. Collector guest kodu çalıştırmaz. VM instruction sınırında kuyruktan
+en fazla sekiz öğe alır, collector dışında `GeneratorExit` enjekte eder ve mevcut
+`close`/`yield from` unwind yolunu kullanır. Delege generator önce, dış generator
+sonra kapanır. Finalizer'dan kaçan guest exception ana yürütmeyi bozmaz; stats içinde
+sayılır. Explicit idle collection ve shutdown kuyruğu tamamen boşaltır. Logical close
+ile fiziksel reclamation ayrı collection adımlarıdır. `Created`, `Running` ve zaten
+`Completed` generator'lar bu kuyruğa girmez.
+
 ## Açık kapsam
 
-- Ulaşılamayan askıdaki generator'ların logical finalization/close politikası,
-  genel finalizer tasarımıyla birlikte belirlenecektir.
 - `async def`, `await`, async generator ve coroutine state machine ayrı bir
   genişletme olarak eklenecektir.
+- Genel kullanıcı `__del__`, resurrection ve unraisable hook politikası ayrı
+  finalizer tasarımında ele alınacaktır.
 - Generator code'unun JIT edilmesi ancak deopt metadata ve suspended-root stack
   map tasarımı hazır olduğunda değerlendirilecektir.
 
 ## Doğrulama
 
 Compiler testleri lexical generator işaretlemesini, module/class reddini ve owned
-AST/bytecode üretimini kapsar. Verifier testi `YIELD` için generator metadata ve
+AST/bytecode üretimini kapsar. Verifier testi `YIELD`/`YIELD_FROM` için generator metadata ve
 operand sınırını doğrular. Runtime testleri tembel çağrı, `iter`/`next`, bütün
 builtin tüketiciler, `send`/modern ve legacy `throw`/`close`, return-değerli ve tam
 forwarding yapan `yield from`, PEP 479, closure/cell/exception/delegate state'i ve
 moving stress GC'yi interpreter ile JIT çağıran modlarda sınar. Python differential
 corpus'u senkron protokol ve hata türlerini CPython 3.14.6 ile karşılaştırır.
+Ek GC/lifecycle testleri explicit ve otomatik collection'da `finally` yürütmesini,
+delege kapanma sırasını, unraisable hata yalıtımını, sayaçları ve shutdown öncesi
+logical close'u doğrular.

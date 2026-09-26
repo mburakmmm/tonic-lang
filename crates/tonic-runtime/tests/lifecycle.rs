@@ -155,3 +155,22 @@ fn staged_shutdown_invalidates_roots_and_rejects_future_work() {
     );
     let _invalidated_host_token = persistent;
 }
+
+#[test]
+fn shutdown_logically_closes_suspended_generators_before_reclamation() {
+    let program = compile(
+        "def suspended():\n    try:\n        yield 1\n    finally:\n        marker=['closed']\ngenerator=suspended()\nprint(next(generator))",
+        "shutdown-generator-finalization",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = None;
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\n");
+    let collection = vm.shutdown().unwrap();
+    assert_eq!(vm.stats.generator_finalizers, 1);
+    assert_eq!(vm.stats.generator_finalizer_errors, 0);
+    assert_eq!(collection.survivors, 0);
+    assert_eq!(vm.phase(), RuntimePhase::Dead);
+}

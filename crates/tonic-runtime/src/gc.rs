@@ -20,6 +20,7 @@ impl Heap {
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>) -> Result<CollectionStats> {
         let mut marked = vec![false; self.objects.len()];
         let mut work: Vec<Value> = roots.into_iter().collect();
+        work.extend(self.pending_generators.iter().copied());
         // Validate and mark completely before modifying slots; failure is atomic.
         while let Some(value) = work.pop() {
             if value.heap_index().is_none() {
@@ -34,6 +35,7 @@ impl Heap {
                 .object
                 .trace(|value| work.push(value));
         }
+        self.queue_unreachable_generators(&mut marked, false)?;
         Ok(self.sweep(marked, false))
     }
 
@@ -43,6 +45,7 @@ impl Heap {
     ) -> Result<CollectionStats> {
         let mut marked = vec![false; self.objects.len()];
         let mut work: Vec<Value> = roots.into_iter().collect();
+        work.extend(self.pending_generators.iter().copied());
         for slot_index in self.remembered.iter().copied() {
             let Some(location) = self
                 .slots
@@ -70,7 +73,49 @@ impl Heap {
                 .object
                 .trace(|value| work.push(value));
         }
+        self.queue_unreachable_generators(&mut marked, true)?;
         Ok(self.sweep(marked, true))
+    }
+
+    fn queue_unreachable_generators(
+        &mut self,
+        marked: &mut [bool],
+        young_only: bool,
+    ) -> Result<()> {
+        for location in 0..self.objects.len() {
+            if marked[location]
+                || (young_only && !self.objects[location].young)
+                || !matches!(
+                    &self.objects[location].object,
+                    super::Object::Generator(super::GeneratorFrame {
+                        state: super::GeneratorState::Suspended,
+                        ..
+                    })
+                )
+            {
+                continue;
+            }
+            let slot = self.objects[location].slot;
+            let value = Value::heap(slot, self.slots[slot as usize].generation);
+            if !self.pending_generators.contains(&value) {
+                self.pending_generators.push(value);
+            }
+            let mut work = vec![value];
+            while let Some(value) = work.pop() {
+                if value.heap_index().is_none() {
+                    continue;
+                }
+                let location = self.location(value).ok_or_else(|| invalid_value(value))?;
+                if marked[location] {
+                    continue;
+                }
+                marked[location] = true;
+                self.objects[location]
+                    .object
+                    .trace(|value| work.push(value));
+            }
+        }
+        Ok(())
     }
 
     fn sweep(&mut self, marked: Vec<bool>, young_only: bool) -> CollectionStats {

@@ -41,9 +41,9 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 9, compiler/parser 16, core verifier 10, Cranelift JIT 16, runtime unit 22,
-direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
+direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 85, CPython bridge 15 ve HPy manifest 5; toplam 303 test.
+native handles 5, language/runtime 87, CPython bridge 15 ve HPy manifest 5; toplam 306 test.
 
 Differential corpus: 304 stdout vakası ve 149 exception türü vakası. Seed 42.
 Generator ilk diliminden sonra debug/release × interpreter/JIT ×
@@ -74,7 +74,9 @@ modern/legacy `throw`, `close`, delege `return` değerli ve tam forwarding yapan
 `StopIteration` için PEP 479 `RuntimeError` dönüşümünü kapsar.
 Rust testleri bunlara ek olarak closure/cell ve aktif exception state'inin
 normal/stress GC altında hareketini; list/tuple/dict/for/unpack/`*args`
-tüketicilerini ve generator kodunun JIT dışı kalmasını doğrular.
+tüketicilerini, generator kodunun JIT dışı kalmasını, ulaşılamayan askıdaki
+generator'ların collector-dışı logical close'unu, delege kapanma sırasını,
+unraisable hata yalıtımını ve shutdown finalization'ını doğrular.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython
@@ -230,8 +232,9 @@ sayaçları ayrıca test edilir. True division runtime helper'ı float allocatio
 exact error PC/türü ve explicit materialized register roots kullanır. Ardışık iki
 helper arasında yalnız JIT register'ında yaşayan float, helper-triggered stress
 collection'dan sağ çıkar. Bu boxed-register ABI'sinin allocation safepoint testidir;
-unboxed machine deopt map kapsamı ayrı JIT testlerinde doğrulanır. Dil düzeyindeki
-kullanıcı finalizer semantiği henüz uygulanmamıştır; CPython bridge'in iki-collector
+unboxed machine deopt map kapsamı ayrı JIT testlerinde doğrulanır. Suspended generator
+logical finalization'ı uygulanmıştır; genel kullanıcı `__del__`/resurrection/
+unraisable-hook semantiği henüz uygulanmamıştır. CPython bridge'in iki-collector
 cycle/finalizer sırası yukarıdaki on beş integration testiyle sınırlanır.
 Recursive JIT testi `CALL` side exit'i, explicit child frame, arbitrary-PC native
 resume ve direct bound `LOAD_GLOBAL` yolunu birlikte çalıştırır. Global rebinding

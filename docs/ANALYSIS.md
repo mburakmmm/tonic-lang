@@ -300,8 +300,14 @@ unwind zincirinde tutar. Açıkça kaçan `StopIteration` generator sınırında
 
 Tek-argümanlı modern `throw` yanında legacy `throw(type, value, traceback)` biçimi
 exception constructor ve traceback doğrulamasıyla desteklenir. Bu dilim tam
-coroutine aşaması değildir; ulaşılamayan generator finalization'ı ve
-`async`/`await`/coroutine state machine açık kalır. Ayrıntı
+coroutine aşaması değildir. Major/minor collector, ulaşılamayan askıdaki generator'ı
+silmek yerine logical handle'ıyla finalization kökü olarak kuyruğa alır. VM collector
+dışında `GeneratorExit` enjekte eder; delege `yield from` zinciri içten dışa kapanır,
+`finally` çalışır ve fiziksel reclamation sonraki collection'a kalır. Normal instruction
+sınırında en fazla sekiz finalizer çalıştırılır; idle explicit collection ve shutdown
+kuyruğu tamamen boşaltır. Finalizer'dan kaçan guest exception ana yürütmeden yalıtılır
+ve sayaçlanır. Kullanıcı `__del__`/resurrection ve `async`/`await`/coroutine state
+machine açık kalır. Ayrıntı
 [ADR 0072](adr/0072-generator-frame-state-machine.md) dosyasındadır.
 
 ## Uygulama sırası ve kabul kapıları

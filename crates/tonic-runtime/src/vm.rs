@@ -51,6 +51,8 @@ pub struct Stats {
     pub foreign_trace_calls: u64,
     pub foreign_destructor_calls: u64,
     pub foreign_destructor_panics: u64,
+    pub generator_finalizers: u64,
+    pub generator_finalizer_errors: u64,
     pub backedges: u64,
     pub heap_allocations: u64,
     pub estimated_heap_bytes: usize,
@@ -522,6 +524,7 @@ const DEFAULT_JIT_OSR_THRESHOLD: u32 = 64;
 const DEFAULT_JIT_MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
 const QUICKEN_THRESHOLD: u8 = 8;
 const MINORS_PER_MAJOR: u8 = 32;
+const GENERATOR_FINALIZERS_PER_SAFEPOINT: usize = 8;
 #[derive(Clone, Copy, Default)]
 enum AdaptiveState {
     #[default]
@@ -1364,6 +1367,8 @@ pub struct Vm {
     frames: Vec<Frame>,
     pending_classes: Vec<PendingClass>,
     pending_exception: Option<Value>,
+    draining_generator_finalizers: bool,
+    finalizer_roots: Vec<Value>,
     pub limits: Limits,
     pub stats: Stats,
     /// Allocation interval for scheduled minor/major collection; None disables automatic GC.
@@ -1425,6 +1430,8 @@ impl Vm {
             frames: Vec::new(),
             pending_classes: Vec::new(),
             pending_exception: None,
+            draining_generator_finalizers: false,
+            finalizer_roots: Vec::new(),
             limits: Limits::default(),
             stats: Stats::default(),
             gc_interval: Some(1024),
@@ -1978,12 +1985,20 @@ impl Vm {
             ));
         }
         self.phase = RuntimePhase::Finalizing;
+        self.heap.queue_all_suspended_generators();
+        if let Some(program) = self.active_program.clone() {
+            let mut output = std::io::sink();
+            while self.heap.has_pending_generator_finalizers() {
+                self.drain_generator_finalizers(&program, &mut output, usize::MAX)?;
+            }
+        }
         self.frames.clear();
         self.registers.clear();
         self.cells.clear();
         self.arguments.clear();
         self.pending_classes.clear();
         self.pending_exception = None;
+        self.finalizer_roots.clear();
         self.globals.clear();
         self.constants.clear();
         self.jit_globals.clear();
@@ -2065,8 +2080,10 @@ impl Vm {
         roots.extend(self.builtins.iter().map(|(_, v)| *v));
         roots.extend(self.runtime_types.roots());
         roots.extend(self.pending_exception);
+        roots.extend(self.finalizer_roots.iter().copied());
         roots.extend(self.frames.iter().filter_map(|frame| frame.callable));
         roots.extend(self.frames.iter().filter_map(|frame| frame.namespace));
+        roots.extend(self.frames.iter().filter_map(|frame| frame.generator));
         roots.extend(self.frames.iter().filter_map(|frame| frame.yield_from));
         roots.extend(
             self.frames
@@ -2092,6 +2109,13 @@ impl Vm {
         }
     }
     pub fn collect_garbage(&mut self) -> Result<crate::CollectionStats> {
+        self.collect_garbage_with_output(&mut std::io::sink())
+    }
+
+    pub fn collect_garbage_with_output(
+        &mut self,
+        output: &mut dyn Write,
+    ) -> Result<crate::CollectionStats> {
         self.ensure_running()?;
         self.drain_deferred_persistent_releases()?;
         let start = std::time::Instant::now();
@@ -2107,6 +2131,11 @@ impl Vm {
         self.drain_deferred_persistent_releases()?;
         self.minor_collections = 0;
         record_collection(&mut self.stats, &self.heap, stats, start);
+        if let Some(program) = self.active_program.clone() {
+            while self.heap.has_pending_generator_finalizers() {
+                self.drain_generator_finalizers(&program, output, usize::MAX)?;
+            }
+        }
         Ok(stats)
     }
     fn collect_automatic(&mut self) -> Result<crate::CollectionStats> {
@@ -2230,6 +2259,9 @@ impl Vm {
                 .filter(|frame| frame.callable.is_some())
                 .count();
         roots += self.frames.iter().filter(|f| f.namespace.is_some()).count()
+            + self.frames.iter().filter(|f| f.generator.is_some()).count()
+            + usize::from(self.pending_exception.is_some())
+            + self.finalizer_roots.len()
             + self
                 .frames
                 .iter()
@@ -2264,6 +2296,11 @@ impl Vm {
                 "nested Vm::run is not allowed; use a persistent callback",
             ));
         }
+        if let Some(program) = self.active_program.clone() {
+            while self.heap.has_pending_generator_finalizers() {
+                self.drain_generator_finalizers(&program, output, usize::MAX)?;
+            }
+        }
         self.execution = self
             .execution
             .checked_add(1)
@@ -2277,6 +2314,7 @@ impl Vm {
         self.frames.clear();
         self.pending_classes.clear();
         self.pending_exception = None;
+        self.finalizer_roots.clear();
         self.constants.clear();
         self.globals.clear();
         self.source_modules.clear();
@@ -3147,6 +3185,99 @@ impl Vm {
             },
         )
     }
+
+    fn finalize_one_generator(
+        &mut self,
+        program: &Program,
+        generator: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match self.heap.generator_state(generator) {
+            Some(GeneratorState::Suspended) => {}
+            Some(GeneratorState::Created) => return self.heap.complete_generator(generator),
+            Some(GeneratorState::Completed | GeneratorState::Running) | None => return Ok(()),
+        }
+        let register_len = self.registers.len();
+        let cell_len = self.cells.len();
+        let argument_depth = self.arguments.len();
+        let frame_depth = self.frames.len();
+        let pending_class_depth = self.pending_classes.len();
+        let saved_exception = self.pending_exception.take();
+        let finalizer_root_depth = self.finalizer_roots.len();
+        self.finalizer_roots.push(generator);
+        if let Some(exception) = saved_exception {
+            self.finalizer_roots.push(exception);
+        }
+        self.registers.push(Value::UNBOUND);
+        let destination = register_len;
+        let delegated = self.heap.generator_yield_from(generator).is_some();
+        let result = (|| {
+            self.resume_generator(
+                program,
+                generator,
+                destination,
+                Value::NONE,
+                ReturnAction::Close,
+            )?;
+            let diagnostic = Diagnostic::new("GeneratorExit", String::new());
+            let exception = self.exception_from_diagnostic(&diagnostic)?;
+            if delegated {
+                self.frames
+                    .last_mut()
+                    .expect("finalized delegating generator frame")
+                    .injected_exception = Some(exception);
+            } else {
+                self.pending_exception = Some(exception);
+                let frame = self.frames.last().expect("finalized generator frame");
+                let code = frame.code;
+                let pc = frame.ip.saturating_sub(1);
+                if !self.dispatch_exception(program, output, &diagnostic, frame_depth, code, pc)? {
+                    return Ok(());
+                }
+            }
+            self.execute_until_depth(program, output, frame_depth)
+        })();
+        self.frames.truncate(frame_depth);
+        self.registers.truncate(register_len);
+        self.cells.truncate(cell_len);
+        self.arguments.truncate(argument_depth);
+        self.pending_classes.truncate(pending_class_depth);
+        self.pending_exception = saved_exception;
+        self.finalizer_roots.truncate(finalizer_root_depth);
+        result
+    }
+
+    fn drain_generator_finalizers(
+        &mut self,
+        program: &Program,
+        output: &mut dyn Write,
+        limit: usize,
+    ) -> Result<()> {
+        if self.draining_generator_finalizers {
+            return Ok(());
+        }
+        self.draining_generator_finalizers = true;
+        let result = (|| {
+            for _ in 0..limit {
+                let Some(generator) = self.heap.pop_generator_finalizer() else {
+                    break;
+                };
+                if self.heap.generator_state(generator) != Some(GeneratorState::Suspended) {
+                    continue;
+                }
+                self.stats.generator_finalizers += 1;
+                if let Err(error) = self.finalize_one_generator(program, generator, output) {
+                    if error.kind == "BytecodeError" {
+                        return Err(error);
+                    }
+                    self.stats.generator_finalizer_errors += 1;
+                }
+            }
+            Ok(())
+        })();
+        self.draining_generator_finalizers = false;
+        result
+    }
     fn exception_from_diagnostic(&mut self, error: &Diagnostic) -> Result<Value> {
         let class = match error.kind.as_str() {
             "TypeError" => self.runtime_types.type_error,
@@ -3752,7 +3883,11 @@ impl Vm {
                 .is_ok_and(|class| class.mro.contains(&target)))
     }
     fn execute(&mut self, p: &Program, output: &mut dyn Write) -> Result<()> {
-        self.execute_until_depth(p, output, 0)
+        self.execute_until_depth(p, output, 0)?;
+        while self.heap.has_pending_generator_finalizers() {
+            self.drain_generator_finalizers(p, output, usize::MAX)?;
+        }
+        Ok(())
     }
     pub(crate) fn execute_until_depth(
         &mut self,
@@ -3761,6 +3896,9 @@ impl Vm {
         depth: usize,
     ) -> Result<()> {
         while self.frames.len() > depth {
+            if !self.draining_generator_finalizers && self.heap.has_pending_generator_finalizers() {
+                self.drain_generator_finalizers(p, output, GENERATOR_FINALIZERS_PER_SAFEPOINT)?;
+            }
             if self.gc_interval.is_some_and(|interval| {
                 self.heap.allocations - self.heap.last_collection_allocations >= interval.max(1)
             }) {

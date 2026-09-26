@@ -355,6 +355,7 @@ pub(crate) struct Heap {
     pub foreign_destructor_calls: u64,
     pub foreign_destructor_panics: u64,
     pending_foreign: Vec<crate::foreign::PendingForeign>,
+    pending_generators: Vec<Value>,
 }
 impl Heap {
     /// Return the exact builtin backing value for a builtin subclass instance.
@@ -439,6 +440,32 @@ impl Heap {
             }
         }
         (destructor_calls, destructor_panics)
+    }
+
+    pub(crate) fn has_pending_generator_finalizers(&self) -> bool {
+        !self.pending_generators.is_empty()
+    }
+
+    pub(crate) fn pop_generator_finalizer(&mut self) -> Option<Value> {
+        self.pending_generators.pop()
+    }
+
+    pub(crate) fn queue_all_suspended_generators(&mut self) {
+        for entry in &self.objects {
+            if matches!(
+                &entry.object,
+                Object::Generator(GeneratorFrame {
+                    state: GeneratorState::Suspended,
+                    ..
+                })
+            ) {
+                let generation = self.slots[entry.slot as usize].generation;
+                let value = Value::heap(entry.slot, generation);
+                if !self.pending_generators.contains(&value) {
+                    self.pending_generators.push(value);
+                }
+            }
+        }
     }
     /// Owner-aware mutation boundary for the native module registry.
     pub fn add_module_member(&mut self, owner: Value, name: &str, value: Value) -> Result<()> {
