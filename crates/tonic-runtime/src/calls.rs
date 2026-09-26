@@ -10,7 +10,7 @@ use crate::{
         hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish, sequence_start,
         sequence_step,
     },
-    heap::{Builtin, Object},
+    heap::{Builtin, GeneratorState, Object},
     native::Context,
     value::Value,
 };
@@ -287,19 +287,23 @@ impl Vm {
             Object::Function {
                 code, execution, ..
             } => {
+                let code = *code as usize;
                 if *execution != self.execution {
                     return Err(Diagnostic::new(
                         "RuntimeError",
                         "callable belongs to a previous module execution",
                     ));
                 }
-                if p.code[*code as usize].class_body {
+                if p.code[code].class_body {
                     return Err(Diagnostic::new(
                         "BytecodeError",
                         "class body cannot be called directly",
                     ));
                 }
-                self.enter_frame(p, *code as usize, Some(destination), args, Some(callee))?;
+                self.enter_frame(p, code, Some(destination), args, Some(callee))?;
+                if p.code[code].generator {
+                    self.freeze_generator_call(p, destination)?;
+                }
             }
             Object::Builtin(builtin) => {
                 let builtin = *builtin;
@@ -318,6 +322,237 @@ impl Vm {
                 }
                 if matches!(builtin, Builtin::TypeNew) {
                     return self.invoke_type_new(p, destination, &args, output);
+                }
+                if matches!(builtin, Builtin::Iter | Builtin::GeneratorIter) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "iter expects exactly one argument",
+                        ));
+                    }
+                    let source = args.positional(&self.registers, 0);
+                    if matches!(builtin, Builtin::GeneratorIter) && !self.heap.is_generator(source)
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator descriptor requires a generator",
+                        ));
+                    }
+                    return match self.heap.iterator(source) {
+                        Ok(iterator) => {
+                            self.registers[destination] = iterator;
+                            Ok(())
+                        }
+                        Err(error) if error.kind == "TypeError" => {
+                            let Some(call) = self.heap.special_method_call(source, "__iter__")?
+                            else {
+                                return Err(error);
+                            };
+                            let depth = self.frames.len();
+                            self.invoke_target(
+                                p,
+                                call.callable,
+                                destination,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [Value::UNBOUND; 3],
+                                    count: 0,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("iter frame").action =
+                                    ReturnAction::Iterator;
+                            } else {
+                                self.validate_iterator(self.registers[destination])?;
+                            }
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                if matches!(builtin, Builtin::Next | Builtin::GeneratorNext) {
+                    let valid = if matches!(builtin, Builtin::GeneratorNext) {
+                        args.count() == 1
+                    } else {
+                        (1..=2).contains(&args.count())
+                    };
+                    if args.keyword_count() != 0 || !valid {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "next expects an iterator and an optional default",
+                        ));
+                    }
+                    let iterator = args.positional(&self.registers, 0);
+                    if matches!(builtin, Builtin::GeneratorNext)
+                        && !self.heap.is_generator(iterator)
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator descriptor requires a generator",
+                        ));
+                    }
+                    let default = (args.count() == 2).then(|| args.positional(&self.registers, 1));
+                    if self.heap.is_generator(iterator) {
+                        return match self.resume_generator(
+                            p,
+                            iterator,
+                            destination,
+                            Value::NONE,
+                            ReturnAction::Next(default),
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(error) if error.kind == "StopIteration" => {
+                                if let Some(default) = default {
+                                    self.registers[destination] = default;
+                                    Ok(())
+                                } else {
+                                    Err(error)
+                                }
+                            }
+                            Err(error) => Err(error),
+                        };
+                    }
+                    if self.heap.is_iterator(iterator) {
+                        return match self.heap.next(iterator)? {
+                            Some(value) => {
+                                self.registers[destination] = value;
+                                Ok(())
+                            }
+                            None => {
+                                if let Some(default) = default {
+                                    self.registers[destination] = default;
+                                    Ok(())
+                                } else {
+                                    Err(Diagnostic::new("StopIteration", String::new()))
+                                }
+                            }
+                        };
+                    }
+                    let Some(call) = self.heap.special_method_call(iterator, "__next__")? else {
+                        return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                    };
+                    let depth = self.frames.len();
+                    match self.invoke_target(
+                        p,
+                        call.callable,
+                        destination,
+                        Arguments::Inline {
+                            receiver: call.receiver,
+                            positional: [Value::UNBOUND; 3],
+                            count: 0,
+                        },
+                        output,
+                    ) {
+                        Ok(()) => {}
+                        Err(error) if error.kind == "StopIteration" => {
+                            if let Some(default) = default {
+                                self.registers[destination] = default;
+                                return Ok(());
+                            }
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    if self.frames.len() > depth {
+                        self.frames.last_mut().expect("next frame").action =
+                            ReturnAction::Next(default);
+                    }
+                    return Ok(());
+                }
+                if matches!(builtin, Builtin::GeneratorSend) {
+                    if args.keyword_count() != 0 || args.count() != 2 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator.send expects one value",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator descriptor requires a generator",
+                        ));
+                    }
+                    let sent = args.positional(&self.registers, 1);
+                    return self.resume_generator(
+                        p,
+                        generator,
+                        destination,
+                        sent,
+                        ReturnAction::Next(None),
+                    );
+                }
+                if matches!(builtin, Builtin::GeneratorThrow) {
+                    if args.keyword_count() != 0 || args.count() != 2 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator.throw expects one exception",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator descriptor requires a generator",
+                        ));
+                    }
+                    let exception =
+                        self.normalize_raised_exception(args.positional(&self.registers, 1))?;
+                    match self.resume_generator(
+                        p,
+                        generator,
+                        destination,
+                        Value::NONE,
+                        ReturnAction::Next(None),
+                    ) {
+                        Ok(()) => {}
+                        Err(error) if error.kind == "StopIteration" => {}
+                        Err(error) => return Err(error),
+                    }
+                    self.pending_exception = Some(exception);
+                    return Err(self.exception_diagnostic(exception)?);
+                }
+                if matches!(builtin, Builtin::GeneratorClose) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "generator.close expects no arguments",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    let state = self.heap.generator_state(generator).ok_or_else(|| {
+                        Diagnostic::new("TypeError", "generator descriptor requires a generator")
+                    })?;
+                    match state {
+                        GeneratorState::Completed => {
+                            self.registers[destination] = Value::NONE;
+                            return Ok(());
+                        }
+                        GeneratorState::Created => {
+                            self.heap.complete_generator(generator)?;
+                            self.registers[destination] = Value::NONE;
+                            return Ok(());
+                        }
+                        GeneratorState::Running => {
+                            return Err(Diagnostic::new(
+                                "ValueError",
+                                "generator already executing",
+                            ))
+                        }
+                        GeneratorState::Suspended => {}
+                    }
+                    self.resume_generator(
+                        p,
+                        generator,
+                        destination,
+                        Value::NONE,
+                        ReturnAction::Close,
+                    )?;
+                    let diagnostic = Diagnostic::new("GeneratorExit", String::new());
+                    let exception = self.exception_from_diagnostic(&diagnostic)?;
+                    self.pending_exception = Some(exception);
+                    return Err(diagnostic);
                 }
                 if matches!(builtin, Builtin::Len) && args.keyword_count() == 0 && args.count() == 1
                 {
@@ -2528,7 +2763,21 @@ impl Vm {
         output: &mut dyn Write,
     ) -> Result<()> {
         loop {
-            let item = if self.heap.is_iterator(state.iterator) {
+            let item = if self.heap.is_generator(state.iterator) {
+                match self.resume_generator(
+                    p,
+                    state.iterator,
+                    destination,
+                    Value::NONE,
+                    ReturnAction::DictIterableNext(state.clone()),
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error.kind == "StopIteration" => {
+                        return self.finish_dict_construction(p, destination, state.start, output)
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if self.heap.is_iterator(state.iterator) {
                 let Some(item) = self.heap.next(state.iterator)? else {
                     return self.finish_dict_construction(p, destination, state.start, output);
                 };
@@ -2681,6 +2930,21 @@ impl Vm {
         mut state: DictPairConstruction,
         output: &mut dyn Write,
     ) -> Result<Option<DictConstruction>> {
+        if self.heap.is_generator(state.iterator) {
+            return match self.resume_generator(
+                p,
+                state.iterator,
+                destination,
+                Value::NONE,
+                ReturnAction::DictPairNext(state.clone()),
+            ) {
+                Ok(()) => Ok(None),
+                Err(error) if error.kind == "StopIteration" => {
+                    self.finish_dict_pair(p, destination, state, output)
+                }
+                Err(error) => Err(error),
+            };
+        }
         if self.heap.is_iterator(state.iterator) {
             while let Some(item) = self.heap.next(state.iterator)? {
                 state.items.push(item);
@@ -2783,17 +3047,16 @@ impl Vm {
         output: &mut dyn Write,
     ) -> Result<()> {
         match self.heap.iterator(source) {
-            Ok(iterator) => {
-                let mut items = Vec::new();
-                while let Some(item) = self.heap.next(iterator)? {
-                    if let IterableCollectionKind::ListInit { owner, .. } = &kind {
-                        self.heap.append_list(*owner, item)?;
-                    } else {
-                        items.push(item);
-                    }
-                }
-                self.finish_iterable_collection(p, destination, kind, items, output)
-            }
+            Ok(iterator) => self.continue_iterable_collection(
+                p,
+                destination,
+                IterableCollection {
+                    kind,
+                    iterator,
+                    items: Vec::new(),
+                },
+                output,
+            ),
             Err(error) if error.kind == "TypeError" => {
                 let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
@@ -2839,6 +3102,21 @@ impl Vm {
         mut state: IterableCollection,
         output: &mut dyn Write,
     ) -> Result<()> {
+        if self.heap.is_generator(state.iterator) {
+            return match self.resume_generator(
+                p,
+                state.iterator,
+                destination,
+                Value::NONE,
+                ReturnAction::CollectIterableNext(state.clone()),
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind == "StopIteration" => {
+                    self.finish_iterable_collection(p, destination, state.kind, state.items, output)
+                }
+                Err(error) => Err(error),
+            };
+        }
         if self.heap.is_iterator(state.iterator) {
             while let Some(item) = self.heap.next(state.iterator)? {
                 if let IterableCollectionKind::ListInit { owner, .. } = &state.kind {
@@ -3147,6 +3425,7 @@ impl Vm {
             argument_base: self.arguments.len(),
             pending_class_base: self.pending_classes.len(),
             callable,
+            generator: None,
             exception_stack: Vec::new(),
             namespace: None,
             action: super::ReturnAction::Value,
@@ -4086,6 +4365,15 @@ impl Vm {
             | Builtin::TupleNew
             | Builtin::DictNew
             | Builtin::DictInit => unreachable!("builtin has a suspending call path"),
+            Builtin::Iter
+            | Builtin::Next
+            | Builtin::GeneratorIter
+            | Builtin::GeneratorNext
+            | Builtin::GeneratorSend
+            | Builtin::GeneratorThrow
+            | Builtin::GeneratorClose => {
+                unreachable!("iterator builtin has a suspending call path")
+            }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
             Builtin::Hash
             | Builtin::ObjectHash
@@ -4422,6 +4710,19 @@ impl Vm {
         output: &mut dyn Write,
     ) -> Result<bool> {
         match self.heap.iterator(source) {
+            Ok(iterator) if self.heap.is_generator(iterator) => {
+                let depth = self.frames.len();
+                self.continue_argument_expansion(
+                    p,
+                    destination,
+                    ArgumentExpansion {
+                        iterator,
+                        resume_pc,
+                    },
+                    output,
+                )?;
+                Ok(self.frames.len() > depth)
+            }
             Ok(iterator) => {
                 while let Some(item) = self.heap.next(iterator)? {
                     self.push_expanded_positional(item)?;
@@ -4473,6 +4774,27 @@ impl Vm {
         state: ArgumentExpansion,
         output: &mut dyn Write,
     ) -> Result<()> {
+        if self.heap.is_generator(state.iterator) {
+            return match self.resume_generator(
+                p,
+                state.iterator,
+                destination,
+                Value::NONE,
+                ReturnAction::ExpandIterableNext(state),
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind == "StopIteration" => {
+                    if let Some(resume_pc) = state.resume_pc {
+                        self.frames
+                            .last_mut()
+                            .expect("argument expansion caller")
+                            .ip = resume_pc;
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+        }
         if self.heap.is_iterator(state.iterator) {
             while let Some(item) = self.heap.next(state.iterator)? {
                 self.push_expanded_positional(item)?;

@@ -129,6 +129,15 @@ sonra alınır.
     suppression state'i, GC-traced managed traceback nesnesi, `__traceback__`
     erişimi ve context-manager traceback aktarımı.
 - [ ] Generators, yield/from, coroutine/async, suspended frame roots.
+  - [x] Bytecode v15 `YIELD`, generator function çağrısında tembel frame oluşturma,
+    `next`/`iter`/`send`/tek-argüman `throw`/`close`, dönüş değerli temel
+    `yield from`, PEP 479 sınırı ve suspended register/cell/exception GC kökleri.
+  - [x] For/list/tuple/dict/unpack/`*args` tüketicilerinde generator devamları;
+    generator code'unun JIT'ten güvenli biçimde ayrılması ve JIT çağıran koddan
+    yorumlayıcı resume.
+  - [ ] `yield from` için `send`/`throw`/`close` forwarding, tam `throw` imzası,
+    `StopIteration.value`, generator finalization ve async/await/coroutine state
+    machine'i.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.

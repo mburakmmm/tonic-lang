@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 14;
+pub const BYTECODE_VERSION: u16 = 15;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -87,6 +87,7 @@ pub enum Op {
     PushException = 74,
     ContextEnter = 75,
     ContextExit = 76,
+    Yield = 77,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -171,6 +172,7 @@ impl TryFrom<u16> for Op {
             74 => Self::PushException,
             75 => Self::ContextEnter,
             76 => Self::ContextExit,
+            77 => Self::Yield,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -248,6 +250,7 @@ pub struct Signature {
 #[derive(Clone, Debug)]
 pub struct CodeObject {
     pub class_body: bool,
+    pub generator: bool,
     pub name: String,
     pub params: u16,
     pub signature: Signature,
@@ -317,6 +320,7 @@ impl Program {
             let entry = &self.code[module.code as usize];
             if entry.params != 0
                 || entry.class_body
+                || entry.generator
                 || !entry.cell_locals.is_empty()
                 || !entry.free_vars.is_empty()
             {
@@ -338,8 +342,8 @@ impl Program {
             return Err(bad("module code ranges do not cover the program"));
         }
         for code in &self.code {
-            if code.class_body && code.params != 0 {
-                return Err(bad("class body cannot have parameters"));
+            if code.class_body && (code.params != 0 || code.generator) {
+                return Err(bad("class body cannot be a function"));
             }
             if code.instructions.is_empty()
                 || code.instructions.len() > u16::MAX as usize
@@ -643,6 +647,16 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::Yield => {
+                        if !code.generator {
+                            return Err(bad("yield outside generator code"));
+                        }
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
                     Op::Raise => {
                         if i.b > 2 || (i.b != 2 && i.c != 0) {
                             return Err(bad("invalid raise operand"));
@@ -806,7 +820,7 @@ fn verify_argument_stack(code: &CodeObject) -> Result<()> {
             _ => {}
         }
         match op {
-            Op::Return | Op::Raise => {
+            Op::Return | Op::Raise | Op::Yield => {
                 if depth != 0 {
                     return Err(bad());
                 }

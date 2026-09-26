@@ -203,6 +203,25 @@ fn bytecode_pipeline_has_local_and_global_operations() {
         .any(|i| i.opcode == Op::LoadGlobal as u16));
     assert!(f.instructions.iter().any(|i| i.opcode == Op::Move as u16));
 }
+
+#[test]
+fn yield_marks_only_its_lexical_function_as_generator() {
+    let program = compile(
+        "def outer():\n    def inner():\n        yield 1\n    return inner\n",
+        "generator",
+    )
+    .unwrap();
+    assert!(!program.program().code[0].generator);
+    assert!(!program.program().code[1].generator);
+    assert!(program.program().code[2].generator);
+    assert!(program.program().code[2]
+        .instructions
+        .iter()
+        .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Yield)));
+    for source in ["yield 1", "class C:\n    yield 1"] {
+        assert!(compile(source, "bad-yield").is_err(), "accepted {source:?}");
+    }
+}
 #[test]
 fn resource_limits_reject_deep_ast_before_parsing() {
     let s = format!("x={}1{}", "(".repeat(300), ")".repeat(300));

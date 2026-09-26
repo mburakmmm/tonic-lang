@@ -1275,7 +1275,12 @@ impl Heap {
                 | Builtin::TupleHash
                 | Builtin::RangeHash
                 | Builtin::ListInit
-                | Builtin::DictInit,
+                | Builtin::DictInit
+                | Builtin::GeneratorIter
+                | Builtin::GeneratorNext
+                | Builtin::GeneratorSend
+                | Builtin::GeneratorThrow
+                | Builtin::GeneratorClose,
             )) => DescriptorCall {
                 callable: value,
                 receiver: Some(descriptor),
@@ -1311,7 +1316,12 @@ impl Heap {
                 | Builtin::TypeDelAttr
                 | Builtin::ObjectInit
                 | Builtin::ListInit
-                | Builtin::DictInit,
+                | Builtin::DictInit
+                | Builtin::GeneratorIter
+                | Builtin::GeneratorNext
+                | Builtin::GeneratorSend
+                | Builtin::GeneratorThrow
+                | Builtin::GeneratorClose,
             )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
@@ -1412,6 +1422,16 @@ impl Heap {
                 }
                 if let Some(value) = attributes.get(&self.shapes, name) {
                     return Ok(value);
+                }
+                let Some(value) = self.class_lookup(class, name)? else {
+                    return Err(missing(name));
+                };
+                return self.bind_descriptor(value, Some(owner), class);
+            }
+            Ok(Object::Generator(frame)) => {
+                let class = frame.class;
+                if name == "__class__" {
+                    return Ok(class);
                 }
                 let Some(value) = self.class_lookup(class, name)? else {
                     return Err(missing(name));

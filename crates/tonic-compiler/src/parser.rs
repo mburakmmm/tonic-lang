@@ -560,6 +560,22 @@ impl Adapter {
                 Box::new(self.expr(*i.body)?),
                 Box::new(self.expr(*i.orelse)?),
             ),
+            py::Expr::Yield(y) => {
+                if self.depth == 0 {
+                    return Err(Diagnostic::new("SyntaxError", "yield outside function").at(s));
+                }
+                ExprKind::Yield(
+                    y.value
+                        .map(|value| self.expr(*value).map(Box::new))
+                        .transpose()?,
+                )
+            }
+            py::Expr::YieldFrom(y) => {
+                if self.depth == 0 {
+                    return Err(Diagnostic::new("SyntaxError", "yield outside function").at(s));
+                }
+                ExprKind::YieldFrom(Box::new(self.expr(*y.value)?))
+            }
             py::Expr::Lambda(lambda) => {
                 let params = self.parameters(*lambda.args, s)?;
                 self.depth += 1;

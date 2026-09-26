@@ -277,6 +277,30 @@ materialized global slot doğrudan güncellendiği için module attribute rebind
 native kodda stale değer üretmez. Ayrıntı
 [ADR 0071](adr/0071-source-module-linker-and-loader.md) dosyasındadır.
 
+## Generator ilk dilimi
+
+Bytecode v15 code nesnesine generator niteliğini ve açık `YIELD` opcode'unu ekler.
+Generator fonksiyonu çağrıldığında gövde çalıştırılmaz; bağlanmış register ve cell
+dizileri heap'teki logical-handle nesnesine taşınır. Resume sırasında aynı frame
+VM frame stack'ine geri alınır, `yield` noktasında instruction pointer, register,
+cell ve aktif exception state yeniden generator nesnesine yazılır. Bu değerlerin
+tamamı precise tracing kenarıdır ve suspend/return yazımları write barrier'dan
+geçer; moving ve stress GC native adres varsayımına ihtiyaç duymaz.
+
+`iter`, `next`, generator descriptor'ları, `send`, tek-argüman `throw` ve `close`
+normal continuation altyapısını kullanır. For döngüsü, list/tuple/dict oluşturma,
+unpack ve `*args` genişletme generator askıya alındığında tüketici state'ini heap
+kökü olarak korur. Temel `yield from` delege generator'ın `return` değerini
+ifadenin sonucuna taşır; açıkça kaçan `StopIteration` generator sınırında
+`RuntimeError` olur. Generator bytecode'u şimdilik Cranelift'e verilmez; JIT
+çağıran kod exact interpreter continuation ile güvenli biçimde devam eder.
+
+Bu dilim tam coroutine aşaması değildir. `yield from` üzerinden
+`send`/`throw`/`close` forwarding, üç-argümanlı eski `throw` biçimi,
+`StopIteration.value`, ulaşılamayan generator finalization'ı ve
+`async`/`await`/coroutine state machine açık kalır. Ayrıntı
+[ADR 0072](adr/0072-generator-frame-state-machine.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

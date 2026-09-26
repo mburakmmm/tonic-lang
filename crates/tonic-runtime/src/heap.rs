@@ -14,9 +14,54 @@ pub(crate) struct TracebackEntry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GeneratorState {
+    Created,
+    Suspended,
+    Running,
+    Completed,
+}
+
+#[derive(Debug)]
+pub(crate) struct GeneratorFrame {
+    pub class: Value,
+    pub execution: u64,
+    pub code: u16,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub cells: Vec<Value>,
+    pub exception_stack: Vec<Value>,
+    pub resume_register: Option<u16>,
+    pub return_value: Value,
+    pub state: GeneratorState,
+}
+
+pub(crate) struct ResumedGenerator {
+    pub code: u16,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub cells: Vec<Value>,
+    pub exception_stack: Vec<Value>,
+    pub resume_register: Option<u16>,
+}
+
+impl GeneratorFrame {
+    fn payload_bytes(&self) -> usize {
+        (self.registers.capacity() + self.cells.capacity() + self.exception_stack.capacity())
+            * std::mem::size_of::<Value>()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Builtin {
     Print,
     Len,
+    Iter,
+    Next,
+    GeneratorIter,
+    GeneratorNext,
+    GeneratorSend,
+    GeneratorThrow,
+    GeneratorClose,
     Hash,
     Abs,
     IsInstance,
@@ -115,6 +160,7 @@ pub(crate) enum Object {
         captures: Vec<Value>,
         defaults: Vec<Value>,
     },
+    Generator(GeneratorFrame),
     Cell(Value),
     Builtin(Builtin),
     Native(usize),
@@ -147,7 +193,9 @@ pub(crate) enum Object {
 impl Object {
     pub(crate) fn instance_class(&self) -> Option<Value> {
         match self {
-            Self::Instance { class, .. } | Self::Exception { class, .. } => Some(*class),
+            Self::Instance { class, .. }
+            | Self::Exception { class, .. }
+            | Self::Generator(GeneratorFrame { class, .. }) => Some(*class),
             _ => None,
         }
     }
@@ -238,6 +286,17 @@ impl Object {
             Self::Function {
                 captures, defaults, ..
             } => captures.iter().chain(defaults).copied().for_each(visit),
+            Self::Generator(frame) => {
+                visit(frame.class);
+                visit(frame.return_value);
+                frame
+                    .registers
+                    .iter()
+                    .chain(&frame.cells)
+                    .chain(&frame.exception_stack)
+                    .copied()
+                    .for_each(visit);
+            }
             Self::Dict(dict) => {
                 for (key, value) in &dict.entries {
                     visit(*key);
@@ -628,6 +687,135 @@ impl Heap {
         let location = self.location(value).ok_or_else(|| invalid_value(value))?;
         Ok(&mut self.objects[location].object)
     }
+
+    pub(crate) fn is_generator(&self, value: Value) -> bool {
+        matches!(self.try_get(value), Some(Object::Generator(_)))
+    }
+
+    pub(crate) fn generator_state(&self, value: Value) -> Option<GeneratorState> {
+        match self.try_get(value) {
+            Some(Object::Generator(frame)) => Some(frame.state),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn resume_generator(
+        &mut self,
+        owner: Value,
+        execution: u64,
+    ) -> Result<ResumedGenerator> {
+        let before = self.get(owner)?.estimated_bytes();
+        let (code, ip, registers, cells, exception_stack, resume_register) = {
+            let Object::Generator(frame) = self.get_mut(owner)? else {
+                return Err(Diagnostic::new("TypeError", "object is not a generator"));
+            };
+            if frame.execution != execution {
+                return Err(Diagnostic::new(
+                    "RuntimeError",
+                    "generator belongs to a previous module execution",
+                ));
+            }
+            match frame.state {
+                GeneratorState::Completed => {
+                    return Err(Diagnostic::new("StopIteration", String::new()))
+                }
+                GeneratorState::Running => {
+                    return Err(Diagnostic::new("ValueError", "generator already executing"))
+                }
+                GeneratorState::Created | GeneratorState::Suspended => {}
+            }
+            frame.state = GeneratorState::Running;
+            (
+                frame.code,
+                frame.ip,
+                std::mem::take(&mut frame.registers),
+                std::mem::take(&mut frame.cells),
+                std::mem::take(&mut frame.exception_stack),
+                frame.resume_register.take(),
+            )
+        };
+        let after = self.get(owner)?.estimated_bytes();
+        self.bytes = self.bytes.saturating_sub(before.saturating_sub(after));
+        Ok(ResumedGenerator {
+            code,
+            ip,
+            registers,
+            cells,
+            exception_stack,
+            resume_register,
+        })
+    }
+
+    pub(crate) fn suspend_generator(
+        &mut self,
+        owner: Value,
+        ip: usize,
+        registers: Vec<Value>,
+        cells: Vec<Value>,
+        exception_stack: Vec<Value>,
+        resume_register: u16,
+    ) -> Result<()> {
+        for value in registers
+            .iter()
+            .chain(&cells)
+            .chain(&exception_stack)
+            .copied()
+        {
+            self.write_barrier(owner, value);
+        }
+        let before = self.get(owner)?.estimated_bytes();
+        {
+            let Object::Generator(frame) = self.get_mut(owner)? else {
+                return Err(Diagnostic::new("TypeError", "object is not a generator"));
+            };
+            if frame.state != GeneratorState::Running {
+                return Err(Diagnostic::new("RuntimeError", "generator is not running"));
+            }
+            frame.ip = ip;
+            frame.registers = registers;
+            frame.cells = cells;
+            frame.exception_stack = exception_stack;
+            frame.resume_register = Some(resume_register);
+            frame.state = GeneratorState::Suspended;
+        }
+        let after = self.get(owner)?.estimated_bytes();
+        self.bytes += after.saturating_sub(before);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(())
+    }
+
+    pub(crate) fn complete_generator(&mut self, owner: Value) -> Result<()> {
+        self.complete_generator_with_value(owner, Value::NONE)
+    }
+
+    pub(crate) fn complete_generator_with_value(
+        &mut self,
+        owner: Value,
+        value: Value,
+    ) -> Result<()> {
+        self.write_barrier(owner, value);
+        let before = self.get(owner)?.estimated_bytes();
+        let Object::Generator(frame) = self.get_mut(owner)? else {
+            return Err(Diagnostic::new("TypeError", "object is not a generator"));
+        };
+        frame.registers = Vec::new();
+        frame.cells = Vec::new();
+        frame.exception_stack = Vec::new();
+        frame.return_value = value;
+        frame.state = GeneratorState::Completed;
+        let after = self.get(owner)?.estimated_bytes();
+        self.bytes = self.bytes.saturating_sub(before.saturating_sub(after));
+        Ok(())
+    }
+
+    pub(crate) fn generator_return_value(&self, owner: Value) -> Option<Value> {
+        match self.try_get(owner) {
+            Some(Object::Generator(frame)) if frame.state == GeneratorState::Completed => {
+                Some(frame.return_value)
+            }
+            _ => None,
+        }
+    }
     pub(crate) fn foreign_payload(&self, value: Value, adapter_id: u64) -> Result<usize> {
         let Object::Foreign(foreign) = self.get(value)? else {
             return Err(Diagnostic::new("TypeError", "expected foreign object"));
@@ -929,6 +1117,7 @@ impl Heap {
                 self.format_depth(*step, true, path)?
             ),
             Object::Function { .. } => "<function>".into(),
+            Object::Generator(_) => "<generator object>".into(),
             Object::Dict(dict) => {
                 if path.contains(&v) {
                     return Ok("{...}".into());
@@ -1046,6 +1235,7 @@ impl Object {
                 Self::Function {
                     captures, defaults, ..
                 } => (captures.capacity() + defaults.capacity()) * 8,
+                Self::Generator(frame) => frame.payload_bytes(),
                 Self::Dict(dict) => dict.estimated_bytes(),
                 _ => 0,
             }

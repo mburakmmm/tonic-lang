@@ -667,6 +667,7 @@ impl Heap {
             | Object::RangeIterator { .. }
             | Object::DictIterator { .. }
             | Object::MappingProxyIterator { .. } => return Ok(v),
+            Object::Generator(_) => return Ok(v),
             _ => return Err(Diagnostic::new("TypeError", "object is not iterable")),
         };
         self.alloc(object)

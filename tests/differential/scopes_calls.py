@@ -128,6 +128,28 @@ class C:
     add=classmethod(lambda cls,n:cls.x+n)
 print(fact(6),C.read(),C.add(3))
 ''',
+'''def inner():
+    yield 1
+    yield 2
+    return 9
+def outer():
+    first=(yield 'ready')
+    print(first)
+    result=yield from inner()
+    print(result)
+    yield from [3,4]
+g=outer()
+print(next(g),g.send('sent'),list(g))
+''',
+'''def guarded():
+    try:
+        yield 'start'
+    except ValueError as error:
+        yield 'caught '+str(error)
+    yield 'end'
+g=guarded()
+print(next(g),g.throw(ValueError('boom')),next(g),g.close())
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -152,4 +174,5 @@ ERRORS = [
 ('{[]:1}', 'TypeError'),
 ("d={'a':1}\nfor k in d:\n    d['b']=2", 'RuntimeError'),
 ('(lambda a:a)()', 'TypeError'),
+('def bad():\n    yield 1\n    raise StopIteration("boom")\ng=bad()\nnext(g)\nnext(g)', 'RuntimeError'),
 ]

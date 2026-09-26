@@ -58,6 +58,7 @@ fn build(
     let next = index(scope.locals.len())?;
     let code = CodeObject {
         class_body: scope.class_body,
+        generator: scope.generator,
         name,
         params: index(params.names().len())?,
         signature: Signature {
@@ -925,6 +926,30 @@ impl Lower<'_> {
         match &e.kind {
             ExprKind::Constant(c) => self.constant(c.clone(), s),
             ExprKind::Name(n) => self.load(*n, s),
+            ExprKind::Yield(value) => {
+                let value = if let Some(value) = value {
+                    self.expr(value)?
+                } else {
+                    self.constant(Constant::None, s)?
+                };
+                let result = self.alloc(1)?;
+                self.emit(Op::Yield, result, value, 0, s)?;
+                Ok(result)
+            }
+            ExprKind::YieldFrom(value) => {
+                let source = self.expr(value)?;
+                let iterator = self.alloc(1)?;
+                self.emit(Op::Iter, iterator, source, 0, s)?;
+                let result = self.constant(Constant::None, s)?;
+                let start = self.pc()?;
+                let exhausted = self.emit(Op::Next, result, iterator, 0, s)?;
+                let sent = self.alloc(1)?;
+                self.emit(Op::Yield, sent, result, 0, s)?;
+                self.emit(Op::Jump, start, 0, 0, s)?;
+                let end = self.pc()?;
+                self.patch(exhausted, end);
+                Ok(result)
+            }
             ExprKind::Lambda { params, body } => {
                 let child = self.scope.take_child(s.start);
                 let captures = child

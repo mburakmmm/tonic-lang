@@ -12,6 +12,7 @@ fn program() -> Program {
         }],
         code: vec![CodeObject {
             class_body: false,
+            generator: false,
             name: "test".into(),
             params: 0,
             signature: Default::default(),
@@ -49,6 +50,34 @@ fn valid_program() {
     chained.code[0].instructions = vec![Instr::new(Op::Raise, 0, 2, 1)];
     chained.code[0].spans = vec![Span::default()];
     chained.verify().unwrap();
+}
+
+#[test]
+fn yield_requires_generator_function_metadata() {
+    let mut generator = program();
+    generator.modules[0].code_count = 2;
+    let mut code = generator.code[0].clone();
+    code.generator = true;
+    code.name = "generate".into();
+    code.instructions = vec![
+        Instr::new(Op::Yield, 0, 1, 0),
+        Instr::new(Op::Return, 0, 0, 0),
+    ];
+    code.spans = vec![Span::default(); 2];
+    generator.code.push(code);
+    generator.clone().verify().unwrap();
+
+    let mut outside = program();
+    outside.code[0].instructions[0] = Instr::new(Op::Yield, 0, 1, 0);
+    assert!(outside.verify().is_err());
+
+    let mut module = program();
+    module.code[0].generator = true;
+    assert!(module.verify().is_err());
+
+    let mut class_body = generator;
+    class_body.code[1].class_body = true;
+    assert!(class_body.verify().is_err());
 }
 #[test]
 fn rejects_opcode_operands_and_metadata() {

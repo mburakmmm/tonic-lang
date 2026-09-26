@@ -118,6 +118,8 @@ pub enum ExprKind {
         step: Option<Box<Expr>>,
     },
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    Yield(Option<Box<Expr>>),
+    YieldFrom(Box<Expr>),
     Lambda {
         params: Parameters,
         body: Box<Expr>,

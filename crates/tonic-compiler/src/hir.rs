@@ -9,6 +9,7 @@ use tonic_core::{
 #[derive(Debug)]
 pub(crate) struct Scope {
     pub class_body: bool,
+    pub generator: bool,
     class_cell: Option<SymbolId>,
     pub globals: HashSet<SymbolId>,
     pub nonlocals: HashSet<SymbolId>,
@@ -43,8 +44,14 @@ impl Scope {
             nonlocals: HashSet::new(),
             children: Vec::new(),
             module,
+            yield_span: None,
         };
         scan.block(body)?;
+        if module || class_body {
+            if let Some(span) = scan.yield_span {
+                return Err(Diagnostic::new("SyntaxError", "yield outside function").at(span));
+            }
+        }
         for name in &scan.nonlocals {
             if !bound.contains(name) {
                 return Err(Diagnostic::new(
@@ -56,6 +63,7 @@ impl Scope {
         }
         let mut scope = Self {
             class_body,
+            generator: scan.yield_span.is_some(),
             class_cell,
             globals: scan.globals.clone(),
             nonlocals: scan.nonlocals.clone(),
@@ -163,6 +171,7 @@ struct Scan<'a> {
     nonlocals: HashSet<SymbolId>,
     children: Vec<(u32, Child<'a>)>,
     module: bool,
+    yield_span: Option<Span>,
 }
 enum Child<'a> {
     Function(&'a Parameters, &'a [Stmt]),
@@ -242,6 +251,16 @@ impl<'a> Scan<'a> {
                 self.expr(a);
                 self.expr(b);
                 self.expr(c);
+            }
+            ExprKind::Yield(value) => {
+                self.yield_span.get_or_insert(e.span);
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+            }
+            ExprKind::YieldFrom(value) => {
+                self.yield_span.get_or_insert(e.span);
+                self.expr(value);
             }
             ExprKind::Lambda { params, body } => {
                 for (_, default) in params.defaults() {

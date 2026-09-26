@@ -2,7 +2,7 @@
 pub(crate) mod calls;
 use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
-    heap::{Builtin, Heap, Object, TracebackEntry},
+    heap::{Builtin, GeneratorFrame, GeneratorState, Heap, Object, TracebackEntry},
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
         NativeDef, NativeFn, PersistentHandle,
@@ -121,6 +121,7 @@ struct Frame {
     argument_base: usize,
     pending_class_base: usize,
     callable: Option<Value>,
+    generator: Option<Value>,
     exception_stack: Vec<Value>,
     jit_attempted: bool,
     jit_resume: bool,
@@ -604,6 +605,8 @@ struct FloatCallProfile {
 enum ReturnAction {
     Value,
     Iterator,
+    Next(Option<Value>),
+    Close,
     IteratorNext {
         target: usize,
         pc: usize,
@@ -942,12 +945,14 @@ struct RuntimeTypes {
     dict: Value,
     range: Value,
     function: Value,
+    generator: Value,
     base_exception: Value,
     exception: Value,
     type_error: Value,
     value_error: Value,
     runtime_error: Value,
     stop_iteration: Value,
+    generator_exit: Value,
     other_exceptions: Vec<(String, Value)>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -976,12 +981,14 @@ impl RuntimeTypes {
             dict: Value::UNBOUND,
             range: Value::UNBOUND,
             function: Value::UNBOUND,
+            generator: Value::UNBOUND,
             base_exception: Value::UNBOUND,
             exception: Value::UNBOUND,
             type_error: Value::UNBOUND,
             value_error: Value::UNBOUND,
             runtime_error: Value::UNBOUND,
             stop_iteration: Value::UNBOUND,
+            generator_exit: Value::UNBOUND,
             other_exceptions: Vec::new(),
         }
     }
@@ -998,12 +1005,14 @@ impl RuntimeTypes {
             self.dict,
             self.range,
             self.function,
+            self.generator,
             self.base_exception,
             self.exception,
             self.type_error,
             self.value_error,
             self.runtime_error,
             self.stop_iteration,
+            self.generator_exit,
         ];
         roots.extend(self.other_exceptions.iter().map(|(_, value)| *value));
         roots
@@ -1051,11 +1060,13 @@ impl ReturnAction {
             Self::Value
             | Self::Iterator
             | Self::IteratorNext { .. }
+            | Self::Close
             | Self::ExpandIterableStart(_)
             | Self::Length
             | Self::Import(_)
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
+            Self::Next(default) => default.iter().copied().for_each(visit),
             Self::CollectIterableStart(kind) => kind.trace(visit),
             Self::AttributeGet(state) => {
                 visit(state.owner);
@@ -1415,6 +1426,8 @@ impl Vm {
         for (name, builtin) in [
             ("print", Builtin::Print),
             ("len", Builtin::Len),
+            ("iter", Builtin::Iter),
+            ("next", Builtin::Next),
             ("hash", Builtin::Hash),
             ("abs", Builtin::Abs),
             ("isinstance", Builtin::IsInstance),
@@ -1482,6 +1495,9 @@ impl Vm {
         let stop_iteration =
             vm.heap
                 .builtin_class("StopIteration", vec![exception], vm.type_class)?;
+        let generator_exit =
+            vm.heap
+                .builtin_class("GeneratorExit", vec![base_exception], vm.type_class)?;
         let arithmetic_error =
             vm.heap
                 .builtin_class("ArithmeticError", vec![exception], vm.type_class)?;
@@ -1585,12 +1601,16 @@ impl Vm {
             function: vm
                 .heap
                 .builtin_class("function", vec![vm.object_class], vm.type_class)?,
+            generator: vm
+                .heap
+                .builtin_class("generator", vec![vm.object_class], vm.type_class)?,
             base_exception,
             exception,
             type_error,
             value_error,
             runtime_error,
             stop_iteration,
+            generator_exit,
             other_exceptions,
         };
         for (class, name, builtin) in [
@@ -1604,6 +1624,19 @@ impl Vm {
             (vm.runtime_types.dict, "__new__", Builtin::DictNew),
             (vm.runtime_types.dict, "__init__", Builtin::DictInit),
             (vm.runtime_types.range, "__new__", Builtin::RangeNew),
+            (
+                vm.runtime_types.generator,
+                "__iter__",
+                Builtin::GeneratorIter,
+            ),
+            (
+                vm.runtime_types.generator,
+                "__next__",
+                Builtin::GeneratorNext,
+            ),
+            (vm.runtime_types.generator, "send", Builtin::GeneratorSend),
+            (vm.runtime_types.generator, "throw", Builtin::GeneratorThrow),
+            (vm.runtime_types.generator, "close", Builtin::GeneratorClose),
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, name, value)?;
@@ -1640,6 +1673,7 @@ impl Vm {
             ("ValueError", vm.runtime_types.value_error),
             ("RuntimeError", vm.runtime_types.runtime_error),
             ("StopIteration", vm.runtime_types.stop_iteration),
+            ("GeneratorExit", vm.runtime_types.generator_exit),
         ] {
             vm.builtins.push((name.into(), value));
         }
@@ -2845,6 +2879,7 @@ impl Vm {
             Object::Dict(_) => self.runtime_types.dict,
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
+            Object::Generator(frame) => frame.class,
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -2917,6 +2952,7 @@ impl Vm {
     }
     fn validate_iterator(&self, value: Value) -> Result<()> {
         if self.heap.is_iterator(value)
+            || self.heap.is_generator(value)
             || self.heap.special_method_call(value, "__next__")?.is_some()
         {
             Ok(())
@@ -2927,11 +2963,151 @@ impl Vm {
             ))
         }
     }
+
+    fn freeze_generator_call(&mut self, program: &Program, destination: usize) -> Result<()> {
+        let frame = self.frames.pop().ok_or_else(|| {
+            Diagnostic::new("BytecodeError", "generator call did not create a frame")
+        })?;
+        let metadata = &program.code[frame.code];
+        if !metadata.generator || frame.generator.is_some() {
+            return Err(Diagnostic::new(
+                "BytecodeError",
+                "invalid generator creation frame",
+            ));
+        }
+        let registers = self.registers.split_off(frame.base);
+        let cells = self.cells.split_off(frame.cell_base);
+        self.arguments.truncate(frame.argument_base);
+        self.pending_classes.truncate(frame.pending_class_base);
+        let generator = self.heap.alloc(Object::Generator(GeneratorFrame {
+            class: self.runtime_types.generator,
+            execution: self.execution,
+            code: frame.code as u16,
+            ip: 0,
+            registers,
+            cells,
+            exception_stack: frame.exception_stack,
+            resume_register: None,
+            return_value: Value::NONE,
+            state: GeneratorState::Created,
+        }))?;
+        self.registers[destination] = generator;
+        Ok(())
+    }
+
+    fn resume_generator(
+        &mut self,
+        program: &Program,
+        generator: Value,
+        destination: usize,
+        sent: Value,
+        action: ReturnAction,
+    ) -> Result<()> {
+        if self.frames.len() >= self.limits.frames {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "maximum call depth exceeded",
+            ));
+        }
+        match self.heap.generator_state(generator) {
+            Some(GeneratorState::Completed) => {
+                return Err(Diagnostic::new("StopIteration", String::new()))
+            }
+            Some(GeneratorState::Running) => {
+                return Err(Diagnostic::new("ValueError", "generator already executing"))
+            }
+            Some(GeneratorState::Created) if sent != Value::NONE => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "cannot send non-None value to a just-started generator",
+                ))
+            }
+            Some(GeneratorState::Created | GeneratorState::Suspended) => {}
+            None => return Err(Diagnostic::new("TypeError", "object is not a generator")),
+        }
+        let (code, register_count, cell_count) = match self.heap.get(generator)? {
+            Object::Generator(frame) => (
+                usize::from(frame.code),
+                frame.registers.len(),
+                frame.cells.len(),
+            ),
+            _ => return Err(Diagnostic::new("TypeError", "object is not a generator")),
+        };
+        if code >= program.code.len()
+            || !program.code[code].generator
+            || register_count != usize::from(program.code[code].registers)
+            || cell_count
+                != program.code[code].cell_locals.len() + program.code[code].free_vars.len()
+        {
+            return Err(Diagnostic::new(
+                "BytecodeError",
+                "invalid suspended generator frame",
+            ));
+        }
+        let base = self.registers.len();
+        let end = base
+            .checked_add(register_count)
+            .ok_or_else(|| Diagnostic::new("MemoryError", "register size overflow"))?;
+        if end > self.limits.registers {
+            return Err(Diagnostic::new("MemoryError", "register budget exceeded"));
+        }
+        let mut resumed = self.heap.resume_generator(generator, self.execution)?;
+        debug_assert_eq!(usize::from(resumed.code), code);
+        if let Some(register) = resumed.resume_register {
+            resumed.registers[usize::from(register)] = sent;
+        }
+        let cell_base = self.cells.len();
+        self.registers.extend(resumed.registers);
+        self.cells.extend(resumed.cells);
+        self.frames.push(Frame {
+            namespace: None,
+            action,
+            code,
+            ip: resumed.ip,
+            base,
+            destination: Some(destination),
+            cell_base,
+            argument_base: self.arguments.len(),
+            pending_class_base: self.pending_classes.len(),
+            callable: None,
+            generator: Some(generator),
+            exception_stack: resumed.exception_stack,
+            jit_attempted: true,
+            jit_resume: false,
+            jit_expanded_resume_depth: None,
+        });
+        self.stats.peak_registers = self.stats.peak_registers.max(end);
+        Ok(())
+    }
+
+    fn suspend_active_generator(&mut self, program: &Program) -> Result<()> {
+        let frame = self.frames.last().ok_or_else(|| {
+            Diagnostic::new("BytecodeError", "yield has no active generator frame")
+        })?;
+        let generator = frame
+            .generator
+            .ok_or_else(|| Diagnostic::new("BytecodeError", "yield outside resumed generator"))?;
+        let metadata = &program.code[frame.code];
+        let registers =
+            self.registers[frame.base..frame.base + usize::from(metadata.registers)].to_vec();
+        let cells = self.cells[frame.cell_base
+            ..frame.cell_base + metadata.cell_locals.len() + metadata.free_vars.len()]
+            .to_vec();
+        self.heap.suspend_generator(
+            generator,
+            frame.ip,
+            registers,
+            cells,
+            frame.exception_stack.clone(),
+            program.code[frame.code].instructions[frame.ip - 1].a,
+        )
+    }
     fn exception_from_diagnostic(&mut self, error: &Diagnostic) -> Result<Value> {
         let class = match error.kind.as_str() {
             "TypeError" => self.runtime_types.type_error,
             "ValueError" => self.runtime_types.value_error,
             "StopIteration" => self.runtime_types.stop_iteration,
+            "GeneratorExit" => self.runtime_types.generator_exit,
             "RuntimeError" => self.runtime_types.runtime_error,
             name => self
                 .runtime_types
@@ -2981,6 +3157,8 @@ impl Vm {
         let last = self.frames.len().saturating_sub(1);
         let stop_iteration =
             self.instance_check(exception, self.runtime_types.stop_iteration, false, 0)?;
+        let generator_exit =
+            self.instance_check(exception, self.runtime_types.generator_exit, false, 0)?;
         let key_error_class = self
             .runtime_types
             .other_exceptions
@@ -3015,17 +3193,48 @@ impl Vm {
                 function: code.name.clone(),
                 span: code.spans[fault_pc],
             });
-            let region = code
-                .exception_regions
-                .iter()
-                .filter(|region| {
-                    usize::from(region.start) <= fault_pc && fault_pc < usize::from(region.end)
-                })
-                .min_by_key(|region| region.end - region.start)
-                .copied();
+            let completed_generator = frame.generator.is_some_and(|generator| {
+                self.heap.generator_state(generator) == Some(GeneratorState::Completed)
+            });
+            let region = if completed_generator {
+                None
+            } else {
+                code.exception_regions
+                    .iter()
+                    .filter(|region| {
+                        usize::from(region.start) <= fault_pc && fault_pc < usize::from(region.end)
+                    })
+                    .min_by_key(|region| region.end - region.start)
+                    .copied()
+            };
             if let Some(region) = region {
                 selected = Some((frame_index, region));
                 break;
+            }
+            if stop_iteration && frame.generator.is_some() && !completed_generator {
+                let generator = frame.generator.expect("checked generator frame");
+                self.heap.complete_generator(generator)?;
+                let converted = Diagnostic::new("RuntimeError", "generator raised StopIteration");
+                let converted_exception = self.exception_from_diagnostic(&converted)?;
+                self.heap
+                    .set_exception_cause(converted_exception, Some(exception), true)?;
+                self.pending_exception = Some(converted_exception);
+                if self.dispatch_exception(
+                    program,
+                    output,
+                    &converted,
+                    minimum_depth,
+                    current_code,
+                    current_pc,
+                )? {
+                    return Ok(true);
+                }
+                return Err(converted);
+            }
+            if let Some(generator) = frame.generator {
+                if !completed_generator {
+                    self.heap.complete_generator(generator)?;
+                }
             }
             if key_error {
                 if let ReturnAction::NamespaceLookup {
@@ -3131,7 +3340,44 @@ impl Vm {
                     }
                 }
             }
+            if (stop_iteration || generator_exit) && matches!(&frame.action, ReturnAction::Close) {
+                let destination = frame.destination.ok_or_else(|| {
+                    Diagnostic::new("BytecodeError", "close continuation has no destination")
+                })?;
+                let unwind = (
+                    frame.base,
+                    frame.cell_base,
+                    frame.argument_base,
+                    frame.pending_class_base,
+                );
+                self.frames.truncate(frame_index);
+                self.registers.truncate(unwind.0);
+                self.cells.truncate(unwind.1);
+                self.arguments.truncate(unwind.2);
+                self.pending_classes.truncate(unwind.3);
+                self.registers[destination] = Value::NONE;
+                return Ok(true);
+            }
             if stop_iteration {
+                if let ReturnAction::Next(Some(default)) = &frame.action {
+                    let default = *default;
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "next continuation has no destination")
+                    })?;
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.registers[destination] = default;
+                    return Ok(true);
+                }
                 if let ReturnAction::DictIterableNext(state) = &frame.action {
                     let destination = frame.destination.ok_or_else(|| {
                         Diagnostic::new(
@@ -3274,6 +3520,13 @@ impl Vm {
                     return Ok(true);
                 }
                 if let ReturnAction::IteratorNext { target, pc } = frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "iterator continuation has no destination")
+                    })?;
+                    let return_value = frame
+                        .generator
+                        .and_then(|generator| self.heap.generator_return_value(generator))
+                        .unwrap_or(Value::NONE);
                     let unwind = (
                         frame.base,
                         frame.cell_base,
@@ -3287,6 +3540,7 @@ impl Vm {
                     self.cells.truncate(unwind.1);
                     self.arguments.truncate(unwind.2);
                     self.pending_classes.truncate(unwind.3);
+                    self.registers[destination] = return_value;
                     self.jump(unwind.4, unwind.5);
                     return Ok(true);
                 }
@@ -3558,8 +3812,34 @@ impl Vm {
                                 .collect::<Result<_>>()?,
                         })?
                     }
-                    Op::Return => {
-                        let mut value = self.read(a)?;
+                    Op::Return | Op::Yield => {
+                        let yielding = op == Op::Yield;
+                        let mut value = self.read(if yielding { b } else { a })?;
+                        if yielding {
+                            self.registers[a] = Value::NONE;
+                            self.suspend_active_generator(p)?;
+                            if self
+                                .frames
+                                .last()
+                                .is_some_and(|frame| matches!(&frame.action, ReturnAction::Close))
+                            {
+                                let generator = self
+                                    .frames
+                                    .last()
+                                    .and_then(|frame| frame.generator)
+                                    .expect("close action belongs to a generator");
+                                self.heap.complete_generator(generator)?;
+                                return Err(Diagnostic::new(
+                                    "RuntimeError",
+                                    "generator ignored GeneratorExit",
+                                ));
+                            }
+                        } else if let Some(generator) =
+                            self.frames.last().and_then(|frame| frame.generator)
+                        {
+                            self.heap.complete_generator_with_value(generator, value)?;
+                            return Err(Diagnostic::new("StopIteration", String::new()));
+                        }
                         let frame = self.frames.pop().expect("active frame");
                         let mut set_names = None;
                         let mut finish_new = None;
@@ -3587,6 +3867,8 @@ impl Vm {
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
+                            ReturnAction::Next(_) => {}
+                            ReturnAction::Close => {}
                             ReturnAction::IteratorNext { .. } => {}
                             ReturnAction::CollectIterableStart(kind) => {
                                 iterable_start = Some((kind, value));
@@ -4488,10 +4770,32 @@ impl Vm {
                     }
                     Op::Next => {
                         let iterator = self.read(b)?;
-                        if self.heap.is_iterator(iterator) {
+                        if self.heap.is_generator(iterator) {
+                            match self.resume_generator(
+                                p,
+                                iterator,
+                                a,
+                                Value::NONE,
+                                ReturnAction::IteratorNext {
+                                    target: i.c as usize,
+                                    pc,
+                                },
+                            ) {
+                                Ok(()) => {}
+                                Err(error) if error.kind == "StopIteration" => {
+                                    self.registers[a] = self
+                                        .heap
+                                        .generator_return_value(iterator)
+                                        .unwrap_or(Value::NONE);
+                                    self.jump(i.c as usize, pc);
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        } else if self.heap.is_iterator(iterator) {
                             if let Some(value) = self.heap.next(iterator)? {
                                 self.registers[a] = value;
                             } else {
+                                self.registers[a] = Value::NONE;
                                 self.jump(i.c as usize, pc);
                             }
                         } else if let Some(call) =
@@ -4836,6 +5140,7 @@ impl Vm {
             || !metadata.cell_locals.is_empty()
             || !metadata.free_vars.is_empty()
             || metadata.class_body
+            || metadata.generator
         {
             return None;
         }
@@ -5595,6 +5900,7 @@ impl Vm {
             argument_base: self.arguments.len(),
             pending_class_base: self.pending_classes.len(),
             callable: Some(callable),
+            generator: None,
             exception_stack: Vec::new(),
             jit_attempted: matches!(self.jit_cache.get(code), Some(JitEntry::Unsupported)),
             jit_resume: false,
@@ -5608,6 +5914,10 @@ impl Vm {
             return Ok(false);
         }
         let frame = self.frames.last_mut().expect("active frame");
+        if program.code[frame.code].generator {
+            frame.jit_attempted = true;
+            return Ok(false);
+        }
         let resuming = frame.jit_resume;
         if program
             .modules

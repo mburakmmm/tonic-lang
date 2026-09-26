@@ -18,6 +18,53 @@ fn fib() {
         "102334155\n"
     );
 }
+
+#[test]
+fn generators_suspend_resume_and_feed_all_builtin_consumers() {
+    let source = "def generate(n):\n    i=0\n    while i<n:\n        sent=(yield i)\n        print('sent',sent)\n        i+=1\nprint(type(generate(0)).__name__)\nmethods=generate(1)\nprint(iter(methods)==methods,methods.__iter__()==methods,methods.__next__())\ntry:\n    methods.__next__()\nexcept StopIteration:\n    print('method-stopped')\ng=generate(2)\nprint('next',next(g),next(g),next(g,'done'))\ntry:\n    next(g)\nexcept StopIteration:\n    print('stopped')\nprint(list(generate(3)))\nfor value in generate(2):\n    print('for',value)\na,b=generate(2)\nprint('unpack',a,b)\ndef collect(*values):\n    print('star',values)\ncollect(*generate(3))\nprint('exhausted',list(generate(0)))";
+    assert_eq!(
+        output(source),
+        "generator\nTrue True 0\nsent None\nmethod-stopped\nsent None\nsent None\nnext 0 1 done\nstopped\nsent None\nsent None\nsent None\n[0, 1, 2]\nfor 0\nsent None\nfor 1\nsent None\nsent None\nsent None\nunpack 0 1\nsent None\nsent None\nsent None\nstar (0, 1, 2)\nexhausted []\n"
+    );
+}
+
+#[test]
+fn generator_frames_preserve_closures_exceptions_and_gc_roots() {
+    let source = "def outer():\n    captured=['kept']\n    def generate():\n        try:\n            yield captured\n            raise ValueError('handled')\n        except ValueError:\n            yield captured\n    return generate()\nprint(list(outer()))";
+    let program = compile(source, "generator-roots").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"[['kept'], ['kept']]\n");
+    }
+}
+
+#[test]
+fn generator_send_throw_and_close_follow_suspension_protocol() {
+    let source = "def dialogue():\n    received=(yield 'ready')\n    yield received\ng=dialogue()\ntry:\n    g.send('early')\nexcept TypeError:\n    print('send-before-start')\nprint(g.send(None))\nprint(g.send('value'))\ntry:\n    g.send('late')\nexcept StopIteration:\n    print('send-stopped')\ndef guarded():\n    try:\n        yield 'start'\n    except ValueError as error:\n        yield 'caught '+str(error)\n    yield 'end'\nt=guarded()\nprint(next(t))\nprint(t.throw(ValueError('boom')))\nprint(next(t))\ndef closing(ignore):\n    try:\n        yield 1\n    except GeneratorExit:\n        print('closing',ignore)\n        if ignore:\n            yield 2\nok=closing(False)\nprint(next(ok),ok.close(),next(ok,'done'))\nbad=closing(True)\nprint(next(bad))\ntry:\n    bad.close()\nexcept RuntimeError as error:\n    print(str(error))\nfresh=closing(False)\nprint(fresh.close(),next(fresh,'done'))";
+    assert_eq!(
+        output(source),
+        "send-before-start\nready\nvalue\nsend-stopped\nstart\ncaught boom\nend\nclosing False\n1 None done\n1\nclosing True\ngenerator ignored GeneratorExit\nNone done\n"
+    );
+}
+
+#[test]
+fn yield_from_delegates_to_generators_and_builtin_iterables() {
+    let source = "def inner():\n    yield 1\n    yield 2\n    return 9\ndef outer():\n    yield 0\n    result=(yield from inner())\n    print('delegated-result',result)\n    yield from [3,4]\n    yield 5\nprint(list(outer()))";
+    assert_eq!(output(source), "delegated-result 9\n[0, 1, 2, 3, 4, 5]\n");
+}
+
+#[test]
+fn generator_stop_iteration_is_converted_at_the_boundary() {
+    let source = "def caught():\n    try:\n        raise StopIteration('inside')\n    except StopIteration as error:\n        yield str(error)\ndef escaped():\n    yield 'start'\n    raise StopIteration('escaped')\nprint(list(caught()))\ng=escaped()\nprint(next(g))\ntry:\n    next(g)\nexcept RuntimeError as error:\n    print(str(error))";
+    assert_eq!(
+        output(source),
+        "['inside']\nstart\ngenerator raised StopIteration\n"
+    );
+}
 #[test]
 fn exception_objects_and_explicit_raise() {
     assert_eq!(
