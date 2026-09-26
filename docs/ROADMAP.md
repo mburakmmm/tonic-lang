@@ -135,9 +135,10 @@ sonra alınır.
   - [x] For/list/tuple/dict/unpack/`*args` tüketicilerinde generator devamları;
     generator code'unun JIT'ten güvenli biçimde ayrılması ve JIT çağıran koddan
     yorumlayıcı resume.
-  - [ ] `yield from` için `send`/`throw`/`close` forwarding, tam `throw` imzası,
-    `StopIteration.value`, generator finalization ve async/await/coroutine state
-    machine'i.
+  - [x] Bytecode v16 `YIELD_FROM`; generator ve özel iterator delegelerine
+    `send`/`throw`/`close` forwarding, dış handler/finally unwind'ı, tam legacy
+    `throw(type, value, traceback)` imzası ve GC-traced `StopIteration.value`.
+  - [ ] Generator finalization ve async/await/coroutine state machine'i.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.

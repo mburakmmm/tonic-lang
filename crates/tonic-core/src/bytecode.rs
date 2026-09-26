@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 15;
+pub const BYTECODE_VERSION: u16 = 16;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -88,6 +88,7 @@ pub enum Op {
     ContextEnter = 75,
     ContextExit = 76,
     Yield = 77,
+    YieldFrom = 78,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -173,6 +174,7 @@ impl TryFrom<u16> for Op {
             75 => Self::ContextEnter,
             76 => Self::ContextExit,
             77 => Self::Yield,
+            78 => Self::YieldFrom,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -657,6 +659,14 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::YieldFrom => {
+                        if !code.generator {
+                            return Err(bad("yield from outside generator code"));
+                        }
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        jump(i.c)?;
+                    }
                     Op::Raise => {
                         if i.b > 2 || (i.b != 2 && i.c != 0) {
                             return Err(bad("invalid raise operand"));
@@ -830,7 +840,7 @@ fn verify_argument_stack(code: &CodeObject) -> Result<()> {
                 work.push((i.b as usize, depth));
                 work.push((pc + 1, depth));
             }
-            Op::Next => {
+            Op::Next | Op::YieldFrom => {
                 work.push((i.c as usize, depth));
                 work.push((pc + 1, depth));
             }

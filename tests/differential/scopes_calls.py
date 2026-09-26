@@ -150,6 +150,51 @@ print(next(g),g.send('sent'),list(g))
 g=guarded()
 print(next(g),g.throw(ValueError('boom')),next(g),g.close())
 ''',
+'''def inner():
+    received=yield 'ready'
+    yield received
+    return 9
+def outer():
+    result=yield from inner()
+    print('delegate-result',result)
+g=outer()
+print(next(g),g.send('sent'))
+try:
+    next(g)
+except StopIteration as error:
+    print(error.value,error.args)
+e=StopIteration(1,2)
+print(e.value,e.args)
+''',
+'''def guarded():
+    try:
+        try:
+            yield 'start'
+        except ValueError as error:
+            yield 'caught '+str(error)
+    finally:
+        print('inner-finally')
+def outer():
+    try:
+        yield from guarded()
+    finally:
+        print('outer-finally')
+g=outer()
+print(next(g),g.throw(ValueError('boom')))
+print(g.close())
+''',
+'''def catcher():
+    try:
+        yield 'ready'
+    except Exception as error:
+        yield type(error).__name__,error.args
+def run(*arguments):
+    g=catcher()
+    print(next(g),g.throw(*arguments))
+run(ValueError)
+run(ValueError,'message')
+run(ValueError,(1,2),None)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -175,4 +220,5 @@ ERRORS = [
 ("d={'a':1}\nfor k in d:\n    d['b']=2", 'RuntimeError'),
 ('(lambda a:a)()', 'TypeError'),
 ('def bad():\n    yield 1\n    raise StopIteration("boom")\ng=bad()\nnext(g)\nnext(g)', 'RuntimeError'),
+('def outer():\n    yield from [1,2]\ng=outer()\nnext(g)\ng.send(3)', 'AttributeError'),
 ]

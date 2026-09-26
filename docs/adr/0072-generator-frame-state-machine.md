@@ -2,10 +2,9 @@
 
 ## Durum
 
-Kısmen uygulandı. Bu karar senkron generator çekirdeğini, bytecode v15 `YIELD`
-opcode'unu, askıya alınmış kesin GC köklerini, generator protokolünü ve temel
-`yield from` delegasyonunu kapsar. Coroutine/async ve aşağıda belirtilen tam
-delegasyon özellikleri açık kalır.
+Kısmen uygulandı. Bu karar senkron generator çekirdeğini, bytecode v16 `YIELD` /
+`YIELD_FROM` opcode'larını, askıya alınmış kesin GC köklerini ve tam senkron
+delegasyon protokolünü kapsar. Coroutine/async ve finalization açık kalır.
 
 ## Karar
 
@@ -44,18 +43,28 @@ custom iterator gibi generator üzerinde de askıya alınabilir. Senkron builtin
 iterator genişletmesi PC'yi geri sarmaz; yalnız gerçekten askıya alınan deferred
 `*args` çağrısı `CALL_EXPANDED` PC'sine döner.
 
-Temel `yield from` bir iterator döngüsüne lower edilir. Delege generator
-tamamlandığında saklanan `return` değeri `NEXT` hedef register'ına yazılır ve
-`yield from` ifadesinin sonucu olur; builtin iterator tükenmesi `None` üretir.
+`yield from` doğrulanmış bir `YIELD_FROM`/`YIELD` döngüsüne lower edilir.
+`YIELD_FROM` aynı register'daki resume değerini delegenin `send` yoluna verir;
+normal `None` resume `__next__` kullanır. Askıdaki dış frame aktif delegate logical
+handle'ını taşır. `throw` ve `close` dış frame'i önce yeniden kurar; enjekte edilen
+managed exception opcode sınırında delegenin protokolüne aktarılır. Delege
+exception'ı dış frame stack'te dururken yayıldığı için dış `except` ve `finally`
+bölgeleri olağan VM unwind yolunda çalışır. Delege tamamlandığında
+`StopIteration.value` hedef register'a yazılır ve ifadenin sonucu olur.
+
+`StopIteration.value` exception nesnesinde ayrı, yazılabilir ve precise-traced bir
+alan olarak tutulur. Generator `return` değeri ilk tükenme exception'ının `args`
+ve `value` alanlarına taşınır; sonraki tükenmeler `None` üretir. Modern tek
+exception argümanlı `throw` ile legacy `throw(type, value, traceback)` desteklenir.
+Legacy tuple value positional args olarak açılır, custom exception `__init__`
+normal Tonic frame'inde çalışabilir ve traceback girdisi doğrulanıp köklenir.
+
 Generator code'u Cranelift adaylığından ve direct-call specialization'dan hariç
 tutulur. JIT'te çalışan çağıran kod generic sınırdan interpreter generator frame'ine
 geçebilir.
 
 ## Açık kapsam
 
-- Delegeye `send`, `throw` ve `close` forwarding uygulanacaktır.
-- `generator.throw(type, value, traceback)` uyumluluğu ve `StopIteration.value`
-  attribute'u eklenecektir.
 - Ulaşılamayan askıdaki generator'ların logical finalization/close politikası,
   genel finalizer tasarımıyla birlikte belirlenecektir.
 - `async def`, `await`, async generator ve coroutine state machine ayrı bir
@@ -68,7 +77,7 @@ geçebilir.
 Compiler testleri lexical generator işaretlemesini, module/class reddini ve owned
 AST/bytecode üretimini kapsar. Verifier testi `YIELD` için generator metadata ve
 operand sınırını doğrular. Runtime testleri tembel çağrı, `iter`/`next`, bütün
-builtin tüketiciler, `send`/`throw`/`close`, return-değerli `yield from`, PEP 479,
-closure/cell/exception state'i ve moving stress GC'yi interpreter ile JIT çağıran
-modlarda sınar. Python differential corpus'u senkron protokol ve hata türlerini
-CPython 3.14.6 ile karşılaştırır.
+builtin tüketiciler, `send`/modern ve legacy `throw`/`close`, return-değerli ve tam
+forwarding yapan `yield from`, PEP 479, closure/cell/exception/delegate state'i ve
+moving stress GC'yi interpreter ile JIT çağıran modlarda sınar. Python differential
+corpus'u senkron protokol ve hata türlerini CPython 3.14.6 ile karşılaştırır.

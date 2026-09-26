@@ -2,7 +2,9 @@
 pub(crate) mod calls;
 use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
-    heap::{Builtin, GeneratorFrame, GeneratorState, Heap, Object, TracebackEntry},
+    heap::{
+        Builtin, GeneratorFrame, GeneratorState, Heap, Object, SuspendedGenerator, TracebackEntry,
+    },
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
         NativeDef, NativeFn, PersistentHandle,
@@ -122,6 +124,8 @@ struct Frame {
     pending_class_base: usize,
     callable: Option<Value>,
     generator: Option<Value>,
+    yield_from: Option<Value>,
+    injected_exception: Option<Value>,
     exception_stack: Vec<Value>,
     jit_attempted: bool,
     jit_resume: bool,
@@ -611,6 +615,19 @@ enum ReturnAction {
         target: usize,
         pc: usize,
     },
+    YieldFrom {
+        target: usize,
+        pc: usize,
+        iterator: Value,
+    },
+    YieldFromClose {
+        exception: Value,
+    },
+    GeneratorThrowInit {
+        generator: Value,
+        traceback: Option<Value>,
+        instance: Value,
+    },
     CollectIterableStart(IterableCollectionKind),
     CollectIterableNext(IterableCollection),
     ExpandIterableStart(Option<usize>),
@@ -1066,6 +1083,17 @@ impl ReturnAction {
             | Self::Import(_)
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
+            Self::YieldFrom { iterator, .. } => visit(*iterator),
+            Self::YieldFromClose { exception } => visit(*exception),
+            Self::GeneratorThrowInit {
+                generator,
+                traceback,
+                instance,
+            } => {
+                visit(*generator);
+                traceback.iter().copied().for_each(&mut visit);
+                visit(*instance);
+            }
             Self::Next(default) => default.iter().copied().for_each(visit),
             Self::CollectIterableStart(kind) => kind.trace(visit),
             Self::AttributeGet(state) => {
@@ -2039,6 +2067,12 @@ impl Vm {
         roots.extend(self.pending_exception);
         roots.extend(self.frames.iter().filter_map(|frame| frame.callable));
         roots.extend(self.frames.iter().filter_map(|frame| frame.namespace));
+        roots.extend(self.frames.iter().filter_map(|frame| frame.yield_from));
+        roots.extend(
+            self.frames
+                .iter()
+                .filter_map(|frame| frame.injected_exception),
+        );
         roots.extend(
             self.frames
                 .iter()
@@ -2920,11 +2954,15 @@ impl Vm {
             Ok(Object::Class(_))
                 if self.instance_check(value, self.runtime_types.base_exception, true, 0)? =>
             {
+                let stop_iteration_value = self
+                    .instance_check(value, self.runtime_types.stop_iteration, true, 0)?
+                    .then_some(Value::NONE);
                 if self.builtin_type_kind(value) == Some(RuntimeTypeKind::Exception) {
                     return self.heap.alloc(Object::Exception {
                         class: value,
                         message: String::new(),
                         arguments: Vec::new(),
+                        stop_iteration_value,
                         attributes: Default::default(),
                         cause: None,
                         context: None,
@@ -2936,6 +2974,7 @@ impl Vm {
                     class: value,
                     message: String::new(),
                     arguments: Vec::new(),
+                    stop_iteration_value,
                     attributes: Default::default(),
                     cause: None,
                     context: None,
@@ -2988,6 +3027,7 @@ impl Vm {
             cells,
             exception_stack: frame.exception_stack,
             resume_register: None,
+            yield_from: None,
             return_value: Value::NONE,
             state: GeneratorState::Created,
         }))?;
@@ -3071,6 +3111,8 @@ impl Vm {
             pending_class_base: self.pending_classes.len(),
             callable: None,
             generator: Some(generator),
+            yield_from: resumed.yield_from,
+            injected_exception: None,
             exception_stack: resumed.exception_stack,
             jit_attempted: true,
             jit_resume: false,
@@ -3095,11 +3137,14 @@ impl Vm {
             .to_vec();
         self.heap.suspend_generator(
             generator,
-            frame.ip,
-            registers,
-            cells,
-            frame.exception_stack.clone(),
-            program.code[frame.code].instructions[frame.ip - 1].a,
+            SuspendedGenerator {
+                ip: frame.ip,
+                registers,
+                cells,
+                exception_stack: frame.exception_stack.clone(),
+                resume_register: program.code[frame.code].instructions[frame.ip - 1].a,
+                yield_from: frame.yield_from,
+            },
         )
     }
     fn exception_from_diagnostic(&mut self, error: &Diagnostic) -> Result<Value> {
@@ -3118,17 +3163,47 @@ impl Vm {
                 .unwrap_or(self.runtime_types.runtime_error),
         };
         let message = error.message.clone();
-        let argument = self.heap.alloc(Object::Str(message.clone()))?;
+        let stop_iteration = class == self.runtime_types.stop_iteration;
+        let arguments = if stop_iteration && message.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.heap.alloc(Object::Str(message.clone()))?]
+        };
+        let stop_iteration_value =
+            stop_iteration.then_some(arguments.first().copied().unwrap_or(Value::NONE));
         self.heap.alloc(Object::Exception {
             class,
             message,
-            arguments: vec![argument],
+            arguments,
+            stop_iteration_value,
             attributes: Default::default(),
             cause: None,
             context: None,
             suppress_context: false,
             traceback: None,
         })
+    }
+
+    fn generator_stop_iteration(&mut self, value: Value) -> Result<Diagnostic> {
+        let arguments = if value == Value::NONE {
+            Vec::new()
+        } else {
+            vec![value]
+        };
+        let message = self.heap.exception_message(&arguments)?;
+        let exception = self.heap.alloc(Object::Exception {
+            class: self.runtime_types.stop_iteration,
+            message: message.clone(),
+            arguments,
+            stop_iteration_value: Some(value),
+            attributes: Default::default(),
+            cause: None,
+            context: None,
+            suppress_context: false,
+            traceback: None,
+        })?;
+        self.pending_exception = Some(exception);
+        Ok(Diagnostic::new("StopIteration", message))
     }
     fn dispatch_exception(
         &mut self,
@@ -3340,6 +3415,42 @@ impl Vm {
                     }
                 }
             }
+            if stop_iteration || generator_exit {
+                if let ReturnAction::YieldFromClose {
+                    exception: outer_exception,
+                } = frame.action
+                {
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    let caller = self.frames.last().ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "yield-from close lost outer frame")
+                    })?;
+                    let code = caller.code;
+                    let pc = caller.ip.saturating_sub(1);
+                    let diagnostic = self.exception_diagnostic(outer_exception)?;
+                    self.pending_exception = Some(outer_exception);
+                    if self.dispatch_exception(
+                        program,
+                        output,
+                        &diagnostic,
+                        minimum_depth,
+                        code,
+                        pc,
+                    )? {
+                        return Ok(true);
+                    }
+                    return Err(diagnostic);
+                }
+            }
             if (stop_iteration || generator_exit) && matches!(&frame.action, ReturnAction::Close) {
                 let destination = frame.destination.ok_or_else(|| {
                     Diagnostic::new("BytecodeError", "close continuation has no destination")
@@ -3526,6 +3637,7 @@ impl Vm {
                     let return_value = frame
                         .generator
                         .and_then(|generator| self.heap.generator_return_value(generator))
+                        .or_else(|| self.heap.stop_iteration_value(exception))
                         .unwrap_or(Value::NONE);
                     let unwind = (
                         frame.base,
@@ -3540,6 +3652,43 @@ impl Vm {
                     self.cells.truncate(unwind.1);
                     self.arguments.truncate(unwind.2);
                     self.pending_classes.truncate(unwind.3);
+                    self.registers[destination] = return_value;
+                    self.jump(unwind.4, unwind.5);
+                    return Ok(true);
+                }
+                if let ReturnAction::YieldFrom { target, pc, .. } = frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "yield-from continuation has no destination",
+                        )
+                    })?;
+                    let return_value = self
+                        .heap
+                        .stop_iteration_value(exception)
+                        .unwrap_or(Value::NONE);
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                        target,
+                        pc,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.frames
+                        .last_mut()
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "BytecodeError",
+                                "yield-from completion lost outer frame",
+                            )
+                        })?
+                        .yield_from = None;
                     self.registers[destination] = return_value;
                     self.jump(unwind.4, unwind.5);
                     return Ok(true);
@@ -3818,11 +3967,12 @@ impl Vm {
                         if yielding {
                             self.registers[a] = Value::NONE;
                             self.suspend_active_generator(p)?;
-                            if self
-                                .frames
-                                .last()
-                                .is_some_and(|frame| matches!(&frame.action, ReturnAction::Close))
-                            {
+                            if self.frames.last().is_some_and(|frame| {
+                                matches!(
+                                    &frame.action,
+                                    ReturnAction::Close | ReturnAction::YieldFromClose { .. }
+                                )
+                            }) {
                                 let generator = self
                                     .frames
                                     .last()
@@ -3838,7 +3988,7 @@ impl Vm {
                             self.frames.last().and_then(|frame| frame.generator)
                         {
                             self.heap.complete_generator_with_value(generator, value)?;
-                            return Err(Diagnostic::new("StopIteration", String::new()));
+                            return Err(self.generator_stop_iteration(value)?);
                         }
                         let frame = self.frames.pop().expect("active frame");
                         let mut set_names = None;
@@ -3864,12 +4014,35 @@ impl Vm {
                         let mut index_conversion = None;
                         let mut hash_action = None;
                         let mut length_result = None;
+                        let mut yield_from_item = None;
+                        let mut yield_from_close = None;
+                        let mut generator_throw = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
                             ReturnAction::Next(_) => {}
                             ReturnAction::Close => {}
                             ReturnAction::IteratorNext { .. } => {}
+                            ReturnAction::YieldFrom { iterator, .. } => {
+                                yield_from_item = Some(iterator)
+                            }
+                            ReturnAction::YieldFromClose { exception } => {
+                                yield_from_close = Some(exception)
+                            }
+                            ReturnAction::GeneratorThrowInit {
+                                generator,
+                                traceback,
+                                instance,
+                            } => {
+                                if value != Value::NONE {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "exception __init__ must return None",
+                                    ));
+                                }
+                                value = instance;
+                                generator_throw = Some((generator, traceback));
+                            }
                             ReturnAction::CollectIterableStart(kind) => {
                                 iterable_start = Some((kind, value));
                             }
@@ -3995,6 +4168,37 @@ impl Vm {
                         }
                         self.registers.truncate(frame.base);
                         self.cells.truncate(frame.cell_base);
+                        if let Some(iterator) = yield_from_item {
+                            self.frames
+                                .last_mut()
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "BytecodeError",
+                                        "yield-from continuation lost outer frame",
+                                    )
+                                })?
+                                .yield_from = Some(iterator);
+                        }
+                        if let Some(exception) = yield_from_close {
+                            self.pending_exception = Some(exception);
+                            return Err(self.exception_diagnostic(exception)?);
+                        }
+                        if let Some((generator, traceback)) = generator_throw {
+                            let destination = frame.destination.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "generator throw constructor has no destination",
+                                )
+                            })?;
+                            self.finish_generator_throw(
+                                p,
+                                generator,
+                                destination,
+                                value,
+                                traceback,
+                            )?;
+                            return Ok(());
+                        }
                         let continuation_required = set_names.is_some()
                             || finish_new.is_some()
                             || finish_metaclass_new.is_some()
@@ -4822,6 +5026,224 @@ impl Vm {
                             }
                         } else {
                             return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                        }
+                    }
+                    Op::YieldFrom => {
+                        let iterator = self.read(b)?;
+                        let sent = self.read(a)?;
+                        let injected = self
+                            .frames
+                            .last_mut()
+                            .expect("active yield-from frame")
+                            .injected_exception
+                            .take();
+                        self.frames
+                            .last_mut()
+                            .expect("active yield-from frame")
+                            .yield_from = None;
+                        if let Some(exception) = injected {
+                            let closing = self.instance_check(
+                                exception,
+                                self.runtime_types.generator_exit,
+                                false,
+                                0,
+                            )?;
+                            if closing {
+                                if self.heap.is_generator(iterator) {
+                                    self.resume_generator(
+                                        p,
+                                        iterator,
+                                        a,
+                                        Value::NONE,
+                                        ReturnAction::YieldFromClose { exception },
+                                    )?;
+                                    let diagnostic = self.exception_diagnostic(exception)?;
+                                    self.pending_exception = Some(exception);
+                                    return Err(diagnostic);
+                                }
+                                if let Some(call) =
+                                    self.heap.special_method_call(iterator, "close")?
+                                {
+                                    let depth = self.frames.len();
+                                    self.invoke(
+                                        p,
+                                        call.callable,
+                                        a,
+                                        Arguments::Inline {
+                                            receiver: call.receiver,
+                                            positional: [Value::UNBOUND; 3],
+                                            count: 0,
+                                        },
+                                        output,
+                                    )?;
+                                    if self.frames.len() > depth {
+                                        self.frames
+                                            .last_mut()
+                                            .expect("delegate close frame")
+                                            .action = ReturnAction::YieldFromClose { exception };
+                                    } else {
+                                        let diagnostic = self.exception_diagnostic(exception)?;
+                                        self.pending_exception = Some(exception);
+                                        return Err(diagnostic);
+                                    }
+                                } else {
+                                    let diagnostic = self.exception_diagnostic(exception)?;
+                                    self.pending_exception = Some(exception);
+                                    return Err(diagnostic);
+                                }
+                            } else if self.heap.is_generator(iterator) {
+                                self.resume_generator(
+                                    p,
+                                    iterator,
+                                    a,
+                                    Value::NONE,
+                                    ReturnAction::YieldFrom {
+                                        target: i.c as usize,
+                                        pc,
+                                        iterator,
+                                    },
+                                )?;
+                                let diagnostic = self.exception_diagnostic(exception)?;
+                                self.pending_exception = Some(exception);
+                                return Err(diagnostic);
+                            } else if let Some(call) =
+                                self.heap.special_method_call(iterator, "throw")?
+                            {
+                                let depth = self.frames.len();
+                                match self.invoke(
+                                    p,
+                                    call.callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver: call.receiver,
+                                        positional: [exception, Value::UNBOUND, Value::UNBOUND],
+                                        count: 1,
+                                    },
+                                    output,
+                                ) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind == "StopIteration" => {
+                                        let return_value = self
+                                            .pending_exception
+                                            .take()
+                                            .and_then(|exception| {
+                                                self.heap.stop_iteration_value(exception)
+                                            })
+                                            .unwrap_or(Value::NONE);
+                                        self.registers[a] = return_value;
+                                        self.jump(i.c as usize, pc);
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                                if self.frames.len() > depth {
+                                    self.frames.last_mut().expect("delegate throw frame").action =
+                                        ReturnAction::YieldFrom {
+                                            target: i.c as usize,
+                                            pc,
+                                            iterator,
+                                        };
+                                } else if self.frames.last().is_some_and(|frame| frame.ip == pc + 1)
+                                {
+                                    self.frames
+                                        .last_mut()
+                                        .expect("active yield-from frame")
+                                        .yield_from = Some(iterator);
+                                }
+                            } else {
+                                let diagnostic = self.exception_diagnostic(exception)?;
+                                self.pending_exception = Some(exception);
+                                return Err(diagnostic);
+                            }
+                        } else if self.heap.is_generator(iterator) {
+                            match self.resume_generator(
+                                p,
+                                iterator,
+                                a,
+                                sent,
+                                ReturnAction::YieldFrom {
+                                    target: i.c as usize,
+                                    pc,
+                                    iterator,
+                                },
+                            ) {
+                                Ok(()) => {}
+                                Err(error) if error.kind == "StopIteration" => {
+                                    self.pending_exception = None;
+                                    self.registers[a] = Value::NONE;
+                                    self.jump(i.c as usize, pc);
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        } else if sent == Value::NONE && self.heap.is_iterator(iterator) {
+                            if let Some(value) = self.heap.next(iterator)? {
+                                self.registers[a] = value;
+                                self.frames
+                                    .last_mut()
+                                    .expect("active yield-from frame")
+                                    .yield_from = Some(iterator);
+                            } else {
+                                self.registers[a] = Value::NONE;
+                                self.jump(i.c as usize, pc);
+                            }
+                        } else {
+                            let method = if sent == Value::NONE {
+                                "__next__"
+                            } else {
+                                "send"
+                            };
+                            let Some(call) = self.heap.special_method_call(iterator, method)?
+                            else {
+                                return Err(Diagnostic::new(
+                                    "AttributeError",
+                                    format!("iterator has no '{method}' method"),
+                                ));
+                            };
+                            let mut positional = [Value::UNBOUND; 3];
+                            let count = if sent == Value::NONE {
+                                0
+                            } else {
+                                positional[0] = sent;
+                                1
+                            };
+                            let depth = self.frames.len();
+                            match self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional,
+                                    count,
+                                },
+                                output,
+                            ) {
+                                Ok(()) => {}
+                                Err(error) if error.kind == "StopIteration" => {
+                                    let return_value = self
+                                        .pending_exception
+                                        .take()
+                                        .and_then(|exception| {
+                                            self.heap.stop_iteration_value(exception)
+                                        })
+                                        .unwrap_or(Value::NONE);
+                                    self.registers[a] = return_value;
+                                    self.jump(i.c as usize, pc);
+                                }
+                                Err(error) => return Err(error),
+                            }
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("yield-from frame").action =
+                                    ReturnAction::YieldFrom {
+                                        target: i.c as usize,
+                                        pc,
+                                        iterator,
+                                    };
+                            } else if self.frames.last().is_some_and(|frame| frame.ip == pc + 1) {
+                                self.frames
+                                    .last_mut()
+                                    .expect("active yield-from frame")
+                                    .yield_from = Some(iterator);
+                            }
                         }
                     }
                     Op::Import => {
@@ -5901,6 +6323,8 @@ impl Vm {
             pending_class_base: self.pending_classes.len(),
             callable: Some(callable),
             generator: None,
+            yield_from: None,
+            injected_exception: None,
             exception_stack: Vec::new(),
             jit_attempted: matches!(self.jit_cache.get(code), Some(JitEntry::Unsupported)),
             jit_resume: false,

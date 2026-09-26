@@ -1395,6 +1395,7 @@ impl Heap {
             Ok(Object::Exception {
                 class,
                 arguments,
+                stop_iteration_value,
                 attributes,
                 cause,
                 context,
@@ -1411,6 +1412,9 @@ impl Heap {
                     "__traceback__" => return Ok(traceback.unwrap_or(Value::NONE)),
                     "args" => {
                         return self.alloc(Object::Tuple(arguments.clone()));
+                    }
+                    "value" if stop_iteration_value.is_some() => {
+                        return Ok(stop_iteration_value.expect("checked StopIteration value"));
                     }
                     "__dict__" => {
                         return Err(Diagnostic::new(
@@ -1552,6 +1556,26 @@ impl Heap {
         if matches!(self.get(owner), Ok(Object::Module(_))) {
             return self.add_module_member(owner, name, value);
         }
+        if name == "value"
+            && matches!(
+                self.get(owner),
+                Ok(Object::Exception {
+                    stop_iteration_value: Some(_),
+                    ..
+                })
+            )
+        {
+            self.write_barrier(owner, value);
+            let Object::Exception {
+                stop_iteration_value,
+                ..
+            } = self.get_mut(owner)?
+            else {
+                unreachable!("checked StopIteration changed kind")
+            };
+            *stop_iteration_value = Some(value);
+            return Ok(());
+        }
         if let Some(class) = self.get(owner)?.instance_class() {
             if self.class(class)?.root {
                 return Err(missing(name));
@@ -1626,6 +1650,25 @@ impl Heap {
     pub fn del_attr(&mut self, owner: Value, name: &str) -> Result<()> {
         if matches!(self.get(owner), Ok(Object::Module(_))) {
             return self.delete_module_member(owner, name);
+        }
+        if name == "value"
+            && matches!(
+                self.get(owner),
+                Ok(Object::Exception {
+                    stop_iteration_value: Some(_),
+                    ..
+                })
+            )
+        {
+            let Object::Exception {
+                stop_iteration_value,
+                ..
+            } = self.get_mut(owner)?
+            else {
+                unreachable!("checked StopIteration changed kind")
+            };
+            *stop_iteration_value = Some(Value::NONE);
+            return Ok(());
         }
         if let Some(class) = self.get(owner)?.instance_class() {
             if self.class(class)?.root

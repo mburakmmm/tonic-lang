@@ -67,8 +67,16 @@ fn yield_requires_generator_function_metadata() {
     generator.code.push(code);
     generator.clone().verify().unwrap();
 
+    let mut delegating = generator.clone();
+    delegating.code[1].instructions[0] = Instr::new(Op::YieldFrom, 0, 1, 1);
+    delegating.clone().verify().unwrap();
+
     let mut outside = program();
     outside.code[0].instructions[0] = Instr::new(Op::Yield, 0, 1, 0);
+    assert!(outside.verify().is_err());
+
+    let mut outside = program();
+    outside.code[0].instructions[0] = Instr::new(Op::YieldFrom, 0, 1, 1);
     assert!(outside.verify().is_err());
 
     let mut module = program();

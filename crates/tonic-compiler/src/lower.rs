@@ -225,7 +225,7 @@ impl Lower<'_> {
         let i = &mut self.code.instructions[pc];
         match Op::try_from(i.opcode).expect("compiler opcode") {
             Op::Jump => i.a = target,
-            Op::Next => i.c = target,
+            Op::Next | Op::YieldFrom => i.c = target,
             _ => i.b = target,
         }
     }
@@ -942,9 +942,8 @@ impl Lower<'_> {
                 self.emit(Op::Iter, iterator, source, 0, s)?;
                 let result = self.constant(Constant::None, s)?;
                 let start = self.pc()?;
-                let exhausted = self.emit(Op::Next, result, iterator, 0, s)?;
-                let sent = self.alloc(1)?;
-                self.emit(Op::Yield, sent, result, 0, s)?;
+                let exhausted = self.emit(Op::YieldFrom, result, iterator, 0, s)?;
+                self.emit(Op::Yield, result, result, 0, s)?;
                 self.emit(Op::Jump, start, 0, 0, s)?;
                 let end = self.pc()?;
                 self.patch(exhausted, end);

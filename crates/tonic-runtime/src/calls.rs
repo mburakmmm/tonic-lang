@@ -196,6 +196,40 @@ impl Vm {
         self.stats.calls += 1;
         self.invoke_target(p, callee, destination, args, output)
     }
+
+    pub(super) fn finish_generator_throw(
+        &mut self,
+        p: &Program,
+        generator: Value,
+        destination: usize,
+        exception: Value,
+        traceback: Option<Value>,
+    ) -> Result<()> {
+        let exception = self.normalize_raised_exception(exception)?;
+        self.heap.set_exception_traceback(exception, traceback)?;
+        let delegated = self.heap.generator_yield_from(generator).is_some();
+        match self.resume_generator(
+            p,
+            generator,
+            destination,
+            Value::NONE,
+            ReturnAction::Next(None),
+        ) {
+            Ok(()) => {}
+            Err(error) if error.kind == "StopIteration" => {}
+            Err(error) => return Err(error),
+        }
+        if delegated {
+            self.frames
+                .last_mut()
+                .expect("delegating generator frame")
+                .injected_exception = Some(exception);
+            return Ok(());
+        }
+        self.pending_exception = Some(exception);
+        Err(self.exception_diagnostic(exception)?)
+    }
+
     pub(crate) fn invoke_target(
         &mut self,
         p: &Program,
@@ -484,10 +518,10 @@ impl Vm {
                     );
                 }
                 if matches!(builtin, Builtin::GeneratorThrow) {
-                    if args.keyword_count() != 0 || args.count() != 2 {
+                    if args.keyword_count() != 0 || !(2..=4).contains(&args.count()) {
                         return Err(Diagnostic::new(
                             "TypeError",
-                            "generator.throw expects one exception",
+                            "generator.throw expects one to three exception arguments",
                         ));
                     }
                     let generator = args.positional(&self.registers, 0);
@@ -497,21 +531,148 @@ impl Vm {
                             "generator descriptor requires a generator",
                         ));
                     }
-                    let exception =
-                        self.normalize_raised_exception(args.positional(&self.registers, 1))?;
-                    match self.resume_generator(
+                    let explicit = args.count() - 1;
+                    let type_or_exception = args.positional(&self.registers, 1);
+                    let value = (explicit >= 2).then(|| args.positional(&self.registers, 2));
+                    let traceback = (explicit == 3)
+                        .then(|| args.positional(&self.registers, 3))
+                        .and_then(|traceback| (traceback != Value::NONE).then_some(traceback));
+                    if traceback.is_some_and(|traceback| {
+                        !matches!(self.heap.get(traceback), Ok(Object::Traceback { .. }))
+                    }) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "throw traceback must be a traceback object or None",
+                        ));
+                    }
+                    if matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Exception { .. })
+                    ) || matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Instance { .. })
+                    ) && self.instance_check(
+                        type_or_exception,
+                        self.runtime_types.base_exception,
+                        false,
+                        0,
+                    )? {
+                        if value.is_some_and(|value| value != Value::NONE) {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "instance exception may not have a separate value",
+                            ));
+                        }
+                        return self.finish_generator_throw(
+                            p,
+                            generator,
+                            destination,
+                            type_or_exception,
+                            traceback,
+                        );
+                    }
+                    if !matches!(self.heap.get(type_or_exception), Ok(Object::Class(_)))
+                        || !self.instance_check(
+                            type_or_exception,
+                            self.runtime_types.base_exception,
+                            true,
+                            0,
+                        )?
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exceptions must derive from BaseException",
+                        ));
+                    }
+                    if let Some(value) = value {
+                        if self.instance_check(value, type_or_exception, false, 0)? {
+                            return self.finish_generator_throw(
+                                p,
+                                generator,
+                                destination,
+                                value,
+                                traceback,
+                            );
+                        }
+                    }
+                    let positional = match value {
+                        None | Some(Value::NONE) => Vec::new(),
+                        Some(value) => match self.heap.get(value) {
+                            Ok(Object::Tuple(values)) => values.clone(),
+                            _ => vec![value],
+                        },
+                    };
+                    let message = self.heap.exception_message(&positional)?;
+                    let stop_iteration_value = self
+                        .instance_check(
+                            type_or_exception,
+                            self.runtime_types.stop_iteration,
+                            true,
+                            0,
+                        )?
+                        .then_some(positional.first().copied().unwrap_or(Value::NONE));
+                    let instance = self.heap.alloc(Object::Exception {
+                        class: type_or_exception,
+                        message,
+                        arguments: positional.clone(),
+                        stop_iteration_value,
+                        attributes: Default::default(),
+                        cause: None,
+                        context: None,
+                        suppress_context: false,
+                        traceback: None,
+                    })?;
+                    let initializer = self.heap.class_lookup(type_or_exception, "__init__")?;
+                    if initializer.is_none_or(|initializer| {
+                        matches!(
+                            self.heap.get(initializer),
+                            Ok(Object::Builtin(Builtin::ObjectInit))
+                        )
+                    }) {
+                        return self.finish_generator_throw(
+                            p,
+                            generator,
+                            destination,
+                            instance,
+                            traceback,
+                        );
+                    }
+                    let depth = self.frames.len();
+                    self.invoke_target(
+                        p,
+                        initializer.expect("checked exception initializer"),
+                        destination,
+                        Arguments::Expanded(ExpandedArgs {
+                            receiver: Some(instance),
+                            positional,
+                            ..ExpandedArgs::default()
+                        }),
+                        output,
+                    )?;
+                    if self.frames.len() > depth {
+                        self.frames
+                            .last_mut()
+                            .expect("exception initializer frame")
+                            .action = ReturnAction::GeneratorThrowInit {
+                            generator,
+                            traceback,
+                            instance,
+                        };
+                        return Ok(());
+                    }
+                    if self.registers[destination] != Value::NONE {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exception __init__ must return None",
+                        ));
+                    }
+                    return self.finish_generator_throw(
                         p,
                         generator,
                         destination,
-                        Value::NONE,
-                        ReturnAction::Next(None),
-                    ) {
-                        Ok(()) => {}
-                        Err(error) if error.kind == "StopIteration" => {}
-                        Err(error) => return Err(error),
-                    }
-                    self.pending_exception = Some(exception);
-                    return Err(self.exception_diagnostic(exception)?);
+                        instance,
+                        traceback,
+                    );
                 }
                 if matches!(builtin, Builtin::GeneratorClose) {
                     if args.keyword_count() != 0 || args.count() != 1 {
@@ -542,6 +703,7 @@ impl Vm {
                         }
                         GeneratorState::Suspended => {}
                     }
+                    let delegated = self.heap.generator_yield_from(generator).is_some();
                     self.resume_generator(
                         p,
                         generator,
@@ -551,6 +713,13 @@ impl Vm {
                     )?;
                     let diagnostic = Diagnostic::new("GeneratorExit", String::new());
                     let exception = self.exception_from_diagnostic(&diagnostic)?;
+                    if delegated {
+                        self.frames
+                            .last_mut()
+                            .expect("delegating generator frame")
+                            .injected_exception = Some(exception);
+                        return Ok(());
+                    }
                     self.pending_exception = Some(exception);
                     return Err(diagnostic);
                 }
@@ -2279,10 +2448,14 @@ impl Vm {
                 ));
             }
             let message = self.heap.exception_message(&arguments.positional)?;
+            let stop_iteration_value = self
+                .instance_check(class, self.runtime_types.stop_iteration, true, 0)?
+                .then_some(arguments.positional.first().copied().unwrap_or(Value::NONE));
             let instance = self.heap.alloc(Object::Exception {
                 class,
                 message,
                 arguments: arguments.positional.clone(),
+                stop_iteration_value,
                 attributes: Default::default(),
                 cause: None,
                 context: None,
@@ -2570,10 +2743,14 @@ impl Vm {
                 .map(|index| args.positional(&self.registers, index))
                 .collect::<Vec<_>>();
             let message = self.heap.exception_message(&arguments)?;
+            let stop_iteration_value = self
+                .instance_check(class, self.runtime_types.stop_iteration, true, 0)?
+                .then_some(arguments.first().copied().unwrap_or(Value::NONE));
             self.registers[destination] = self.heap.alloc(Object::Exception {
                 class,
                 message,
                 arguments,
+                stop_iteration_value,
                 attributes: Default::default(),
                 cause: None,
                 context: None,
@@ -3426,6 +3603,8 @@ impl Vm {
             pending_class_base: self.pending_classes.len(),
             callable,
             generator: None,
+            yield_from: None,
+            injected_exception: None,
             exception_stack: Vec::new(),
             namespace: None,
             action: super::ReturnAction::Value,

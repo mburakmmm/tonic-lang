@@ -31,6 +31,7 @@ pub(crate) struct GeneratorFrame {
     pub cells: Vec<Value>,
     pub exception_stack: Vec<Value>,
     pub resume_register: Option<u16>,
+    pub yield_from: Option<Value>,
     pub return_value: Value,
     pub state: GeneratorState,
 }
@@ -42,6 +43,16 @@ pub(crate) struct ResumedGenerator {
     pub cells: Vec<Value>,
     pub exception_stack: Vec<Value>,
     pub resume_register: Option<u16>,
+    pub yield_from: Option<Value>,
+}
+
+pub(crate) struct SuspendedGenerator {
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub cells: Vec<Value>,
+    pub exception_stack: Vec<Value>,
+    pub resume_register: u16,
+    pub yield_from: Option<Value>,
 }
 
 impl GeneratorFrame {
@@ -145,6 +156,7 @@ pub(crate) enum Object {
         class: Value,
         message: String,
         arguments: Vec<Value>,
+        stop_iteration_value: Option<Value>,
         attributes: crate::shapes::Attributes,
         cause: Option<Value>,
         context: Option<Value>,
@@ -243,6 +255,7 @@ impl Object {
                 context,
                 traceback,
                 arguments,
+                stop_iteration_value,
                 attributes,
                 ..
             } => {
@@ -253,6 +266,7 @@ impl Object {
                     .iter()
                     .chain(context)
                     .chain(traceback)
+                    .chain(stop_iteration_value)
                     .copied()
                     .for_each(visit);
             }
@@ -294,6 +308,7 @@ impl Object {
                     .iter()
                     .chain(&frame.cells)
                     .chain(&frame.exception_stack)
+                    .chain(&frame.yield_from)
                     .copied()
                     .for_each(visit);
             }
@@ -530,6 +545,34 @@ impl Heap {
         };
         Ok(*traceback)
     }
+
+    pub(crate) fn set_exception_traceback(
+        &mut self,
+        owner: Value,
+        traceback: Option<Value>,
+    ) -> Result<()> {
+        if let Some(traceback) = traceback {
+            self.write_barrier(owner, traceback);
+        }
+        let Object::Exception {
+            traceback: slot, ..
+        } = self.get_mut(owner)?
+        else {
+            return Err(Diagnostic::new("TypeError", "expected exception instance"));
+        };
+        *slot = traceback;
+        Ok(())
+    }
+
+    pub(crate) fn stop_iteration_value(&self, owner: Value) -> Option<Value> {
+        match self.try_get(owner) {
+            Some(Object::Exception {
+                stop_iteration_value: Some(value),
+                ..
+            }) => Some(*value),
+            _ => None,
+        }
+    }
     pub fn record_exception_trace(
         &mut self,
         owner: Value,
@@ -705,7 +748,7 @@ impl Heap {
         execution: u64,
     ) -> Result<ResumedGenerator> {
         let before = self.get(owner)?.estimated_bytes();
-        let (code, ip, registers, cells, exception_stack, resume_register) = {
+        let (code, ip, registers, cells, exception_stack, resume_register, yield_from) = {
             let Object::Generator(frame) = self.get_mut(owner)? else {
                 return Err(Diagnostic::new("TypeError", "object is not a generator"));
             };
@@ -732,6 +775,7 @@ impl Heap {
                 std::mem::take(&mut frame.cells),
                 std::mem::take(&mut frame.exception_stack),
                 frame.resume_register.take(),
+                frame.yield_from.take(),
             )
         };
         let after = self.get(owner)?.estimated_bytes();
@@ -743,22 +787,28 @@ impl Heap {
             cells,
             exception_stack,
             resume_register,
+            yield_from,
         })
     }
 
     pub(crate) fn suspend_generator(
         &mut self,
         owner: Value,
-        ip: usize,
-        registers: Vec<Value>,
-        cells: Vec<Value>,
-        exception_stack: Vec<Value>,
-        resume_register: u16,
+        suspended: SuspendedGenerator,
     ) -> Result<()> {
+        let SuspendedGenerator {
+            ip,
+            registers,
+            cells,
+            exception_stack,
+            resume_register,
+            yield_from,
+        } = suspended;
         for value in registers
             .iter()
             .chain(&cells)
             .chain(&exception_stack)
+            .chain(&yield_from)
             .copied()
         {
             self.write_barrier(owner, value);
@@ -776,6 +826,7 @@ impl Heap {
             frame.cells = cells;
             frame.exception_stack = exception_stack;
             frame.resume_register = Some(resume_register);
+            frame.yield_from = yield_from;
             frame.state = GeneratorState::Suspended;
         }
         let after = self.get(owner)?.estimated_bytes();
@@ -801,6 +852,7 @@ impl Heap {
         frame.registers = Vec::new();
         frame.cells = Vec::new();
         frame.exception_stack = Vec::new();
+        frame.yield_from = None;
         frame.return_value = value;
         frame.state = GeneratorState::Completed;
         let after = self.get(owner)?.estimated_bytes();
@@ -812,6 +864,15 @@ impl Heap {
         match self.try_get(owner) {
             Some(Object::Generator(frame)) if frame.state == GeneratorState::Completed => {
                 Some(frame.return_value)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn generator_yield_from(&self, owner: Value) -> Option<Value> {
+        match self.try_get(owner) {
+            Some(Object::Generator(frame)) if frame.state == GeneratorState::Suspended => {
+                frame.yield_from
             }
             _ => None,
         }

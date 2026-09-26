@@ -43,9 +43,9 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 16, core verifier 10, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 5,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 81, CPython bridge 15 ve HPy manifest 5; toplam 299 test.
+native handles 5, language/runtime 85, CPython bridge 15 ve HPy manifest 5; toplam 303 test.
 
-Differential corpus: 301 stdout vakası ve 148 exception türü vakası. Seed 42.
+Differential corpus: 304 stdout vakası ve 149 exception türü vakası. Seed 42.
 Generator ilk diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -69,8 +69,9 @@ rollback/retry, doğru imported-file tanısı ve stress GC köklerini kapsar. Im
 edilen hot fonksiyonun Cranelift'e yükseldiği ve `module.attr` değişiminden sonra
 güncel global slotu okuduğu sayaçlarla ayrıca doğrulanır.
 Generator corpus'u tembel gövde yürütmesini, `yield` resume değerini, `send`,
-yakalanan `throw`, `close`, delege `return` değerli `yield from`, builtin iterable
-delegasyonu ve kaçan `StopIteration` için PEP 479 `RuntimeError` dönüşümünü kapsar.
+modern/legacy `throw`, `close`, delege `return` değerli ve tam forwarding yapan
+`yield from`, builtin/custom iterable delegasyonu, `StopIteration.value` ve kaçan
+`StopIteration` için PEP 479 `RuntimeError` dönüşümünü kapsar.
 Rust testleri bunlara ek olarak closure/cell ve aktif exception state'inin
 normal/stress GC altında hareketini; list/tuple/dict/for/unpack/`*args`
 tüketicilerini ve generator kodunun JIT dışı kalmasını doğrular.

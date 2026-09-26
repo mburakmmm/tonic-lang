@@ -7,6 +7,17 @@ fn output(source: &str) -> String {
     Vm::new().unwrap().run(&p, &mut out).unwrap();
     String::from_utf8(out).unwrap()
 }
+fn assert_output_under_stress_gc_and_jit(source: &str, expected: &[u8]) {
+    let program = compile(source, "stress-language").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, expected);
+    }
+}
 fn error(source: &str) -> Diagnostic {
     let p = compile(source, "test.tonic").unwrap();
     Vm::new().unwrap().run(&p, &mut Vec::new()).unwrap_err()
@@ -52,9 +63,53 @@ fn generator_send_throw_and_close_follow_suspension_protocol() {
 }
 
 #[test]
+fn generator_throw_supports_legacy_type_value_and_traceback_forms() {
+    let source = "def catcher():\n    try:\n        yield 'ready'\n    except Exception as error:\n        yield type(error).__name__,error.args,error.__traceback__==None\ndef run(*arguments):\n    g=catcher()\n    print(next(g),g.throw(*arguments))\nrun(ValueError)\nrun(ValueError,'message')\nrun(ValueError,(1,2),None)\ninstance=ValueError('instance')\ng=catcher()\nnext(g)\ntry:\n    g.throw(instance,'separate')\nexcept TypeError as error:\n    print(str(error))\ntry:\n    raise RuntimeError('source')\nexcept RuntimeError as source:\n    traceback=source.__traceback__\ng=catcher()\nprint(next(g),g.throw(TypeError,'with-traceback',traceback))\nclass CustomError(Exception):\n    def __init__(self,value):\n        print('custom-init',value)\ng=catcher()\nprint(next(g),g.throw(CustomError,'custom'))\ng=catcher()\nnext(g)\ntry:\n    g.throw(ValueError,'bad-traceback',1)\nexcept TypeError as error:\n    print(str(error))";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"ready ('ValueError', (), False)\nready ('ValueError', ('message',), False)\nready ('ValueError', (1, 2), False)\ninstance exception may not have a separate value\nready ('TypeError', ('with-traceback',), False)\ncustom-init custom\nready ('CustomError', ('custom',), False)\nthrow traceback must be a traceback object or None\n",
+    );
+}
+
+#[test]
 fn yield_from_delegates_to_generators_and_builtin_iterables() {
     let source = "def inner():\n    yield 1\n    yield 2\n    return 9\ndef outer():\n    yield 0\n    result=(yield from inner())\n    print('delegated-result',result)\n    yield from [3,4]\n    yield 5\nprint(list(outer()))";
     assert_eq!(output(source), "delegated-result 9\n[0, 1, 2, 3, 4, 5]\n");
+}
+
+#[test]
+fn yield_from_forwards_send_and_preserves_delegate_results() {
+    let source = "def inner():\n    received=yield 'inner-ready'\n    yield received\n    return 7\ndef outer():\n    result=yield from inner()\n    print('inner-result',result)\ng=outer()\nprint(next(g),g.send('sent'))\ntry:\n    next(g)\nexcept StopIteration as error:\n    print('outer-result',error.value)\nclass Sender:\n    def __init__(self):\n        self.state=0\n    def __iter__(self):\n        return self\n    def __next__(self):\n        if self.state==0:\n            self.state=1\n            return 'custom-ready'\n        raise StopIteration(8)\n    def send(self,value):\n        self.state=2\n        return value\ndef custom_outer():\n    result=yield from Sender()\n    print('custom-result',result)\nc=custom_outer()\nprint(next(c),c.send('custom-sent'))\ntry:\n    next(c)\nexcept StopIteration:\n    pass\ndef list_outer():\n    yield from [1,2]\nl=list_outer()\nprint(next(l))\ntry:\n    l.send(3)\nexcept AttributeError:\n    print('no-send')";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"inner-ready sent\ninner-result 7\nouter-result None\ncustom-ready custom-sent\ncustom-result 8\n1\nno-send\n",
+    );
+}
+
+#[test]
+fn yield_from_forwards_throw_and_close_through_outer_handlers() {
+    let source = "def guarded():\n    try:\n        try:\n            yield 'ready'\n        except ValueError as error:\n            yield 'caught '+str(error)\n        return 11\n    finally:\n        print('inner-finally')\ndef delegated():\n    try:\n        result=yield from guarded()\n        print('delegated-result',result)\n    finally:\n        print('outer-finally')\ng=delegated()\nprint(next(g),g.throw(ValueError('boom')))\ntry:\n    next(g)\nexcept StopIteration:\n    print('delegated-done')\nclass Plain:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        return 'plain'\ndef catches_missing_throw():\n    try:\n        yield from Plain()\n    except ValueError as error:\n        yield 'outer-caught '+str(error)\np=catches_missing_throw()\nprint(next(p),p.throw(ValueError('missing')))\nclass Custom:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        return 'custom'\n    def throw(self,error):\n        print('custom-throw',str(error))\n        return 'custom-caught'\n    def close(self):\n        print('custom-close')\ndef custom_outer():\n    try:\n        yield from Custom()\n    finally:\n        print('custom-outer-finally')\nc=custom_outer()\nprint(next(c),c.throw(ValueError('custom-error')))\nprint(c.close())\ndef closing_inner():\n    try:\n        yield 'closing'\n    finally:\n        print('generator-inner-close')\ndef closing_outer():\n    try:\n        yield from closing_inner()\n    finally:\n        print('generator-outer-close')\nx=closing_outer()\nprint(next(x),x.close())";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"ready caught boom\ninner-finally\ndelegated-result 11\nouter-finally\ndelegated-done\nplain outer-caught missing\ncustom-throw custom-error\ncustom custom-caught\ncustom-close\ncustom-outer-finally\nNone\ngenerator-inner-close\ngenerator-outer-close\nclosing None\n",
+    );
+}
+
+#[test]
+fn stop_iteration_value_survives_generators_custom_iterators_and_gc() {
+    let source = "class Finished:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise StopIteration(12)\ndef delegated():\n    result=yield from Finished()\n    print('custom-result',result)\ndef returning():\n    yield 'ready'\n    return ['kept']\nprint(list(delegated()))\ng=returning()\nprint(next(g))\ntry:\n    next(g)\nexcept StopIteration as error:\n    print(error.value,error.args)\n    error.value='changed'\n    print(error.value,error.args)\n    del error.value\n    print(error.value,error.args)\ntry:\n    next(g)\nexcept StopIteration as error:\n    print(error.value,error.args)\ne=StopIteration(1,2)\nprint(e.value,e.args)";
+    let program = compile(source, "stop-iteration-value").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"custom-result 12\n[]\nready\n['kept'] (['kept'],)\nchanged (['kept'],)\nNone (['kept'],)\nNone ()\n1 (1, 2)\n"
+        );
+    }
 }
 
 #[test]
