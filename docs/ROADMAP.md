@@ -166,6 +166,15 @@ sonra alınır.
     `current_task`, `get_running_loop`, `sleep`, `Future`). Gerçek zamanlı I/O
     selector ve thread-safe scheduling standart kütüphane kapsamında kalır.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
+  - [x] Bytecode v22 senkron list/dict comprehensions ve generator expressions;
+    gizli lexical scope, dış scope'ta eager outer `iter`, iç içe `for`/`if`,
+    closure cell'leri, geçici guest-list üretmeyen `LIST_APPEND`, precise
+    suspended roots ve JIT
+    generic-tier fallback'i.
+  - [ ] Set ve async comprehensions.
+  - [ ] Structural pattern matching (`match`/`case`).
+  - [ ] F-string/format-spec lowering.
+  - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

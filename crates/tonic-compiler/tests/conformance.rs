@@ -1,6 +1,6 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
-    ast::{CompareOp, ExprKind, StmtKind},
+    ast::{CompareOp, ComprehensionKind, ExprKind, StmtKind},
     bytecode::Op,
 };
 #[test]
@@ -66,6 +66,46 @@ fn identity_and_membership_comparisons_are_tonic_owned() {
     for expected in [Op::Is, Op::IsNot, Op::Contains, Op::NotContains] {
         assert!(operations.contains(&expected), "missing {expected:?}");
     }
+}
+
+#[test]
+fn comprehensions_have_hidden_scopes_and_owned_bytecode() {
+    let source = "result=[x*2 for x in source if x]\nmapping={x:x+1 for x in source}\nstream=(x for x in source)";
+    let ast = parse(source, "comprehensions").unwrap();
+    for (statement, expected) in ast.body.iter().zip([
+        ComprehensionKind::List,
+        ComprehensionKind::Dict,
+        ComprehensionKind::Generator,
+    ]) {
+        let StmtKind::Assign(_, expression) = &statement.kind else {
+            panic!("comprehension assignment")
+        };
+        let ExprKind::Comprehension(comprehension) = &expression.kind else {
+            panic!("comprehension expression")
+        };
+        assert_eq!(comprehension.kind, expected);
+        assert_eq!(comprehension.clauses.len(), 1);
+    }
+
+    let program = compile(source, "comprehensions").unwrap();
+    let list = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("<listcomp>"))
+        .expect("list comprehension code");
+    assert!(list
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::ListAppend as u16));
+    let generator = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("<genexpr>"))
+        .expect("generator expression code");
+    assert!(generator.generator);
+    assert!(!generator.coroutine);
 }
 
 #[test]
@@ -175,7 +215,8 @@ fn invalid_python_forms() {
 fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
-        "x=[i for i in range(3)]",
+        "x={i for i in range(3)}",
+        "async def collect(source):\n    return [item async for item in source]",
         "print(f'{1}')",
         "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",

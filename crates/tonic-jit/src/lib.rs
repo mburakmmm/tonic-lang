@@ -1742,7 +1742,7 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
-            Op::Move | Op::Neg | Op::Pos | Op::Not => {
+            Op::Move | Op::Neg | Op::Pos | Op::Not | Op::ListAppend => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 if instruction.c != 0 {
@@ -3712,6 +3712,18 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn comprehension_mutation_stays_in_the_generic_runtime() {
+        let program = function("def collect(values):\n    return [value*2 for value in values]");
+        let code = program
+            .program()
+            .code
+            .iter()
+            .find(|code| code.name.ends_with("<listcomp>"))
+            .unwrap();
+        assert!(matches!(compile(code), Err(Error::Unsupported(_))));
     }
 
     #[test]

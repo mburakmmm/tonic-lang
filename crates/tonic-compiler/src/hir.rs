@@ -135,6 +135,10 @@ impl Scope {
                     };
                     Self::resolve(params, &[statement], false, &child_bound)?
                 }
+                Child::Comprehension(comprehension) => {
+                    let (params, body) = comprehension_scope(comprehension);
+                    Self::resolve(&params, &body, false, &child_bound)?
+                }
             };
             for name in &child.free {
                 if class_body && scope.class_cell == Some(*name) {
@@ -199,6 +203,7 @@ enum Child<'a> {
     Function(&'a Parameters, &'a [Stmt], bool),
     Class(&'a [Stmt], SymbolId),
     Lambda(&'a Parameters, &'a Expr),
+    Comprehension(&'a Comprehension),
 }
 impl<'a> Scan<'a> {
     fn read(&mut self, n: SymbolId) {
@@ -292,6 +297,11 @@ impl<'a> Scan<'a> {
                 }
                 self.children
                     .push((e.span.start, Child::Lambda(params, body)));
+            }
+            ExprKind::Comprehension(comprehension) => {
+                self.expr(&comprehension.clauses[0].iterable);
+                self.children
+                    .push((e.span.start, Child::Comprehension(comprehension)));
             }
         }
     }
@@ -505,4 +515,86 @@ impl<'a> Scan<'a> {
         }
         None
     }
+}
+
+fn comprehension_scope(comprehension: &Comprehension) -> (Parameters, Vec<Stmt>) {
+    let span = comprehension.element.span;
+    let params = Parameters {
+        positional: vec![Parameter {
+            name: comprehension.iterator_parameter,
+            default: None,
+        }],
+        ..Parameters::default()
+    };
+    let tail = match comprehension.kind {
+        ComprehensionKind::List => Stmt {
+            kind: StmtKind::Expr((*comprehension.element).clone()),
+            span,
+        },
+        ComprehensionKind::Dict => Stmt {
+            kind: StmtKind::Expr(Expr {
+                kind: ExprKind::Tuple(vec![
+                    (*comprehension.element).clone(),
+                    (**comprehension
+                        .value
+                        .as_ref()
+                        .expect("dict comprehension value"))
+                    .clone(),
+                ]),
+                span,
+            }),
+            span,
+        },
+        ComprehensionKind::Generator => Stmt {
+            kind: StmtKind::Expr(Expr {
+                kind: ExprKind::Yield(Some(comprehension.element.clone())),
+                span,
+            }),
+            span,
+        },
+    };
+    let mut body = vec![tail];
+    for (index, clause) in comprehension.clauses.iter().enumerate().rev() {
+        for filter in clause.filters.iter().rev() {
+            body = vec![Stmt {
+                kind: StmtKind::If(filter.clone(), body, Vec::new()),
+                span: filter.span,
+            }];
+        }
+        let iterable = if index == 0 {
+            Expr {
+                kind: ExprKind::Name(comprehension.iterator_parameter),
+                span: clause.iterable.span,
+            }
+        } else {
+            clause.iterable.clone()
+        };
+        body = vec![Stmt {
+            kind: StmtKind::For(clause.target.clone(), iterable, body, Vec::new()),
+            span: clause.iterable.span,
+        }];
+    }
+    if comprehension.kind != ComprehensionKind::Generator {
+        body.insert(
+            0,
+            Stmt {
+                kind: StmtKind::Assign(
+                    vec![Target::Name(comprehension.accumulator)],
+                    Expr {
+                        kind: ExprKind::Constant(Constant::None),
+                        span,
+                    },
+                ),
+                span,
+            },
+        );
+        body.push(Stmt {
+            kind: StmtKind::Return(Some(Expr {
+                kind: ExprKind::Name(comprehension.accumulator),
+                span,
+            })),
+            span,
+        });
+    }
+    (params, body)
 }

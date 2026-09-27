@@ -550,6 +550,20 @@ impl Adapter {
                     .map(|e| self.expr(e))
                     .collect::<Result<_>>()?,
             ),
+            py::Expr::ListComp(c) => {
+                self.comprehension(ComprehensionKind::List, *c.elt, None, c.generators, s)?
+            }
+            py::Expr::DictComp(c) => self.comprehension(
+                ComprehensionKind::Dict,
+                *c.key,
+                Some(*c.value),
+                c.generators,
+                s,
+            )?,
+            py::Expr::GeneratorExp(c) => {
+                self.comprehension(ComprehensionKind::Generator, *c.elt, None, c.generators, s)?
+            }
+            py::Expr::SetComp(_) => return Err(unsupported(s, "set comprehensions")),
             py::Expr::BinOp(b) => ExprKind::Binary(
                 Box::new(self.expr(*b.left)?),
                 Self::binary(b.op, s)?,
@@ -674,6 +688,69 @@ impl Adapter {
             _ => return Err(unsupported(s, "expression")),
         };
         Ok(Expr { kind, span: s })
+    }
+    fn comprehension(
+        &mut self,
+        kind: ComprehensionKind,
+        element: py::Expr,
+        value: Option<py::Expr>,
+        generators: Vec<py::Comprehension>,
+        s: Span,
+    ) -> Result<ExprKind> {
+        if generators.is_empty() {
+            return Err(Diagnostic::new(
+                "SyntaxError",
+                "comprehension requires at least one for clause",
+            )
+            .at(s));
+        }
+        if generators.iter().any(|generator| generator.is_async) {
+            return Err(unsupported(s, "async comprehensions"));
+        }
+
+        let mut generators = generators.into_iter();
+        let first = generators.next().expect("checked nonempty comprehension");
+        // Python evaluates and iterates the outermost iterable in the enclosing
+        // scope. Every target, filter, later iterable and result expression is
+        // owned by the hidden comprehension scope.
+        let first_iterable = self.expr(first.iter)?;
+        let previous_async = std::mem::replace(&mut self.async_function, false);
+        self.depth += 1;
+        let mut clauses = vec![ComprehensionClause {
+            target: self.target(first.target)?,
+            iterable: first_iterable,
+            filters: first
+                .ifs
+                .into_iter()
+                .map(|filter| self.expr(filter))
+                .collect::<Result<_>>()?,
+        }];
+        for generator in generators {
+            clauses.push(ComprehensionClause {
+                target: self.target(generator.target)?,
+                iterable: self.expr(generator.iter)?,
+                filters: generator
+                    .ifs
+                    .into_iter()
+                    .map(|filter| self.expr(filter))
+                    .collect::<Result<_>>()?,
+            });
+        }
+        let element = self.expr(element).map(Box::new);
+        let value = value
+            .map(|value| self.expr(value).map(Box::new))
+            .transpose();
+        self.depth -= 1;
+        self.async_function = previous_async;
+
+        Ok(ExprKind::Comprehension(Comprehension {
+            kind,
+            iterator_parameter: self.symbol(".0")?,
+            accumulator: self.symbol(".result")?,
+            element: element?,
+            value: value?,
+            clauses,
+        }))
     }
     fn binary(op: py::Operator, s: Span) -> Result<BinaryOp> {
         Ok(match op {

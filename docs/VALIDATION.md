@@ -431,6 +431,17 @@ logical `Value` karşılaştırmasıyla üretir; genel üyelik açık desteklenm
 sınırından interpreter'a düşer. Debug/release × interpreter/JIT × normal/stress-GC
 differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
 
+Senkron comprehension aşamasında toplam 333 Rust testi ile 312 stdout ve 166
+exception differential vakasına ulaşıldı. List/dict comprehension ve generator
+expression testleri gizli lexical scope'u, dış scope'ta eager outer `iter()`
+zamanlamasını, iç içe clause/filtreleri, unpack target'ı, closure cell'lerini,
+class-scope görünürlüğünü ve suspended generator köklerini kapsar. Bytecode v22
+`LIST_APPEND` verifier sınırını ve geçici guest-list üretmeyen write-barrier'lı
+append yolunu;
+public JIT testi ise comprehension code'unun açık generic-runtime fallback'ini
+doğrular. Debug/release × interpreter/JIT × normal/stress-GC differential
+matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.
 C ABI header/smoke ve guarded callback testleri vardır,

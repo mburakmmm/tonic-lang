@@ -341,6 +341,46 @@ class TypeContainer(metaclass=Meta):
     answer=9
 print(9 in TypeContainer,8 not in TypeContainer)
 ''',
+'''x=99
+print([x*y for x in range(5) if x%2 for y in range(3) if y])
+print(x)
+print({x:x*x for x in range(5) if x%2})
+print([[x*y for y in range(3)] for x in range(4)])
+print([a+b for a,b in [(1,2),(3,4)]])
+def capture(offset):
+    values=[offset+x for x in range(3)]
+    mapping={x:offset+x for x in range(3)}
+    stream=(offset+x for x in range(3))
+    return values,mapping,stream
+values,mapping,stream=capture(10)
+print(values,mapping,list(stream))
+funcs=[lambda: x for x in range(3)]
+print(funcs[0](),funcs[1](),funcs[2]())
+class Counter:
+    def __init__(self): self.value=0
+    def __iter__(self): return self
+    def __next__(self):
+        self.value+=1
+        if self.value>3: raise StopIteration
+        return self.value
+print([value for value in Counter()])
+class Key:
+    def __init__(self,value): self.value=value
+    def __hash__(self): return self.value%2
+    def __eq__(self,other): return self.value==other.value
+mapping={Key(value):[value] for value in range(3)}
+print(len(mapping),mapping[Key(1)])
+class Source:
+    def __iter__(self):
+        print('source-iter')
+        return iter([1,2,3])
+def element(value):
+    print('element',value)
+    return value*10
+stream=(element(value) for value in Source())
+print('made',type(stream).__name__)
+print(next(stream),list(stream))
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -382,4 +422,6 @@ ERRORS = [
 ('async def bad():\n    yield from []', 'SyntaxError'),
 ('1 in 2', 'TypeError'),
 ('1 in "123"', 'TypeError'),
+('[hidden for hidden in range(2)]\nprint(hidden)', 'NameError'),
+('class C:\n    values=[1]\n    result=[values for item in range(1)]', 'NameError'),
 ]

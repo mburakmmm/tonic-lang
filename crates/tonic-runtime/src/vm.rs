@@ -6027,6 +6027,11 @@ impl Vm {
                             Object::List(values)
                         })?;
                     }
+                    Op::ListAppend => {
+                        let owner = self.read(a)?;
+                        let value = self.read(b)?;
+                        self.heap.append_list(owner, value)?;
+                    }
                     Op::Item => {
                         let owner = self.read(b)?;
                         let key = self.read(c)?;

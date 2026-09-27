@@ -389,6 +389,23 @@ continuation state'i precise GC köküdür. Genel üyelik opcode'ları Cranelift
 desteklenmeyen-op sınırından interpreter'a düşer. Ayrıntılar
 [ADR 0076](adr/0076-identity-and-membership.md) dosyasındadır.
 
+Bytecode v22, senkron list/dict comprehensions ve generator expressions için
+`LIST_APPEND` opcode'unu ve gizli comprehension code object'lerini ekler. İlk
+iterable dış lexical scope'ta değerlendirilip hemen iterator'a çevrilir; hedef,
+filtreler, sonraki iterable'lar ve sonuç ifadesi ayrı child scope'ta yürür. Bu
+hem hedef sızıntısını önler hem de element içindeki lambda'ların iteration
+değişkenini gerçek bir cell olarak yakalamasını sağlar. Generator expression aynı
+code object'i suspended generator frame'i olarak kullanır; ilk iterator argument
+register'ında precise root'tur ve kalan gövde tüketilene kadar tembeldir.
+
+Liste sonucu tek elemanlı geçici guest listeler üretmeden write-barrier'lı
+`Heap::append_list` sınırından büyütülür. Dict comprehension mevcut suspending
+hash/equality-aware `SET_ITEM` yolunu paylaşır. Comprehension code'u iterator,
+mutation ve olası kullanıcı frame'leri içerdiğinden Cranelift destek kümesinin
+dışında açıkça generic runtime'a düşer. Set storage ve async comprehension bu
+dilimin parçası değildir. Ayrıntılar
+[ADR 0077](adr/0077-comprehension-scopes.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

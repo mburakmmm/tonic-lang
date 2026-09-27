@@ -131,6 +131,32 @@ pub enum ExprKind {
         params: Parameters,
         body: Box<Expr>,
     },
+    Comprehension(Comprehension),
+}
+#[derive(Clone, Debug)]
+pub struct Comprehension {
+    pub kind: ComprehensionKind,
+    /// Hidden positional parameter receiving the already-created outer iterator.
+    pub iterator_parameter: SymbolId,
+    /// Hidden accumulator local used by eager list/dict comprehensions.
+    pub accumulator: SymbolId,
+    /// List/gen element, or the key for a dict comprehension.
+    pub element: Box<Expr>,
+    /// Present only for a dict comprehension.
+    pub value: Option<Box<Expr>>,
+    pub clauses: Vec<ComprehensionClause>,
+}
+#[derive(Clone, Debug)]
+pub struct ComprehensionClause {
+    pub target: Target,
+    pub iterable: Expr,
+    pub filters: Vec<Expr>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComprehensionKind {
+    List,
+    Dict,
+    Generator,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Parameters {

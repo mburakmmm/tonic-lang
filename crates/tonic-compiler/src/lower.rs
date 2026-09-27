@@ -56,41 +56,7 @@ fn build(
 ) -> Result<u16> {
     let id = index(program.code.len())?;
     let next = index(scope.locals.len())?;
-    let code = CodeObject {
-        class_body: scope.class_body,
-        generator: scope.generator,
-        coroutine: scope.coroutine,
-        name,
-        params: index(params.names().len())?,
-        signature: Signature {
-            positional: index(params.positional.len())?,
-            posonly: params.posonly,
-            keyword_only: index(params.keyword_only.len())?,
-            vararg: params
-                .vararg
-                .map(|_| (params.positional.len() + params.keyword_only.len()) as u16),
-            kwarg: params.kwarg.map(|_| {
-                (params.positional.len()
-                    + params.keyword_only.len()
-                    + usize::from(params.vararg.is_some())) as u16
-            }),
-            defaults: params.defaults().map(|(slot, _)| slot as u16).collect(),
-        },
-        locals: scope.locals.clone(),
-        registers: 0,
-        instructions: Vec::new(),
-        spans: Vec::new(),
-        constants: Vec::new(),
-        calls: Vec::new(),
-        cell_locals: scope
-            .cells
-            .iter()
-            .map(|n| scope.local(*n).expect("cell local"))
-            .collect(),
-        free_vars: scope.free.clone(),
-        functions: Vec::new(),
-        exception_regions: Vec::new(),
-    };
+    let code = code_object(name, params, &scope)?;
     // Reserve identity before recursively compiling functions.
     program.code.push(code.clone());
     let mut lower = Lower {
@@ -128,11 +94,105 @@ fn build(
         }
     }
     lower.block(body)?;
+    finish_build(lower, id)
+}
+
+fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeObject> {
+    Ok(CodeObject {
+        class_body: scope.class_body,
+        generator: scope.generator,
+        coroutine: scope.coroutine,
+        name,
+        params: index(params.names().len())?,
+        signature: Signature {
+            positional: index(params.positional.len())?,
+            posonly: params.posonly,
+            keyword_only: index(params.keyword_only.len())?,
+            vararg: params
+                .vararg
+                .map(|_| (params.positional.len() + params.keyword_only.len()) as u16),
+            kwarg: params.kwarg.map(|_| {
+                (params.positional.len()
+                    + params.keyword_only.len()
+                    + usize::from(params.vararg.is_some())) as u16
+            }),
+            defaults: params.defaults().map(|(slot, _)| slot as u16).collect(),
+        },
+        locals: scope.locals.clone(),
+        registers: 0,
+        instructions: Vec::new(),
+        spans: Vec::new(),
+        constants: Vec::new(),
+        calls: Vec::new(),
+        cell_locals: scope
+            .cells
+            .iter()
+            .map(|n| scope.local(*n).expect("cell local"))
+            .collect(),
+        free_vars: scope.free.clone(),
+        functions: Vec::new(),
+        exception_regions: Vec::new(),
+    })
+}
+
+fn finish_build(mut lower: Lower<'_>, id: u16) -> Result<u16> {
     let r = lower.constant(Constant::None, Span::default())?;
     lower.emit(Op::Return, r, 0, 0, Span::default())?;
     lower.code.registers = lower.high;
     lower.program.code[id as usize] = lower.code;
     Ok(id)
+}
+
+fn build_comprehension(
+    program: &mut Program,
+    name: String,
+    comprehension: &Comprehension,
+    scope: Scope,
+) -> Result<u16> {
+    let params = Parameters {
+        positional: vec![Parameter {
+            name: comprehension.iterator_parameter,
+            default: None,
+        }],
+        ..Parameters::default()
+    };
+    let id = index(program.code.len())?;
+    let next = index(scope.locals.len())?;
+    let code = code_object(name, &params, &scope)?;
+    program.code.push(code.clone());
+    let mut lower = Lower {
+        program,
+        code,
+        scope,
+        next,
+        high: next,
+        loops: Vec::new(),
+        cleanups: Vec::new(),
+        finally_bypasses: Vec::new(),
+        with_bypasses: Vec::new(),
+    };
+    let span = comprehension.element.span;
+    if comprehension.kind != ComprehensionKind::Generator {
+        let accumulator = lower.alloc(1)?;
+        lower.emit(
+            if comprehension.kind == ComprehensionKind::List {
+                Op::List
+            } else {
+                Op::Dict
+            },
+            accumulator,
+            0,
+            0,
+            span,
+        )?;
+        lower.store(comprehension.accumulator, accumulator, span)?;
+    }
+    lower.lower_comprehension_clause(comprehension, 0)?;
+    if comprehension.kind != ComprehensionKind::Generator {
+        let result = lower.load(comprehension.accumulator, span)?;
+        lower.emit(Op::Return, result, 0, 0, span)?;
+    }
+    finish_build(lower, id)
 }
 struct Loop {
     start: u16,
@@ -1027,6 +1087,61 @@ impl Lower<'_> {
         }
         Ok(())
     }
+    fn lower_comprehension_clause(
+        &mut self,
+        comprehension: &Comprehension,
+        clause_index: usize,
+    ) -> Result<()> {
+        let clause = &comprehension.clauses[clause_index];
+        let span = clause.iterable.span;
+        let iterator = if clause_index == 0 {
+            self.load(comprehension.iterator_parameter, span)?
+        } else {
+            let iterable = self.expr(&clause.iterable)?;
+            let iterator = self.alloc(1)?;
+            self.emit(Op::Iter, iterator, iterable, 0, span)?;
+            iterator
+        };
+        let item = self.alloc(1)?;
+        let start = self.pc()?;
+        let exhausted = self.emit(Op::Next, item, iterator, 0, span)?;
+        self.target(&clause.target, item, span)?;
+        for filter in &clause.filters {
+            let condition = self.expr(filter)?;
+            self.emit(Op::JumpFalse, condition, start, 0, filter.span)?;
+        }
+        if clause_index + 1 < comprehension.clauses.len() {
+            self.lower_comprehension_clause(comprehension, clause_index + 1)?;
+        } else {
+            match comprehension.kind {
+                ComprehensionKind::List => {
+                    let value = self.expr(&comprehension.element)?;
+                    let accumulator = self.load(comprehension.accumulator, span)?;
+                    self.emit(Op::ListAppend, accumulator, value, 0, span)?;
+                }
+                ComprehensionKind::Dict => {
+                    let key = self.expr(&comprehension.element)?;
+                    let value = self.expr(
+                        comprehension
+                            .value
+                            .as_deref()
+                            .expect("dict comprehension value"),
+                    )?;
+                    let accumulator = self.load(comprehension.accumulator, span)?;
+                    self.emit(Op::SetItem, accumulator, key, value, span)?;
+                }
+                ComprehensionKind::Generator => {
+                    let value = self.expr(&comprehension.element)?;
+                    let sent = self.alloc(1)?;
+                    self.emit(Op::Yield, sent, value, 0, span)?;
+                }
+            }
+        }
+        self.emit(Op::Jump, start, 0, 0, span)?;
+        let end = self.pc()?;
+        self.patch(exhausted, end);
+        Ok(())
+    }
     fn window(&mut self, values: &[Expr]) -> Result<(u16, u16)> {
         let count = index(values.len())?;
         let base = self.alloc(count)?;
@@ -1108,6 +1223,47 @@ impl Lower<'_> {
                 });
                 let result = self.alloc(1)?;
                 self.emit(Op::Function, result, site, 0, s)?;
+                Ok(result)
+            }
+            ExprKind::Comprehension(comprehension) => {
+                let source = self.expr(&comprehension.clauses[0].iterable)?;
+                let iterator = self.alloc(1)?;
+                self.emit(Op::Iter, iterator, source, 0, s)?;
+                let child = self.scope.take_child(s.start);
+                let captures = child
+                    .free
+                    .iter()
+                    .map(|name| self.scope.cell(*name).expect("comprehension capture"))
+                    .collect();
+                let label = match comprehension.kind {
+                    ComprehensionKind::List => "<listcomp>",
+                    ComprehensionKind::Dict => "<dictcomp>",
+                    ComprehensionKind::Generator => "<genexpr>",
+                };
+                let id = build_comprehension(
+                    self.program,
+                    self.qualified_name(label),
+                    comprehension,
+                    child,
+                )?;
+                let site = index(self.code.functions.len())?;
+                self.code.functions.push(FunctionSite {
+                    code: id,
+                    captures,
+                    defaults: Vec::new(),
+                });
+                let function = self.alloc(1)?;
+                self.emit(Op::Function, function, site, 0, s)?;
+                let first = self.alloc(1)?;
+                self.emit(Op::Move, first, iterator, 0, s)?;
+                let call_site = index(self.code.calls.len())?;
+                self.code.calls.push(CallSite {
+                    first,
+                    count: 1,
+                    keywords: Vec::new(),
+                });
+                let result = self.alloc(1)?;
+                self.emit(Op::Call, result, function, call_site, s)?;
                 Ok(result)
             }
             ExprKind::Binary(a, op, b) => {
