@@ -331,8 +331,19 @@ await edilen iterator önce, dış `finally` sonra çalışır.
 
 Coroutine code'u ve coroutine hedefli direct call Cranelift kapsamı dışında
 kalır. JIT'te çalışan çağıran kod generic çağrı sınırından interpreter resume
-yoluna güvenle geçer. Async generator, `async for`, `async with` ve
-event-loop/future/task protokolleri bu dilime dahil değildir. Ayrıntı
+yoluna güvenle geçer.
+
+Bytecode v18, yalnız coroutine code'unda doğrulanan `GET_AITER`, `GET_ANEXT` ve
+`END_ASYNC_FOR` opcode'larıyla `async for` ekler. `__aiter__` sonucu `__anext__`
+protokolüne göre doğrulanır; her next sonucu normal `GET_AWAITABLE` ve coroutine
+delegasyon yolundan geçirilir. Yalnız next çağrısı/await bölgesinden kaçan
+`StopAsyncIteration` loop exhaustion sayılır. Target ataması veya body içindeki
+aynı exception normal biçimde yayılır. Break/continue/else mevcut loop cleanup
+altyapısını paylaşır ve askıya alan özel next awaitable'ları moving/stress GC
+altında continuation register'larında korunur.
+
+Async generator, `async with` ve event-loop/future/task protokolleri bu dilime
+dahil değildir. Ayrıntı
 [ADR 0073](adr/0073-coroutine-await-state-machine.md) dosyasındadır.
 
 ## Uygulama sırası ve kabul kapıları

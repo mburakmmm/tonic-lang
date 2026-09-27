@@ -340,6 +340,19 @@ impl Adapter {
                 self.block(f.body)?,
                 self.block(f.orelse)?,
             ),
+            py::Stmt::AsyncFor(f) => {
+                if !self.async_function {
+                    return Err(
+                        Diagnostic::new("SyntaxError", "async for outside async function").at(s),
+                    );
+                }
+                StmtKind::AsyncFor(
+                    self.target(*f.target)?,
+                    self.expr(*f.iter)?,
+                    self.block(f.body)?,
+                    self.block(f.orelse)?,
+                )
+            }
             py::Stmt::Import(i) => {
                 let mut names = Vec::new();
                 for alias in i.names {

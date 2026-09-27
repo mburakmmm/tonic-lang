@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 17;
+pub const BYTECODE_VERSION: u16 = 18;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -90,6 +90,9 @@ pub enum Op {
     Yield = 77,
     YieldFrom = 78,
     GetAwaitable = 79,
+    GetAIter = 98,
+    GetANext = 99,
+    EndAsyncFor = 100,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -177,6 +180,9 @@ impl TryFrom<u16> for Op {
             77 => Self::Yield,
             78 => Self::YieldFrom,
             79 => Self::GetAwaitable,
+            98 => Self::GetAIter,
+            99 => Self::GetANext,
+            100 => Self::EndAsyncFor,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -684,6 +690,26 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::GetAIter | Op::GetANext => {
+                        if !code.coroutine {
+                            return Err(bad("async iteration outside coroutine code"));
+                        }
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
+                    Op::EndAsyncFor => {
+                        if !code.coroutine {
+                            return Err(bad("async iteration outside coroutine code"));
+                        }
+                        reg(i.a)?;
+                        jump(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
                     Op::Raise => {
                         if i.b > 2 || (i.b != 2 && i.c != 0) {
                             return Err(bad("invalid raise operand"));
@@ -784,7 +810,7 @@ impl Program {
                     }
                 }
                 if pc + 1 == code.instructions.len()
-                    && !matches!(op, Op::Jump | Op::Return | Op::Raise)
+                    && !matches!(op, Op::Jump | Op::Return | Op::Raise | Op::EndAsyncFor)
                 {
                     return Err(bad("code can fall off end"));
                 }
@@ -861,6 +887,7 @@ fn verify_argument_stack(code: &CodeObject) -> Result<()> {
                 work.push((i.c as usize, depth));
                 work.push((pc + 1, depth));
             }
+            Op::EndAsyncFor => work.push((i.b as usize, depth)),
             _ => work.push((pc + 1, depth)),
         }
     }

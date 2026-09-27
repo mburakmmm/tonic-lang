@@ -2,8 +2,8 @@
 
 ## Durum
 
-Kısmen uygulandı. Bu karar `async def`, `await`, coroutine nesnesi ve
-`coroutine_wrapper` çekirdeğini kapsar. Async generator, `async for`, `async with`
+Kısmen uygulandı. Bu karar `async def`, `await`, coroutine nesnesi,
+`coroutine_wrapper` ve `async for` çekirdeğini kapsar. Async generator, `async with`
 ve event-loop/future/task protokolleri açık kalır.
 
 ## Karar
@@ -47,10 +47,19 @@ JIT çağıran fonksiyon generic call sınırında tembel coroutine nesnesini al
 resume interpreter frame'inde yapılır. Bu ayrım deopt veya GC stack-map desteği
 olmayan suspended native frame üretimini engeller.
 
+Bytecode v18 `GET_AITER`, `GET_ANEXT` ve `END_ASYNC_FOR` ekler. Bu opcode'lar
+yalnız coroutine code'unda geçerlidir. `GET_AITER` özel `__aiter__` çağrısının
+sonucunda `__anext__` bulunduğunu doğrular. `GET_ANEXT` dönen değeri ortak await
+lowering'ine verir. Compiler yalnız next çağrısı ve await döngüsünü kapsayan kesin
+bir exception region üretir; handler'daki `END_ASYNC_FOR` yalnız exact veya alt
+sınıf `StopAsyncIteration` için else yoluna atlar, diğer exception'ı yeniden
+yayar. Target/body bu region'ın dışında kaldığı için kullanıcı kodunun açık
+`StopAsyncIteration` hatası yanlışlıkla tüketilmez. Break/continue/else mevcut
+loop ve cleanup patching kurallarını kullanır.
+
 ## Açık kapsam
 
 - Async generator'ın `asend`/`athrow`/`aclose` ve finalization semantiği.
-- `async for` için `__aiter__`/`__anext__` ve `StopAsyncIteration`.
 - `async with` için `__aenter__`/`__aexit__` unwind zinciri.
 - Future/task/event-loop scheduling, cancellation ve thread entegrasyonu.
 - Coroutine frame'lerinin JIT edilmesi ve native suspended-root metadata'sı.
@@ -64,4 +73,6 @@ Runtime testleri tembel yürütme, nested coroutine, özel awaitable, public
 edilemeyen değerleri interpreter ile JIT-caller altında stress GC kullanarak
 sınar. Ayrı finalization testi ulaşılamayan askıdaki coroutine'in await ettiği
 iterator'ı içten dışa kapattığını ve finalizer sayaçlarını doğrular. Differential
-corpus aynı başarı ve hata türlerini CPython 3.14.6 ile karşılaştırır.
+corpus aynı başarı ve hata türlerini CPython 3.14.6 ile karşılaştırır. Async-for
+testleri anında ve askıya alınan `__anext__`, loop kontrolü, invalid protocol
+sonuçları, exhaustion exception sınırı ve stress-GC köklerini kapsar.

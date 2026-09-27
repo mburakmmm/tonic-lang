@@ -58,8 +58,8 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | M4 interpreter | integer aritmetik quickening; monomorphic ve iki girişli basit function-call ile class/shape/slot/dependency-version guard'lı instance attribute cache'leri |
 | M4–M7 | expanded sequence/mapping, observed variadic, exact-float direct ve loop-carried F64 yolları; PC-indexli deopt map ve tam register rekonstrüksiyonu |
 | İstisnalar | managed exception nesneleri ve traceback state, typed/tuple/bare `try/except/else`, bare reraise, `raise from`, cause/context zinciri, frame unwind, `finally` ve senkron `with` |
-| Generator/coroutine | senkron generator, tam `yield from`, logical finalization; tembel `async def`, exact/özel awaitable `await` ve `coroutine_wrapper` |
-| Geniş dil | comprehension, async generator, `async for`/`async with`, event-loop/task katmanı, match ve f-string henüz yok |
+| Generator/coroutine | senkron generator, tam `yield from`, logical finalization; tembel `async def`, exact/özel awaitable `await`, `coroutine_wrapper` ve `async for` |
+| Geniş dil | comprehension, async generator, `async with`, event-loop/task katmanı, match ve f-string henüz yok |
 | CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve bounded iki-collector graph/cycle taraması |
 | HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
 | Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
@@ -224,8 +224,8 @@ interpreter'a indirir. Yedi instruction'dan küçük düz fonksiyonlar ölçüle
 maliyeti nedeniyle adaptive interpreter'da kalır.
 
 **Kapsam:** annotation execution, list/dict metotları,
-slice assignment, range/custom-object slicing, string repetition, general filesystem
-import/stdlib ve REPL yoktur. List, tuple ve Unicode string üzerinde read-only slice;
+slice assignment, range/custom-object slicing, string repetition, geniş standart
+kütüphane ve REPL yoktur. List, tuple ve Unicode string üzerinde read-only slice;
 açık uçlar, negatif sınırlar ve negatif adım desteklenir.
 Descriptor `__get__`/`__set__`/`__delete__` data ve non-data önceliğiyle,
 `__set_name__` class body sonrasında tanım sırasıyla çalışır. Metaclass seçimi,
@@ -238,8 +238,8 @@ index/slice, list mutation, explicit int base ve length `__index__` tüketiciler
 normal VM frame'lerinde askıya alınabilir. Aritmetik, power, bitwise,
 reflected/in-place dispatch, rich
 comparison, unary ve `abs` protokolleri `NotImplemented` ile strict-subclass
-sırasını uygular. `__hash__` ve container içi suspending comparison kapsamı
-hâlâ açıktır.
+sırasını uygular. `__hash__` ile container içi suspending comparison da aynı
+normal VM continuation sınırını kullanır.
 Senkron context manager `__enter__/__exit__` özel-metot lookup'u, nested unwind,
 exception suppression, managed traceback aktarımı ve return/break/continue
 temizliğiyle desteklenir. `raise ... from ...`, örtük `__context__`, explicit
@@ -252,9 +252,9 @@ gövdeleri hareketli-GC uyumlu örtük
 `__class__` hücresini yakalar. `super()` ve `super(type, receiver)` C3 MRO üzerinde
 function/classmethod/staticmethod/property/custom descriptor bağlar; tek argümanlı
 unbound `super(type)` bootstrap kapsamında değildir. Desteklenmeyen sınıf protokolleri
-`UnsupportedFeature` ile reddedilir; sessizce yok sayılmaz. `object` temelinde
-yalnızca varsayılan oluşturma/type-check vardır; `object.__init__` gibi açık
-protokol metotları henüz sunulmaz. `__bases__/__class__` yeniden ataması ve
+`UnsupportedFeature` ile reddedilir; sessizce yok sayılmaz. Canonical
+`object.__new__`/`object.__init__` ve builtin `__new__` descriptor yolları
+desteklenir. `__bases__/__class__` yeniden ataması ve
 sınıfın adını değiştirme desteklenmez.
 Callable instance için inherited `__call__` ve `len(instance)` için inherited
 `__len__` sınıf MRO'sundan çözülür; instance üzerindeki aynı adlı alanlar implicit
@@ -269,9 +269,9 @@ negatiflik sözleşmesini kullanır. Kısa devrede özgün operand korunur.
 Property data-descriptor önceliği ile normal attribute, `getattr` ve `setattr`
 yollarında çalışır. Guest exception handler'ları property/getattr hata yollarını
 yakalayabilir; property `getter` yardımcısı henüz yoktur.
-Bootstrap sınıf doğrulaması `__init__/__new__/__call__/__len__/__bool__/__get__/__set__/__delete__/__set_name__/__module__/__qualname__/__doc__/__name__`
-dışındaki `__...__` üyeleri reddeder; özel metadata adları da bu geçici
-kısıta dahildir.
+Bootstrap sınıf doğrulaması uygulanmış operator, descriptor, iteration,
+conversion, coroutine ve async-iteration protokollerini kabul eder; bilinmeyen
+`__...__` üyeleri açık `UnsupportedFeature` tanısıyla reddedilir.
 `range` başlangıç/bitiş/adım ve `fastmath.add` i64 ile sınırlıdır; genel Tonic
 integer aritmetiği keyfî hassasiyetlidir. Repr/traceback metni CPython ile birebir
 sözleşme değildir. Array/buffer ve C ABI için henüz public stable sözleşme yoktur.
@@ -286,7 +286,8 @@ Expanded çağrılar için argüman bütçesi 65.535'tir.
 **Tekrar yürütme:** `Vm::run` her seferinde yeni module globals açar. Persistent
 primitive/container handle'lar korunur; eski çalıştırmadan kalmış fonksiyon
 çağrısı `RuntimeError` verir. Module/code sahipliği tasarımı tamamlanana kadar
-callable'ları farklı run'lar arasında saklamayın. Henüz callback/reentry yoktur.
+callable'ları farklı run'lar arasında saklamayın. Native callback/reentry explicit
+thread attach ve persistent handle sözleşmesi üzerinden desteklenir.
 Sınıf/metot kapsamı ve GC sözleşmesi: [ADR 0003](docs/adr/0003-classes-shapes.md).
 Decorator ve method descriptor sözleşmesi: [ADR 0004](docs/adr/0004-decorators-method-descriptors.md).
 Property continuation sözleşmesi: [ADR 0005](docs/adr/0005-property-continuations.md).

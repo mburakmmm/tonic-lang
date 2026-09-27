@@ -237,6 +237,18 @@ impl Lower<'_> {
         self.emit(Op::Const, r, id, 0, s)?;
         Ok(r)
     }
+    fn await_value(&mut self, source: u16, span: Span) -> Result<u16> {
+        let awaitable = self.alloc(1)?;
+        self.emit(Op::GetAwaitable, awaitable, source, 0, span)?;
+        let result = self.constant(Constant::None, span)?;
+        let start = self.pc()?;
+        let exhausted = self.emit(Op::YieldFrom, result, awaitable, 0, span)?;
+        self.emit(Op::Yield, result, result, 0, span)?;
+        self.emit(Op::Jump, start, 0, 0, span)?;
+        let end = self.pc()?;
+        self.patch(exhausted, end);
+        Ok(result)
+    }
     fn load(&mut self, n: SymbolId, s: Span) -> Result<u16> {
         let r = self.alloc(1)?;
         if self.scope.globals.contains(&n) {
@@ -864,6 +876,46 @@ impl Lower<'_> {
                     self.patch(b, end);
                 }
             }
+            StmtKind::AsyncFor(target, e, body, otherwise) => {
+                debug_assert!(self.scope.coroutine);
+                let iterable = self.expr(e)?;
+                let iter = self.alloc(1)?;
+                self.emit(Op::GetAIter, iter, iterable, 0, s)?;
+                let item = self.alloc(1)?;
+                let exception = self.alloc(1)?;
+                let start = self.pc()?;
+                let protected_start = self.pc()?;
+                let next = self.alloc(1)?;
+                self.emit(Op::GetANext, next, iter, 0, s)?;
+                let value = self.await_value(next, s)?;
+                self.emit(Op::Move, item, value, 0, s)?;
+                let protected_end = self.pc()?;
+                self.target(target, item, s)?;
+                self.loops.push(Loop {
+                    start,
+                    breaks: Vec::new(),
+                    cleanup_depth: self.cleanups.len(),
+                });
+                self.block(body)?;
+                self.emit(Op::Jump, start, 0, 0, s)?;
+                let lp = self.loops.pop().expect("active async loop");
+
+                let handler = self.pc()?;
+                self.code.exception_regions.push(ExceptionRegion {
+                    start: protected_start,
+                    end: protected_end,
+                    target: handler,
+                    exception,
+                });
+                let exhausted = self.emit(Op::EndAsyncFor, exception, 0, 0, s)?;
+                let otherwise_start = self.pc()?;
+                self.patch(exhausted, otherwise_start);
+                self.block(otherwise)?;
+                let end = self.pc()?;
+                for b in lp.breaks {
+                    self.patch(b, end);
+                }
+            }
             StmtKind::Break => {
                 if self.loops.is_empty() {
                     return Err(Diagnostic::new("SyntaxError", "break outside loop").at(s));
@@ -960,16 +1012,7 @@ impl Lower<'_> {
             }
             ExprKind::Await(value) => {
                 let source = self.expr(value)?;
-                let awaitable = self.alloc(1)?;
-                self.emit(Op::GetAwaitable, awaitable, source, 0, s)?;
-                let result = self.constant(Constant::None, s)?;
-                let start = self.pc()?;
-                let exhausted = self.emit(Op::YieldFrom, result, awaitable, 0, s)?;
-                self.emit(Op::Yield, result, result, 0, s)?;
-                self.emit(Op::Jump, start, 0, 0, s)?;
-                let end = self.pc()?;
-                self.patch(exhausted, end);
-                Ok(result)
+                self.await_value(source, s)
             }
             ExprKind::Lambda { params, body } => {
                 let child = self.scope.take_child(s.start);

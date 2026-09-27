@@ -613,6 +613,7 @@ struct FloatCallProfile {
 enum ReturnAction {
     Value,
     Iterator,
+    AsyncIterator,
     Awaitable,
     Next(Option<Value>),
     Close,
@@ -976,6 +977,7 @@ struct RuntimeTypes {
     value_error: Value,
     runtime_error: Value,
     stop_iteration: Value,
+    stop_async_iteration: Value,
     generator_exit: Value,
     other_exceptions: Vec<(String, Value)>,
 }
@@ -1014,6 +1016,7 @@ impl RuntimeTypes {
             value_error: Value::UNBOUND,
             runtime_error: Value::UNBOUND,
             stop_iteration: Value::UNBOUND,
+            stop_async_iteration: Value::UNBOUND,
             generator_exit: Value::UNBOUND,
             other_exceptions: Vec::new(),
         }
@@ -1040,6 +1043,7 @@ impl RuntimeTypes {
             self.value_error,
             self.runtime_error,
             self.stop_iteration,
+            self.stop_async_iteration,
             self.generator_exit,
         ];
         roots.extend(self.other_exceptions.iter().map(|(_, value)| *value));
@@ -1087,6 +1091,7 @@ impl ReturnAction {
         match self {
             Self::Value
             | Self::Iterator
+            | Self::AsyncIterator
             | Self::Awaitable
             | Self::IteratorNext { .. }
             | Self::Close
@@ -1539,6 +1544,9 @@ impl Vm {
         let stop_iteration =
             vm.heap
                 .builtin_class("StopIteration", vec![exception], vm.type_class)?;
+        let stop_async_iteration =
+            vm.heap
+                .builtin_class("StopAsyncIteration", vec![exception], vm.type_class)?;
         let generator_exit =
             vm.heap
                 .builtin_class("GeneratorExit", vec![base_exception], vm.type_class)?;
@@ -1662,6 +1670,7 @@ impl Vm {
             value_error,
             runtime_error,
             stop_iteration,
+            stop_async_iteration,
             generator_exit,
             other_exceptions,
         };
@@ -1758,6 +1767,7 @@ impl Vm {
             ("ValueError", vm.runtime_types.value_error),
             ("RuntimeError", vm.runtime_types.runtime_error),
             ("StopIteration", vm.runtime_types.stop_iteration),
+            ("StopAsyncIteration", vm.runtime_types.stop_async_iteration),
             ("GeneratorExit", vm.runtime_types.generator_exit),
         ] {
             vm.builtins.push((name.into(), value));
@@ -2915,6 +2925,10 @@ impl Vm {
                 self.runtime_types.stop_iteration,
                 RuntimeTypeKind::Exception,
             ),
+            (
+                self.runtime_types.stop_async_iteration,
+                RuntimeTypeKind::Exception,
+            ),
         ]
         .into_iter()
         .find_map(|(candidate, kind)| (candidate == class).then_some(kind))
@@ -3088,6 +3102,17 @@ impl Vm {
             Err(Diagnostic::new(
                 "TypeError",
                 "__iter__ returned a non-iterator",
+            ))
+        }
+    }
+
+    fn validate_async_iterator(&self, value: Value) -> Result<()> {
+        if self.heap.special_method_call(value, "__anext__")?.is_some() {
+            Ok(())
+        } else {
+            Err(Diagnostic::new(
+                "TypeError",
+                "__aiter__ returned a non-async-iterator",
             ))
         }
     }
@@ -3357,6 +3382,7 @@ impl Vm {
             "TypeError" => self.runtime_types.type_error,
             "ValueError" => self.runtime_types.value_error,
             "StopIteration" => self.runtime_types.stop_iteration,
+            "StopAsyncIteration" => self.runtime_types.stop_async_iteration,
             "GeneratorExit" => self.runtime_types.generator_exit,
             "RuntimeError" => self.runtime_types.runtime_error,
             name => self
@@ -4239,6 +4265,7 @@ impl Vm {
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
+                            ReturnAction::AsyncIterator => self.validate_async_iterator(value)?,
                             ReturnAction::Awaitable => self.validate_iterator(value)?,
                             ReturnAction::Next(_) => {}
                             ReturnAction::Close => {}
@@ -5278,6 +5305,69 @@ impl Vm {
                                 "TypeError",
                                 "object cannot be used in an await expression",
                             ));
+                        }
+                    }
+                    Op::GetAIter => {
+                        let source = self.read(b)?;
+                        let Some(call) = self.heap.special_method_call(source, "__aiter__")? else {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "object is not async iterable",
+                            ));
+                        };
+                        let depth = self.frames.len();
+                        self.invoke(
+                            p,
+                            call.callable,
+                            a,
+                            Arguments::Inline {
+                                receiver: call.receiver,
+                                positional: [Value::UNBOUND; 3],
+                                count: 0,
+                            },
+                            output,
+                        )?;
+                        if self.frames.len() > depth {
+                            self.frames.last_mut().expect("__aiter__ frame").action =
+                                ReturnAction::AsyncIterator;
+                        } else {
+                            self.validate_async_iterator(self.registers[a])?;
+                        }
+                    }
+                    Op::GetANext => {
+                        let iterator = self.read(b)?;
+                        let Some(call) = self.heap.special_method_call(iterator, "__anext__")?
+                        else {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "object is not an async iterator",
+                            ));
+                        };
+                        self.invoke(
+                            p,
+                            call.callable,
+                            a,
+                            Arguments::Inline {
+                                receiver: call.receiver,
+                                positional: [Value::UNBOUND; 3],
+                                count: 0,
+                            },
+                            output,
+                        )?;
+                    }
+                    Op::EndAsyncFor => {
+                        let exception = self.read(a)?;
+                        if self.instance_check(
+                            exception,
+                            self.runtime_types.stop_async_iteration,
+                            false,
+                            0,
+                        )? {
+                            self.jump(i.b as usize, pc);
+                        } else {
+                            let diagnostic = self.exception_diagnostic(exception)?;
+                            self.pending_exception = Some(exception);
+                            return Err(diagnostic);
                         }
                     }
                     Op::YieldFrom => {

@@ -349,7 +349,7 @@ impl<'a> Scan<'a> {
                     self.block(a)?;
                     self.block(b)?;
                 }
-                StmtKind::For(t, e, a, b) => {
+                StmtKind::For(t, e, a, b) | StmtKind::AsyncFor(t, e, a, b) => {
                     self.expr(e);
                     self.target(t);
                     self.block(a)?;
@@ -454,7 +454,10 @@ impl<'a> Scan<'a> {
         for s in body {
             match &s.kind {
                 StmtKind::Nonlocal(names) if names.contains(&name) => return Some(s.span),
-                StmtKind::If(_, a, b) | StmtKind::While(_, a, b) | StmtKind::For(_, _, a, b) => {
+                StmtKind::If(_, a, b)
+                | StmtKind::While(_, a, b)
+                | StmtKind::For(_, _, a, b)
+                | StmtKind::AsyncFor(_, _, a, b) => {
                     if let Some(s) =
                         Self::declaration_span(a, name).or_else(|| Self::declaration_span(b, name))
                     {

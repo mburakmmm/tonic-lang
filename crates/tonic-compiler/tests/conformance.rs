@@ -247,6 +247,34 @@ fn async_functions_and_await_have_owned_ast_and_coroutine_metadata() {
     let error = compile("async def values():\n    yield 1", "async-generator").unwrap_err();
     assert_eq!(error.kind, "UnsupportedSyntax");
 }
+
+#[test]
+fn async_for_has_owned_ast_and_verified_coroutine_bytecode() {
+    let source = "async def consume(items):\n    async for item in items:\n        pass\n    else:\n        return 1\n    return 2";
+    let ast = parse(source, "async-for").unwrap();
+    let StmtKind::Function { body, .. } = &ast.body[0].kind else {
+        panic!("async function")
+    };
+    assert!(matches!(body[0].kind, StmtKind::AsyncFor(_, _, _, _)));
+
+    let program = compile(source, "async-for").unwrap();
+    let code = &program.program().code[1];
+    assert!(code.coroutine);
+    for expected in [
+        Op::GetAIter,
+        Op::GetANext,
+        Op::GetAwaitable,
+        Op::EndAsyncFor,
+    ] {
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(expected)));
+    }
+    assert!(!code.exception_regions.is_empty());
+
+    assert!(compile("async for item in items:\n    pass", "bad-async-for").is_err());
+}
 #[test]
 fn resource_limits_reject_deep_ast_before_parsing() {
     let s = format!("x={}1{}", "(".repeat(300), ")".repeat(300));

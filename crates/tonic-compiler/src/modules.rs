@@ -79,7 +79,9 @@ fn collect_imports(statements: &[Stmt], module: &Module, imports: &mut Vec<Strin
                 collect_imports(finalbody, module, imports);
             }
             StmtKind::With { body, .. } => collect_imports(body, module, imports),
-            StmtKind::While(_, body, otherwise) | StmtKind::For(_, _, body, otherwise) => {
+            StmtKind::While(_, body, otherwise)
+            | StmtKind::For(_, _, body, otherwise)
+            | StmtKind::AsyncFor(_, _, body, otherwise) => {
                 collect_imports(body, module, imports);
                 collect_imports(otherwise, module, imports);
             }

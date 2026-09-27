@@ -113,6 +113,36 @@ fn await_requires_coroutine_metadata() {
     invalid.code[1].generator = true;
     assert!(invalid.verify().is_err());
 }
+
+#[test]
+fn async_iteration_requires_coroutine_metadata_and_valid_targets() {
+    let mut async_for = program();
+    async_for.modules[0].code_count = 2;
+    let mut code = async_for.code[0].clone();
+    code.coroutine = true;
+    code.name = "async_for".into();
+    code.instructions = vec![
+        Instr::new(Op::GetAIter, 0, 1, 0),
+        Instr::new(Op::GetANext, 0, 1, 0),
+        Instr::new(Op::EndAsyncFor, 0, 3, 0),
+        Instr::new(Op::Return, 0, 0, 0),
+    ];
+    code.spans = vec![Span::default(); 4];
+    async_for.code.push(code);
+    async_for.clone().verify().unwrap();
+
+    let mut outside = async_for.clone();
+    outside.code[1].coroutine = false;
+    assert!(outside.verify().is_err());
+
+    let mut target = async_for.clone();
+    target.code[1].instructions[2].b = 4;
+    assert!(target.verify().is_err());
+
+    let mut reserved = async_for;
+    reserved.code[1].instructions[0].c = 1;
+    assert!(reserved.verify().is_err());
+}
 #[test]
 fn rejects_opcode_operands_and_metadata() {
     let mut variants = Vec::new();

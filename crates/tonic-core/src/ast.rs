@@ -63,6 +63,7 @@ pub enum StmtKind {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>, Vec<Stmt>),
     For(Target, Expr, Vec<Stmt>, Vec<Stmt>),
+    AsyncFor(Target, Expr, Vec<Stmt>, Vec<Stmt>),
     Import(Vec<ImportAlias>),
     ImportFrom {
         /// Increasing absolute module prefixes, ending in the source module.

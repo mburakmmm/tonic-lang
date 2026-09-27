@@ -198,6 +198,15 @@ fn unreachable_suspended_coroutines_close_awaited_iterators() {
         assert_eq!(vm.stats.generator_finalizer_errors, 0);
     }
 }
+
+#[test]
+fn async_for_awaits_anext_and_preserves_loop_control() {
+    let source = "class Counter:\n    def __init__(self,limit):\n        self.i=0\n        self.limit=limit\n    def __aiter__(self):\n        print('aiter',self.limit)\n        return self\n    async def __anext__(self):\n        if self.i>=self.limit:\n            raise StopAsyncIteration\n        value=self.i\n        self.i+=1\n        return value\nasync def consume(limit,stop):\n    total=0\n    async for value in Counter(limit):\n        if value==1:\n            continue\n        if value==stop:\n            break\n        total+=value\n    else:\n        print('exhausted',limit)\n    return total\nfor limit,stop in [(4,9),(5,3)]:\n    coroutine=consume(limit,stop)\n    try:\n        coroutine.send(None)\n    except StopIteration as error:\n        print('result',error.value)\nclass Step:\n    def __init__(self,value):\n        self.value=value\n    def __await__(self):\n        yield 'pause-'+str(self.value)\n        return self.value\nclass Suspended:\n    def __init__(self):\n        self.i=0\n    def __aiter__(self):\n        return self\n    def __anext__(self):\n        if self.i>=2:\n            raise StopAsyncIteration\n        value=self.i\n        self.i+=1\n        return Step(value)\nasync def suspended_sum():\n    total=0\n    async for value in Suspended():\n        total+=value\n    else:\n        print('suspended-exhausted')\n    return total\ncoroutine=suspended_sum()\nprint(coroutine.send(None))\nprint(coroutine.send(None))\ntry:\n    coroutine.send(None)\nexcept StopIteration as error:\n    print('suspended-result',error.value)\nclass BadIter:\n    def __aiter__(self):\n        return 1\nclass BadNext:\n    def __aiter__(self):\n        return self\n    def __anext__(self):\n        return 1\nasync def invalid(value):\n    async for item in value:\n        pass\nfor value in [BadIter(),BadNext(),1]:\n    try:\n        invalid(value).send(None)\n    except TypeError as error:\n        print(type(error).__name__)";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"aiter 4\nexhausted 4\nresult 5\naiter 5\nresult 2\npause-0\npause-1\nsuspended-exhausted\nsuspended-result 1\nTypeError\nTypeError\nTypeError\n",
+    );
+}
 #[test]
 fn exception_objects_and_explicit_raise() {
     assert_eq!(

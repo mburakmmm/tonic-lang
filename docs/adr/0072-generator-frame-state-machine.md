@@ -76,8 +76,8 @@ ile fiziksel reclamation ayrı collection adımlarıdır. `Created`, `Running` v
 
 ## Açık kapsam
 
-- Async generator ve async iteration/context protokolleri ADR 0073 sonrasında
-  ayrı genişletmeler olarak eklenecektir.
+- Async generator ve async context protokolü ADR 0073 sonrasında ayrı
+  genişletmeler olarak eklenecektir.
 - Genel kullanıcı `__del__`, resurrection ve unraisable hook politikası ayrı
   finalizer tasarımında ele alınacaktır.
 - Generator code'unun JIT edilmesi ancak deopt metadata ve suspended-root stack

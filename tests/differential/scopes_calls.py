@@ -226,6 +226,33 @@ try:
 except StopIteration as error:
     print(error.value)
 ''',
+'''class Counter:
+    def __init__(self,limit):
+        self.i=0
+        self.limit=limit
+    def __aiter__(self):
+        return self
+    async def __anext__(self):
+        if self.i>=self.limit:
+            raise StopAsyncIteration
+        value=self.i
+        self.i+=1
+        return value
+async def collect():
+    total=0
+    async for value in Counter(4):
+        if value==1:
+            continue
+        total+=value
+    else:
+        print('exhausted')
+    return total
+coroutine=collect()
+try:
+    coroutine.send(None)
+except StopIteration as error:
+    print(error.value)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -256,4 +283,7 @@ ERRORS = [
 ('class Invalid:\n    def __await__(self):\n        return []\nasync def run():\n    await Invalid()\nrun().send(None)', 'TypeError'),
 ('async def done():\n    return 1\ncoroutine=done()\ntry:\n    coroutine.send(None)\nexcept StopIteration:\n    pass\ncoroutine.send(None)', 'RuntimeError'),
 ('async def bad():\n    raise StopIteration("escaped")\nbad().send(None)', 'RuntimeError'),
+('class Bad:\n    def __aiter__(self):\n        return 1\nasync def run():\n    async for value in Bad():\n        pass\nrun().send(None)', 'TypeError'),
+('class Bad:\n    def __aiter__(self):\n        return self\n    def __anext__(self):\n        return 1\nasync def run():\n    async for value in Bad():\n        pass\nrun().send(None)', 'TypeError'),
+('class Once:\n    def __init__(self):\n        self.done=False\n    def __aiter__(self):\n        return self\n    async def __anext__(self):\n        if self.done:\n            raise StopAsyncIteration\n        self.done=True\n        return 1\nasync def run():\n    async for value in Once():\n        raise StopAsyncIteration("body")\nrun().send(None)', 'StopAsyncIteration'),
 ]
