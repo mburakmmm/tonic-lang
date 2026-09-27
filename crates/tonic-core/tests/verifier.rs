@@ -143,6 +143,32 @@ fn async_iteration_requires_coroutine_metadata_and_valid_targets() {
     reserved.code[1].instructions[0].c = 1;
     assert!(reserved.verify().is_err());
 }
+
+#[test]
+fn async_context_requires_coroutine_metadata_and_valid_registers() {
+    let mut async_with = program();
+    async_with.modules[0].code_count = 2;
+    let mut code = async_with.code[0].clone();
+    code.coroutine = true;
+    code.name = "async_with".into();
+    code.registers = 3;
+    code.instructions = vec![
+        Instr::new(Op::AsyncContextEnter, 0, 1, 2),
+        Instr::new(Op::AsyncContextExit, 0, 1, 2),
+        Instr::new(Op::Return, 0, 0, 0),
+    ];
+    code.spans = vec![Span::default(); 3];
+    async_with.code.push(code);
+    async_with.clone().verify().unwrap();
+
+    let mut outside = async_with.clone();
+    outside.code[1].coroutine = false;
+    assert!(outside.verify().is_err());
+
+    let mut invalid = async_with;
+    invalid.code[1].instructions[1].c = 3;
+    assert!(invalid.verify().is_err());
+}
 #[test]
 fn rejects_opcode_operands_and_metadata() {
     let mut variants = Vec::new();

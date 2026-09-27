@@ -60,6 +60,10 @@ pub enum StmtKind {
         items: Vec<WithItem>,
         body: Vec<Stmt>,
     },
+    AsyncWith {
+        items: Vec<WithItem>,
+        body: Vec<Stmt>,
+    },
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>, Vec<Stmt>),
     For(Target, Expr, Vec<Stmt>, Vec<Stmt>),

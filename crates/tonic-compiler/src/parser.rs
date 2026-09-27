@@ -324,6 +324,35 @@ impl Adapter {
                     body: self.block(w.body)?,
                 }
             }
+            py::Stmt::AsyncWith(w) => {
+                if !self.async_function {
+                    return Err(Diagnostic::new(
+                        "SyntaxError",
+                        "async with outside async function",
+                    )
+                    .at(s));
+                }
+                if w.type_comment.is_some() {
+                    return Err(unsupported(s, "async with type comment"));
+                }
+                let items = w
+                    .items
+                    .into_iter()
+                    .map(|item| {
+                        Ok(WithItem {
+                            context: self.expr(item.context_expr)?,
+                            target: item
+                                .optional_vars
+                                .map(|target| self.target(*target))
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                StmtKind::AsyncWith {
+                    items,
+                    body: self.block(w.body)?,
+                }
+            }
             py::Stmt::If(i) => StmtKind::If(
                 self.expr(*i.test)?,
                 self.block(i.body)?,

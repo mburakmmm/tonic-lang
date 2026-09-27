@@ -34,7 +34,7 @@ The current implementation includes:
 - classes, C3 multiple inheritance, shapes, descriptors, properties and `super`;
 - canonical builtin constructors, native builtin subclasses, and suspending numeric/index conversion protocols;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
-  coroutines, exact/custom-awaitable `await` delegation, and `async for`;
+  coroutines, exact/custom-awaitable `await` delegation, `async for`, and `async with`;
 - source modules and packages with versioned globals, circular-import state, and rollback;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
@@ -50,7 +50,7 @@ work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
 The unsupported surface is reported explicitly. Comprehensions, async
-generators, `async with`, an event-loop/task layer, structural
+generators, an event-loop/task layer, structural
 matching, f-strings, a full standard library, and several remaining protocols
 are still tracked in the [roadmap](docs/ROADMAP.md).
 

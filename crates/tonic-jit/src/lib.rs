@@ -1856,7 +1856,7 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
-            Op::ContextEnter | Op::ContextExit => {
+            Op::ContextEnter | Op::ContextExit | Op::AsyncContextEnter | Op::AsyncContextExit => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 register(pc, instruction.c)?;

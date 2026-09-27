@@ -335,7 +335,7 @@ impl<'a> Scan<'a> {
                     self.block(otherwise)?;
                     self.block(finalbody)?;
                 }
-                StmtKind::With { items, body } => {
+                StmtKind::With { items, body } | StmtKind::AsyncWith { items, body } => {
                     for item in items {
                         self.expr(&item.context);
                         if let Some(target) = &item.target {
@@ -482,7 +482,7 @@ impl<'a> Scan<'a> {
                         return Some(span);
                     }
                 }
-                StmtKind::With { body, .. } => {
+                StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
                     if let Some(span) = Self::declaration_span(body, name) {
                         return Some(span);
                     }

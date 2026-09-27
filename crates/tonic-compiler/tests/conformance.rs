@@ -275,6 +275,45 @@ fn async_for_has_owned_ast_and_verified_coroutine_bytecode() {
 
     assert!(compile("async for item in items:\n    pass", "bad-async-for").is_err());
 }
+
+#[test]
+fn async_with_has_owned_ast_and_verified_coroutine_bytecode() {
+    let source = "async def use(manager):\n    async with manager as value:\n        return value";
+    let ast = parse(source, "async-with").unwrap();
+    let StmtKind::Function { body, .. } = &ast.body[0].kind else {
+        panic!("async function")
+    };
+    let async_with = &body[0];
+    let StmtKind::AsyncWith { items, body } = &async_with.kind else {
+        panic!("async with")
+    };
+    assert_eq!((items.len(), body.len()), (1, 1));
+    assert!(items[0].target.is_some());
+    assert_eq!(
+        &source[async_with.span.start as usize..async_with.span.end as usize],
+        "async with manager as value:\n        return value"
+    );
+
+    let program = compile(source, "async-with").unwrap();
+    let code = &program.program().code[1];
+    assert!(code.coroutine);
+    for expected in [
+        Op::AsyncContextEnter,
+        Op::AsyncContextExit,
+        Op::GetAwaitable,
+        Op::YieldFrom,
+    ] {
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(expected)));
+    }
+    assert!(!code.exception_regions.is_empty());
+
+    let error = compile("async with manager:\n    pass", "bad-async-with").unwrap_err();
+    assert_eq!(error.kind, "SyntaxError");
+    assert!(error.span.is_some());
+}
 #[test]
 fn resource_limits_reject_deep_ast_before_parsing() {
     let s = format!("x={}1{}", "(".repeat(300), ")".repeat(300));

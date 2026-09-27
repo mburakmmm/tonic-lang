@@ -342,8 +342,19 @@ aynı exception normal biçimde yayılır. Break/continue/else mevcut loop clean
 altyapısını paylaşır ve askıya alan özel next awaitable'ları moving/stress GC
 altında continuation register'larında korunur.
 
-Async generator, `async with` ve event-loop/future/task protokolleri bu dilime
-dahil değildir. Ayrıntı
+Bytecode v19, yine yalnız coroutine code'unda geçerli `ASYNC_CONTEXT_ENTER` ve
+`ASYNC_CONTEXT_EXIT` opcode'larını ekler. Giriş opcode'u manager tipinden
+`__aexit__` callable/receiver çiftini girişten önce yakalayıp GC-traced token'da
+tutar, ardından `__aenter__` çağrısını başlatır. Compiler hem giriş hem çıkış
+sonucunu ortak await state machine'inden geçirir. Senkron `with` lowering'inin
+exception-region ve cleanup zinciri async çıkışı da kapsayacak biçimde paylaşılır;
+böylece normal çıkış, exception suppression/replacement, return, break, continue,
+target ataması hatası ve kısmi çoklu-manager girişi aynı unwind kurallarını izler.
+Coroutine code'u JIT adayı olmadığı için async context manager suspend noktaları
+interpreter frame'inde kesin köklerle tutulur; JIT çağıran kod generic sınırdan
+aynı güvenli fallback'e geçer.
+
+Async generator ve event-loop/future/task protokolleri bu dilime dahil değildir. Ayrıntı
 [ADR 0073](adr/0073-coroutine-await-state-machine.md) dosyasındadır.
 
 ## Uygulama sırası ve kabul kapıları

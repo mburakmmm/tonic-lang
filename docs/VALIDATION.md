@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 18, core verifier 12, Cranelift JIT 16, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 19, core verifier 13, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 91, CPython bridge 15 ve HPy manifest 5; toplam 314 test.
+native handles 5, language/runtime 92, CPython bridge 15 ve HPy manifest 5; toplam 317 test.
 
-Differential corpus: 307 stdout vakası ve 156 exception türü vakası. Seed 42.
-Coroutine ilk diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 308 stdout vakası ve 159 exception türü vakası. Seed 42.
+Async context-manager diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -86,6 +86,13 @@ Async iteration corpus'u senkron ve coroutine `__anext__`, gerçekten askıya al
 özel awaitable, `StopAsyncIteration` sınırı, break/continue/else ile hatalı
 `__aiter__`/`__anext__` sonuçlarını kapsar. Body içindeki açık
 `StopAsyncIteration` exhaustion olarak tüketilmez.
+Async context-manager corpus'u `__aenter__`/`__aexit__` await sözleşmesini,
+nested manager çıkış sırasını, exception suppression'ı ve geçersiz/non-awaitable
+protokol sonuçlarını CPython ile karşılaştırır. Rust stress testi bunlara ek olarak
+gerçekten askıya alınan enter/exit, return/break/continue cleanup'ı, kısmi giriş
+başarısızlığı, yakalanmış eski exit metodu, target atama hatası, bare reraise,
+özel truthiness ve metaclass manager davranışını interpreter/JIT-caller altında
+her allocation'da GC ile doğrular.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython

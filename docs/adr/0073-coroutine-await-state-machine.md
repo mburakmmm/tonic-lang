@@ -3,7 +3,7 @@
 ## Durum
 
 Kısmen uygulandı. Bu karar `async def`, `await`, coroutine nesnesi,
-`coroutine_wrapper` ve `async for` çekirdeğini kapsar. Async generator, `async with`
+`coroutine_wrapper`, `async for` ve `async with` çekirdeğini kapsar. Async generator
 ve event-loop/future/task protokolleri açık kalır.
 
 ## Karar
@@ -57,16 +57,34 @@ yayar. Target/body bu region'ın dışında kaldığı için kullanıcı kodunun
 `StopAsyncIteration` hatası yanlışlıkla tüketilmez. Break/continue/else mevcut
 loop ve cleanup patching kurallarını kullanır.
 
+Bytecode v19 `ASYNC_CONTEXT_ENTER` ve `ASYNC_CONTEXT_EXIT` ekler; verifier iki
+opcode'u yalnız coroutine code'unda ve üç geçerli register operandıyla kabul
+eder. Giriş yolu class manager için metaclass'tan, normal instance için class
+MRO'sundan `__aexit__` metodunu önce çözer ve callable/receiver çiftini managed
+tuple token'ında saklar. Sonra `__aenter__` çağrılır ve sonucu ortak await
+lowering'inden geçirilir. Çıkış opcode'u yakalanan metodu `None` üçlüsüyle veya
+aktif exception'ın type/value/traceback üçlüsüyle çağırır; sonuç tekrar await
+edilir ve exception yolunda truthiness suppression kararını verir.
+
+Compiler senkron context manager'ın nested exception region ve yapısal cleanup
+modelini `is_async` niteliğiyle paylaşır. Exit çağrısı ile bütün await döngüsü tek
+replacement region'ında kaldığından askıdan sonra yükselen hata da eski aktif
+exception'ı doğru biçimde değiştirir. Return/break/continue sırasında async exit
+tamamlanmadan kontrol aktarımı yapılmaz. Birden fazla manager iç içe lower edilir;
+iç giriş başarısızsa yalnız başarıyla girilmiş dış manager kapanır. Token, aktif
+exception ve await delegesi VM register/frame kökleriyle moving GC altında yaşar.
+Coroutine code'u ve coroutine direct-call hedefleri JIT dışında olduğundan bu
+suspend noktaları native stack-map gerektirmeden interpreter fallback'inde kalır.
+
 ## Açık kapsam
 
 - Async generator'ın `asend`/`athrow`/`aclose` ve finalization semantiği.
-- `async with` için `__aenter__`/`__aexit__` unwind zinciri.
 - Future/task/event-loop scheduling, cancellation ve thread entegrasyonu.
 - Coroutine frame'lerinin JIT edilmesi ve native suspended-root metadata'sı.
 
 ## Doğrulama
 
-Compiler ve verifier testleri owned AST/HIR metadata'yı, bytecode v17 operand
+Compiler ve verifier testleri owned AST/HIR metadata'yı, bytecode v17–v19 operand
 kurallarını, coroutine/generator ayrımını ve async-generator reddini kapsar.
 Runtime testleri tembel yürütme, nested coroutine, özel awaitable, public
 `coroutine_wrapper`, `send`/`throw`/`close`, yanlış `__await__` sonucu ve await
@@ -75,4 +93,7 @@ sınar. Ayrı finalization testi ulaşılamayan askıdaki coroutine'in await ett
 iterator'ı içten dışa kapattığını ve finalizer sayaçlarını doğrular. Differential
 corpus aynı başarı ve hata türlerini CPython 3.14.6 ile karşılaştırır. Async-for
 testleri anında ve askıya alınan `__anext__`, loop kontrolü, invalid protocol
-sonuçları, exhaustion exception sınırı ve stress-GC köklerini kapsar.
+sonuçları, exhaustion exception sınırı ve stress-GC köklerini kapsar. Async-with
+testleri nested/kısmi giriş, yakalanmış exit metodu, normal ve askıya alınan
+enter/exit, suppression/replacement, bare reraise, target hatası, metaclass
+manager, bütün yapısal çıkışlar ve geçersiz protokol sonuçlarını kapsar.

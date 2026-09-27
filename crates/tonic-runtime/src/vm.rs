@@ -4655,29 +4655,48 @@ impl Vm {
                         )?,
                         _ => unreachable!("verified clear-binding kind"),
                     },
-                    Op::ContextEnter => {
+                    Op::ContextEnter | Op::AsyncContextEnter => {
                         let manager = self.read(c)?;
                         let class_manager = matches!(self.heap.get(manager), Ok(Object::Class(_)));
-                        let exit = if class_manager {
-                            self.heap.metaclass_method_call(manager, "__exit__")?
+                        let async_context = op == Op::AsyncContextEnter;
+                        let exit_name = if async_context {
+                            "__aexit__"
                         } else {
-                            self.heap.special_method_call(manager, "__exit__")?
+                            "__exit__"
+                        };
+                        let exit = if class_manager {
+                            self.heap.metaclass_method_call(manager, exit_name)?
+                        } else {
+                            self.heap.special_method_call(manager, exit_name)?
                         }
                         .ok_or_else(|| {
                             Diagnostic::new(
                                 "TypeError",
-                                "object does not support the context manager protocol",
+                                if async_context {
+                                    "object does not support the asynchronous context manager protocol"
+                                } else {
+                                    "object does not support the context manager protocol"
+                                },
                             )
                         })?;
-                        let enter = if class_manager {
-                            self.heap.metaclass_method_call(manager, "__enter__")?
+                        let enter_name = if async_context {
+                            "__aenter__"
                         } else {
-                            self.heap.special_method_call(manager, "__enter__")?
+                            "__enter__"
+                        };
+                        let enter = if class_manager {
+                            self.heap.metaclass_method_call(manager, enter_name)?
+                        } else {
+                            self.heap.special_method_call(manager, enter_name)?
                         }
                         .ok_or_else(|| {
                             Diagnostic::new(
                                 "TypeError",
-                                "object does not support the context manager protocol",
+                                if async_context {
+                                    "object does not support the asynchronous context manager protocol"
+                                } else {
+                                    "object does not support the context manager protocol"
+                                },
                             )
                         })?;
                         self.registers[b] = self.heap.alloc(Object::Tuple(vec![
@@ -4697,7 +4716,7 @@ impl Vm {
                             output,
                         )?;
                     }
-                    Op::ContextExit => {
+                    Op::ContextExit | Op::AsyncContextExit => {
                         let token = self.read(b)?;
                         let exception = self.read(c)?;
                         let (callable, receiver) = match self.heap.get(token)? {

@@ -189,6 +189,8 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__await__"
                 | "__aiter__"
                 | "__anext__"
+                | "__aenter__"
+                | "__aexit__"
                 | "__module__"
                 | "__qualname__"
                 | "__doc__"

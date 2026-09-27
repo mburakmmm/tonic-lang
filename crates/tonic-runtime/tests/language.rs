@@ -207,6 +207,208 @@ fn async_for_awaits_anext_and_preserves_loop_control() {
         b"aiter 4\nexhausted 4\nresult 5\naiter 5\nresult 2\npause-0\npause-1\nsuspended-exhausted\nsuspended-result 1\nTypeError\nTypeError\nTypeError\n",
     );
 }
+
+#[test]
+fn async_with_awaits_protocol_and_preserves_unwind_semantics() {
+    let source = r#"class Manager:
+    def __init__(self,name,suppress=False):
+        self.name=name
+        self.suppress=suppress
+    async def __aenter__(self):
+        print('enter',self.name)
+        return self.name+'-value'
+    async def __aexit__(self,kind,value,traceback):
+        print('exit',self.name,kind.__name__ if kind else 'None')
+        return self.suppress
+async def normal():
+    async with Manager('outer') as outer, Manager('inner') as inner:
+        print(outer,inner)
+    try:
+        async with Manager('propagate'):
+            raise ValueError('boom')
+    except ValueError:
+        print('propagated')
+    async with Manager('suppress',True):
+        raise LookupError('hidden')
+    print('suppressed')
+    return 7
+try:
+    normal().send(None)
+except StopIteration as error:
+    print('normal-result',error.value)
+async def leave(mode):
+    for i in range(2):
+        async with Manager('loop'+str(i)):
+            if i==0:
+                continue
+            break
+    async with Manager('return'):
+        return mode
+try:
+    leave(9).send(None)
+except StopIteration as error:
+    print('leave-result',error.value)
+class Pause:
+    def __init__(self,label,value):
+        self.label=label
+        self.value=value
+    def __await__(self):
+        yield self.label
+        return self.value
+class SuspendedManager:
+    def __aenter__(self):
+        return Pause('enter-pause','entered')
+    def __aexit__(self,kind,value,traceback):
+        return Pause('exit-pause',False)
+async def suspended():
+    async with SuspendedManager() as value:
+        print(value)
+        return 'done'
+coroutine=suspended()
+print(coroutine.send(None))
+print(coroutine.send(None))
+try:
+    coroutine.send(None)
+except StopIteration as error:
+    print('suspended-result',error.value)
+def old_exit(self,kind,value,traceback):
+    return Pause('captured-exit',False)
+class Mutating:
+    __aexit__=old_exit
+    def __aenter__(self):
+        Mutating.__aexit__=lambda self,kind,value,traceback: Pause('new-exit',False)
+        return Pause('mutating-enter',self)
+async def captured():
+    async with Mutating():
+        print('captured-body')
+coroutine=captured()
+print(coroutine.send(None))
+print(coroutine.send(None))
+try:
+    coroutine.send(None)
+except StopIteration:
+    print('captured-done')
+class TargetManager:
+    async def __aenter__(self):
+        return [1]
+    async def __aexit__(self,kind,value,traceback):
+        print('target-exit',kind.__name__)
+        return False
+async def target_error():
+    try:
+        async with TargetManager() as (first,second):
+            pass
+    except ValueError:
+        print('target-error')
+try:
+    target_error().send(None)
+except StopIteration:
+    pass
+class Reraising:
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self,kind,value,traceback):
+        print('bare-exit')
+        raise
+async def reraising():
+    try:
+        async with Reraising():
+            raise KeyError('same')
+    except KeyError:
+        print('bare-reraised')
+try:
+    reraising().send(None)
+except StopIteration:
+    pass
+class EnterFails:
+    async def __aenter__(self):
+        print('enter-fails')
+        raise ValueError('enter')
+    async def __aexit__(self,kind,value,traceback):
+        print('must-not-exit')
+async def failed_enter():
+    try:
+        async with EnterFails():
+            pass
+    except ValueError:
+        print('enter-failure-kept')
+try:
+    failed_enter().send(None)
+except StopIteration:
+    pass
+class InnerFails:
+    async def __aenter__(self):
+        print('inner-enter-fails')
+        raise ValueError('inner')
+    async def __aexit__(self,kind,value,traceback):
+        print('inner-must-not-exit')
+async def partial_enter():
+    try:
+        async with Manager('partial-outer'), InnerFails():
+            pass
+    except ValueError:
+        print('partial-failure-kept')
+try:
+    partial_enter().send(None)
+except StopIteration:
+    pass
+class Truth:
+    def __bool__(self):
+        print('truth')
+        return True
+class TruthManager(Manager):
+    async def __aexit__(self,kind,value,traceback):
+        print('truth-exit',kind.__name__)
+        return Truth()
+async def truth_suppression():
+    async with TruthManager('truth-manager'):
+        raise TypeError('hidden')
+try:
+    truth_suppression().send(None)
+except StopIteration:
+    print('truth-suppressed')
+class Meta(type):
+    async def __aenter__(cls):
+        print('meta-enter')
+        return cls.__name__
+    async def __aexit__(cls,kind,value,traceback):
+        print('meta-exit',kind.__name__ if kind else 'None')
+class ManagedClass(metaclass=Meta):
+    pass
+async def managed_class():
+    async with ManagedClass as name:
+        print(name)
+try:
+    managed_class().send(None)
+except StopIteration:
+    pass
+class BadEnter:
+    def __aenter__(self):
+        return 1
+    async def __aexit__(self,kind,value,traceback):
+        pass
+class MissingExit:
+    async def __aenter__(self):
+        pass
+class BadExit:
+    async def __aenter__(self):
+        pass
+    def __aexit__(self,kind,value,traceback):
+        return 1
+async def invalid(manager):
+    async with manager:
+        pass
+for manager in [BadEnter(),MissingExit(),BadExit(),1]:
+    try:
+        invalid(manager).send(None)
+    except TypeError:
+        print('invalid')
+"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"enter outer\nenter inner\nouter-value inner-value\nexit inner None\nexit outer None\nenter propagate\nexit propagate ValueError\npropagated\nenter suppress\nexit suppress LookupError\nsuppressed\nnormal-result 7\nenter loop0\nexit loop0 None\nenter loop1\nexit loop1 None\nenter return\nexit return None\nleave-result 9\nenter-pause\nentered\nexit-pause\nsuspended-result done\nmutating-enter\ncaptured-body\ncaptured-exit\ncaptured-done\ntarget-exit ValueError\ntarget-error\nbare-exit\nbare-reraised\nenter-fails\nenter-failure-kept\nenter partial-outer\ninner-enter-fails\nexit partial-outer ValueError\npartial-failure-kept\nenter truth-manager\ntruth-exit TypeError\ntruth\ntruth-suppressed\nmeta-enter\nManagedClass\nmeta-exit None\ninvalid\ninvalid\ninvalid\ninvalid\n",
+    );
+}
 #[test]
 fn exception_objects_and_explicit_raise() {
     assert_eq!(

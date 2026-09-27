@@ -253,6 +253,28 @@ try:
 except StopIteration as error:
     print(error.value)
 ''',
+'''class Manager:
+    def __init__(self,name,suppress=False):
+        self.name=name
+        self.suppress=suppress
+    async def __aenter__(self):
+        print('enter',self.name)
+        return self.name+'-value'
+    async def __aexit__(self,kind,value,traceback):
+        print('exit',self.name,kind.__name__ if kind else 'None')
+        return self.suppress
+async def run():
+    async with Manager('outer') as outer, Manager('inner') as inner:
+        print(outer,inner)
+    async with Manager('suppress',True):
+        raise ValueError('hidden')
+    return 'done'
+coroutine=run()
+try:
+    coroutine.send(None)
+except StopIteration as error:
+    print(error.value)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -286,4 +308,7 @@ ERRORS = [
 ('class Bad:\n    def __aiter__(self):\n        return 1\nasync def run():\n    async for value in Bad():\n        pass\nrun().send(None)', 'TypeError'),
 ('class Bad:\n    def __aiter__(self):\n        return self\n    def __anext__(self):\n        return 1\nasync def run():\n    async for value in Bad():\n        pass\nrun().send(None)', 'TypeError'),
 ('class Once:\n    def __init__(self):\n        self.done=False\n    def __aiter__(self):\n        return self\n    async def __anext__(self):\n        if self.done:\n            raise StopAsyncIteration\n        self.done=True\n        return 1\nasync def run():\n    async for value in Once():\n        raise StopAsyncIteration("body")\nrun().send(None)', 'StopAsyncIteration'),
+('class Bad:\n    def __aenter__(self):\n        return 1\n    async def __aexit__(self,a,b,c):\n        pass\nasync def run():\n    async with Bad():\n        pass\nrun().send(None)', 'TypeError'),
+('class Bad:\n    async def __aenter__(self):\n        pass\nasync def run():\n    async with Bad():\n        pass\nrun().send(None)', 'TypeError'),
+('class Bad:\n    async def __aenter__(self):\n        pass\n    def __aexit__(self,a,b,c):\n        return 1\nasync def run():\n    async with Bad():\n        raise ValueError("body")\nrun().send(None)', 'TypeError'),
 ]

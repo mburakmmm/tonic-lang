@@ -155,6 +155,7 @@ enum ControlCleanup {
     With {
         id: usize,
         token: u16,
+        is_async: bool,
         span: Span,
     },
 }
@@ -319,6 +320,31 @@ impl Lower<'_> {
         self.emit(Op::ClearException, 0, 0, 0, cleanup.span)?;
         Ok(())
     }
+    fn emit_context_exit(
+        &mut self,
+        token: u16,
+        exception: u16,
+        is_async: bool,
+        span: Span,
+    ) -> Result<u16> {
+        let pending = self.alloc(1)?;
+        self.emit(
+            if is_async {
+                Op::AsyncContextExit
+            } else {
+                Op::ContextExit
+            },
+            pending,
+            token,
+            exception,
+            span,
+        )?;
+        if is_async {
+            self.await_value(pending, span)
+        } else {
+            Ok(pending)
+        }
+    }
     fn emit_cleanups_from(&mut self, depth: usize) -> Result<()> {
         let saved = self.cleanups.clone();
         for index in (depth..saved.len()).rev() {
@@ -341,12 +367,16 @@ impl Lower<'_> {
                         });
                     }
                 }
-                ControlCleanup::With { id, token, span } => {
+                ControlCleanup::With {
+                    id,
+                    token,
+                    is_async,
+                    span,
+                } => {
                     let failure = self.alloc(1)?;
-                    let result = self.alloc(1)?;
                     let none = self.constant(Constant::None, span)?;
                     let start = self.pc()?;
-                    self.emit(Op::ContextExit, result, token, none, span)?;
+                    self.emit_context_exit(token, none, is_async, span)?;
                     let end = self.pc()?;
                     self.with_bypasses[id].push(FinallyBypass {
                         start,
@@ -430,20 +460,42 @@ impl Lower<'_> {
         }
         Ok(())
     }
-    fn lower_with(&mut self, items: &[WithItem], body: &[Stmt], span: Span) -> Result<()> {
+    fn lower_with(
+        &mut self,
+        items: &[WithItem],
+        body: &[Stmt],
+        is_async: bool,
+        span: Span,
+    ) -> Result<()> {
         let Some((item, remaining)) = items.split_first() else {
             return self.block(body);
         };
         let manager = self.expr(&item.context)?;
         let token = self.alloc(1)?;
-        let entered = self.alloc(1)?;
-        self.emit(Op::ContextEnter, entered, token, manager, item.context.span)?;
+        let pending_enter = self.alloc(1)?;
+        self.emit(
+            if is_async {
+                Op::AsyncContextEnter
+            } else {
+                Op::ContextEnter
+            },
+            pending_enter,
+            token,
+            manager,
+            item.context.span,
+        )?;
+        let entered = if is_async {
+            self.await_value(pending_enter, item.context.span)?
+        } else {
+            pending_enter
+        };
 
         let id = self.with_bypasses.len();
         self.with_bypasses.push(Vec::new());
         let cleanup = ControlCleanup::With {
             id,
             token,
+            is_async,
             span: item.context.span,
         };
         let start = self.pc()?;
@@ -451,13 +503,12 @@ impl Lower<'_> {
         if let Some(target) = &item.target {
             self.target(target, entered, item.context.span)?;
         }
-        self.lower_with(remaining, body, span)?;
+        self.lower_with(remaining, body, is_async, span)?;
         self.cleanups.pop();
         let end = self.pc()?;
 
         let none = self.constant(Constant::None, span)?;
-        let normal_result = self.alloc(1)?;
-        self.emit(Op::ContextExit, normal_result, token, none, span)?;
+        self.emit_context_exit(token, none, is_async, span)?;
         let skip_exception_paths = self.emit(Op::Jump, 0, 0, 0, span)?;
 
         let exception = self.alloc(1)?;
@@ -471,10 +522,9 @@ impl Lower<'_> {
             });
         }
         self.emit(Op::PushException, exception, 0, 0, span)?;
-        let exit_result = self.alloc(1)?;
         let replacement = self.alloc(1)?;
         let exit_start = self.pc()?;
-        self.emit(Op::ContextExit, exit_result, token, exception, span)?;
+        let exit_result = self.emit_context_exit(token, exception, is_async, span)?;
         let suppressed = self.emit(Op::JumpTrue, exit_result, 0, 0, span)?;
         let exit_end = self.pc()?;
         self.emit(Op::ClearException, 0, 0, 0, span)?;
@@ -824,7 +874,11 @@ impl Lower<'_> {
                     self.patch(skip_exception_paths, self.pc()?);
                 }
             }
-            StmtKind::With { items, body } => self.lower_with(items, body, s)?,
+            StmtKind::With { items, body } => self.lower_with(items, body, false, s)?,
+            StmtKind::AsyncWith { items, body } => {
+                debug_assert!(self.scope.coroutine);
+                self.lower_with(items, body, true, s)?;
+            }
             StmtKind::If(test, yes, no) => {
                 let r = self.expr(test)?;
                 let branch = self.emit(Op::JumpFalse, r, 0, 0, s)?;
