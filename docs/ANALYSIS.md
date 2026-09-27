@@ -374,7 +374,20 @@ generator code'u Cranelift'e verilmez ve JIT çağıran kod generic sınırdan
 interpreter'a geçer. Ayrıntılar [ADR 0074](adr/0074-async-generator-protocol.md)
 dosyasındadır.
 
-Event-loop/future/task scheduling ve cancellation bu dilime dahil değildir.
+Tonic-owned tek thread event loop, Future/Task await state'i, deterministik
+timer, FIFO scheduling ve cancellation ADR 0075'te tanımlanan native `asyncio`
+modülüyle sağlanır. Scheduler kökleri moving GC'ye açıkça bildirilir ve coroutine
+resume yolu interpreter state machine'ini kullanır.
+
+Bytecode v21, Python karşılaştırma gramerinin kalan kimlik ve üyelik işlemlerini
+`IS`, `IS_NOT`, `CONTAINS` ve `NOT_CONTAINS` opcode'larıyla temsil eder. Kimlik
+opaque logical `Value` sözcüklerini karşılaştırır; native adres gözlenmez ve
+Cranelift bu işlemi tahsissiz üretir. Üyelik önce `__contains__`, sonra exact
+native string/container yolları, ardından `__iter__`/`__next__` ve tam eşitlik
+protokolü sırasını izler. Kullanıcı çağrılarının tümü askıya alınabilir ve
+continuation state'i precise GC köküdür. Genel üyelik opcode'ları Cranelift'te
+desteklenmeyen-op sınırından interpreter'a düşer. Ayrıntılar
+[ADR 0076](adr/0076-identity-and-membership.md) dosyasındadır.
 
 ## Uygulama sırası ve kabul kapıları
 

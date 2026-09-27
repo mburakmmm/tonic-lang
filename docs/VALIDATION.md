@@ -421,6 +421,16 @@ JIT guard miss sonrası exact-PC continuation yolu kapsanır. Debug/release work
 clippy ve interpreter/JIT × normal/stress-GC differential matrisinin sekiz koşusu
 Python 3.14.6 ile eşleşmiştir.
 
+Kimlik ve üyelik karşılaştırmaları aşamasında toplam 329 Rust testi ile 311
+stdout ve 164 exception differential vakasına ulaşıldı. Parser/compiler/verifier
+testleri bytecode v21 `IS`, `IS_NOT`, `CONTAINS` ve `NOT_CONTAINS` operandlarını;
+runtime testleri native container hızlı yollarını, suspending `__contains__`,
+truthiness, iterator ve equality continuation'larını, metaclass dispatch'ini ve
+moving stress-GC köklerini doğrular. Cranelift `is`/`is not` işlemlerini doğrudan
+logical `Value` karşılaştırmasıyla üretir; genel üyelik açık desteklenmeyen-op
+sınırından interpreter'a düşer. Debug/release × interpreter/JIT × normal/stress-GC
+differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.
 C ABI header/smoke ve guarded callback testleri vardır,

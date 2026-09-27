@@ -749,6 +749,14 @@ enum ReturnAction {
     DictPairStart(DictConstruction),
     DictPairIteratorStart(DictConstruction),
     DictPairNext(DictPairConstruction),
+    MembershipContains {
+        negate: bool,
+    },
+    MembershipIterStart {
+        needle: Value,
+        negate: bool,
+    },
+    MembershipNext(Membership),
     Length,
     Truth {
         protocol: TruthProtocol,
@@ -887,6 +895,13 @@ pub(super) enum EqualityAction {
         outer: Box<EqualityAction>,
     },
     SequenceOrder(SequenceOrder),
+    Membership(Membership),
+}
+#[derive(Clone)]
+pub(super) struct Membership {
+    needle: Value,
+    iterator: Value,
+    negate: bool,
 }
 #[derive(Clone)]
 pub(super) struct SequenceOrder {
@@ -1230,6 +1245,7 @@ impl ReturnAction {
             | Self::Close
             | Self::ExpandIterableStart(_)
             | Self::Length
+            | Self::MembershipContains { .. }
             | Self::Import(_)
             | Self::NamespaceLookup { cell: None, .. }
             | Self::Setter => {}
@@ -1314,6 +1330,8 @@ impl ReturnAction {
             | Self::DictPairStart(state)
             | Self::DictPairIteratorStart(state) => state.trace(visit),
             Self::DictPairNext(state) => state.trace(visit),
+            Self::MembershipIterStart { needle, .. } => visit(*needle),
+            Self::MembershipNext(state) => state.trace(visit),
             Self::Truth { action, .. } => action.trace(visit),
             Self::Initializer(v) | Self::MetaclassInit(v) => visit(*v),
             Self::New { class, arguments } => {
@@ -1416,6 +1434,7 @@ impl EqualityAction {
             Self::DictCandidate { state, .. } => state.comparison_depth,
             Self::DictEntries { depth, .. } => *depth,
             Self::SequenceOrder(state) => state.depth,
+            Self::Membership(_) => 0,
         }
     }
 
@@ -1452,7 +1471,14 @@ impl EqualityAction {
                     .copied()
                     .for_each(visit);
             }
+            Self::Membership(state) => state.trace(visit),
         }
+    }
+}
+impl Membership {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.needle);
+        visit(self.iterator);
     }
 }
 impl BinaryCompletion {
@@ -3506,7 +3532,13 @@ impl Vm {
     fn validate_iterator(&self, value: Value) -> Result<()> {
         if self.heap.is_iterator(value)
             || self.heap.is_generator(value)
-            || self.heap.special_method_call(value, "__next__")?.is_some()
+            || if matches!(self.heap.get(value), Ok(Object::Class(_))) {
+                self.heap
+                    .metaclass_method_call(value, "__next__")?
+                    .is_some()
+            } else {
+                self.heap.special_method_call(value, "__next__")?.is_some()
+            }
         {
             Ok(())
         } else {
@@ -4288,6 +4320,29 @@ impl Vm {
                     }
                     return Ok(true);
                 }
+                if let ReturnAction::MembershipNext(state) = &frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "membership continuation has no destination",
+                        )
+                    })?;
+                    let state = state.clone();
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.pending_exception = None;
+                    self.finish_membership(destination, false, state.negate)?;
+                    return Ok(true);
+                }
                 if let ReturnAction::DictPairNext(state) = &frame.action {
                     let destination = frame.destination.ok_or_else(|| {
                         Diagnostic::new(
@@ -4683,6 +4738,22 @@ impl Vm {
                             self.invoke_order_comparison(p, left, right, a, (op, 0), output)?;
                         }
                     }
+                    Op::Is | Op::IsNot => {
+                        let same = self.read(b)? == self.read(c)?;
+                        self.registers[a] = Value::bool(if op == Op::IsNot { !same } else { same });
+                    }
+                    Op::Contains | Op::NotContains => {
+                        let needle = self.read(b)?;
+                        let container = self.read(c)?;
+                        self.invoke_membership(
+                            p,
+                            needle,
+                            container,
+                            a,
+                            op == Op::NotContains,
+                            output,
+                        )?;
+                    }
                     Op::Neg | Op::Pos | Op::Invert => {
                         let kind = match op {
                             Op::Neg => UnaryProtocolKind::Neg,
@@ -4969,6 +5040,9 @@ impl Vm {
                         let mut dict_pair_start = None;
                         let mut dict_pair_iterator_start = None;
                         let mut dict_pair_next = None;
+                        let mut membership_contains = None;
+                        let mut membership_iter_start = None;
+                        let mut membership_next = None;
                         let mut binary_protocol = None;
                         let mut binary_result = None;
                         let mut unary_protocol = None;
@@ -5076,6 +5150,15 @@ impl Vm {
                             ReturnAction::DictPairNext(mut state) => {
                                 state.items.push(value);
                                 dict_pair_next = Some(state);
+                            }
+                            ReturnAction::MembershipContains { negate } => {
+                                membership_contains = Some(negate);
+                            }
+                            ReturnAction::MembershipIterStart { needle, negate } => {
+                                membership_iter_start = Some((needle, value, negate));
+                            }
+                            ReturnAction::MembershipNext(state) => {
+                                membership_next = Some((state, value));
                             }
                             ReturnAction::Length => length_result = Some(value),
                             ReturnAction::Truth { protocol, action } => {
@@ -5255,6 +5338,9 @@ impl Vm {
                             || dict_pair_start.is_some()
                             || dict_pair_iterator_start.is_some()
                             || dict_pair_next.is_some()
+                            || membership_contains.is_some()
+                            || membership_iter_start.is_some()
+                            || membership_next.is_some()
                             || binary_protocol.is_some()
                             || binary_result.is_some()
                             || unary_protocol.is_some()
@@ -5266,6 +5352,31 @@ impl Vm {
                             self.registers[dest] = value;
                             if let Some((protocol, action)) = finish_truth {
                                 self.finish_truth(p, dest, value, protocol, action, output)?;
+                            } else if let Some(negate) = membership_contains {
+                                self.invoke_truth(
+                                    p,
+                                    value,
+                                    dest,
+                                    if negate {
+                                        TruthAction::Not
+                                    } else {
+                                        TruthAction::Return
+                                    },
+                                    output,
+                                )?;
+                            } else if let Some((needle, iterator, negate)) = membership_iter_start {
+                                self.finish_membership_iter(
+                                    p, dest, needle, iterator, negate, output,
+                                )?;
+                            } else if let Some((state, item)) = membership_next {
+                                self.invoke_equality(
+                                    p,
+                                    item,
+                                    state.needle,
+                                    dest,
+                                    EqualityAction::Membership(state),
+                                    output,
+                                )?;
                             } else if let Some(value) = length_result {
                                 self.finish_length(p, dest, value, output)?;
                             } else if let Some((negate, completion)) = binary_result {

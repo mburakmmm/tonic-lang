@@ -692,7 +692,7 @@ impl Adapter {
             py::Operator::MatMult => return Err(unsupported(s, "matrix multiplication")),
         })
     }
-    fn compare(op: py::CmpOp, s: Span) -> Result<CompareOp> {
+    fn compare(op: py::CmpOp, _s: Span) -> Result<CompareOp> {
         Ok(match op {
             py::CmpOp::Eq => CompareOp::Equal,
             py::CmpOp::NotEq => CompareOp::NotEqual,
@@ -700,7 +700,10 @@ impl Adapter {
             py::CmpOp::LtE => CompareOp::LessEqual,
             py::CmpOp::Gt => CompareOp::Greater,
             py::CmpOp::GtE => CompareOp::GreaterEqual,
-            _ => return Err(unsupported(s, "comparison operator")),
+            py::CmpOp::Is => CompareOp::Is,
+            py::CmpOp::IsNot => CompareOp::IsNot,
+            py::CmpOp::In => CompareOp::In,
+            py::CmpOp::NotIn => CompareOp::NotIn,
         })
     }
 }

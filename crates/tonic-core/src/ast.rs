@@ -208,4 +208,8 @@ pub enum CompareOp {
     LessEqual,
     Greater,
     GreaterEqual,
+    Is,
+    IsNot,
+    In,
+    NotIn,
 }

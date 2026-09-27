@@ -1133,6 +1133,63 @@ fn negative_division() {
 fn floats_and_exact_mixed_comparisons() {
     assert_eq!(output("print(1.5+2.5, -7.0//3.0, -7.0%3.0)\nprint(9007199254740993 == 9007199254740992.0, 9007199254740993 > 9007199254740992.0)\n"),"4.0 -3.0 2.0\nFalse True\n");
 }
+
+#[test]
+fn identity_and_membership_cover_native_custom_and_suspending_paths() {
+    let source = r#"shared=[1]
+alias=shared
+print(shared is alias,shared is not [1],None is None)
+print(2 in [1,2,3],4 not in (1,2,3),'bc' in 'abcd','x' in {'x':1},2 in range(4))
+class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        print('truth',self.value)
+        return self.value
+class Container:
+    def __contains__(self,item):
+        print('contains',item)
+        return Truth(item==7)
+print(7 in Container(),8 not in Container())
+class Needle:
+    def __eq__(self,item):
+        print('equal',item)
+        return item==2
+def values():
+    yield 1
+    yield 2
+    yield 3
+print(Needle() in values())
+class Iterator:
+    def __init__(self): self.current=0
+    def __iter__(self): return self
+    def __next__(self):
+        self.current+=1
+        if self.current>2: raise StopIteration
+        return self.current
+print(3 not in Iterator())
+class Meta(type):
+    def __contains__(cls,item): return item==cls.answer
+class TypeContainer(metaclass=Meta):
+    answer=9
+print(9 in TypeContainer,8 not in TypeContainer)"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"True True True\nTrue True True True True\ncontains 7\ntruth True\ncontains 8\ntruth False\nTrue True\nequal 1\nequal 2\nTrue\nTrue\nTrue True\n",
+    );
+
+    for invalid in ["1 in 2", "1 in '123'"] {
+        let program = compile(invalid, "invalid-membership").unwrap();
+        for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+            let mut vm = Vm::new().unwrap();
+            vm.execution_mode = mode;
+            vm.gc_interval = Some(1);
+            assert_eq!(
+                vm.run(&program, &mut Vec::new()).unwrap_err().kind,
+                "TypeError"
+            );
+        }
+    }
+}
 #[test]
 fn runtime_errors_have_spans() {
     let e = error("def f():\n    return 1//0\nf()\n");

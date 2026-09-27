@@ -103,6 +103,10 @@ sonra alınır.
       sınıflarda implicit unhashable kuralı; collision-aware dict lookup/mutation/
       constructor/merge ve list/tuple/dict/slice içi suspending equality ile
       lexicographic sequence comparison, precise roots ve JIT exact-PC deopt.
+    - [x] Bytecode v21 `is`/`is not` ve `in`/`not in`; Cranelift'te tahsissiz
+      logical-Value kimlik karşılaştırması, native container hızlı yolları,
+      suspending `__contains__`/iterator/equality zinciri, metaclass dispatch'i,
+      precise continuation roots ve üyelik için güvenli interpreter fallback'i.
 - [x] General module resolver/loader, Python kaynak modülleri, circular imports, versioned globals.
   - [x] Bytecode v14 module table, disjoint private global slotları, code/symbol
     relocation ve verifier sahiplik/aralık kontrolleri.
@@ -128,7 +132,7 @@ sonra alınır.
   - [x] Bytecode v12 `raise ... from ...`; explicit/implicit cause-context ve
     suppression state'i, GC-traced managed traceback nesnesi, `__traceback__`
     erişimi ve context-manager traceback aktarımı.
-- [ ] Generators, yield/from, coroutine/async, suspended frame roots.
+- [x] Generators, yield/from, coroutine/async, suspended frame roots.
   - [x] Bytecode v15 `YIELD`, generator function çağrısında tembel frame oluşturma,
     `next`/`iter`/`send`/tek-argüman `throw`/`close`, dönüş değerli temel
     `yield from`, PEP 479 sınırı ve suspended register/cell/exception GC kökleri.

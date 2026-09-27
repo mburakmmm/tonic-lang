@@ -1360,5 +1360,9 @@ fn compare(op: CompareOp) -> Op {
         CompareOp::LessEqual => Op::Le,
         CompareOp::Greater => Op::Gt,
         CompareOp::GreaterEqual => Op::Ge,
+        CompareOp::Is => Op::Is,
+        CompareOp::IsNot => Op::IsNot,
+        CompareOp::In => Op::Contains,
+        CompareOp::NotIn => Op::NotContains,
     }
 }

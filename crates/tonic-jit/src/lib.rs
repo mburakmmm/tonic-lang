@@ -1341,6 +1341,24 @@ pub fn compile_with_execution_profile(
                     store(&mut builder, registers, instruction.a, result);
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
+                Op::Is | Op::IsNot => {
+                    let left = load(&mut builder, registers, instruction.b);
+                    let right = load(&mut builder, registers, instruction.c);
+                    let condition = builder.ins().icmp(
+                        if op == Op::Is {
+                            IntCC::Equal
+                        } else {
+                            IntCC::NotEqual
+                        },
+                        left,
+                        right,
+                    );
+                    let yes = builder.ins().iconst(types::I64, VALUE_TRUE);
+                    let no = builder.ins().iconst(types::I64, VALUE_FALSE);
+                    let result = builder.ins().select(condition, yes, no);
+                    store(&mut builder, registers, instruction.a, result);
+                    fallthrough(&mut builder, &blocks, pc, registers);
+                }
                 Op::Not => {
                     let raw = load(&mut builder, registers, instruction.b);
                     let (valid, truth) = immediate_truth(&mut builder, raw);
@@ -1749,7 +1767,11 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
             | Op::Lt
             | Op::Le
             | Op::Gt
-            | Op::Ge => {
+            | Op::Ge
+            | Op::Is
+            | Op::IsNot
+            | Op::Contains
+            | Op::NotContains => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 register(pc, instruction.c)?;
@@ -2272,7 +2294,7 @@ fn analyze_float_execution(
                 }
                 after[instruction.a as usize] = false;
             }
-            Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
+            Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Is | Op::IsNot => {
                 if is_float(instruction.b) || is_float(instruction.c) {
                     return Ok(None);
                 }
@@ -2437,6 +2459,8 @@ fn validate_supported(
                 | Op::Le
                 | Op::Gt
                 | Op::Ge
+                | Op::Is
+                | Op::IsNot
                 | Op::Jump
                 | Op::JumpFalse
                 | Op::JumpTrue
@@ -3645,6 +3669,49 @@ mod tests {
             Op::try_from(code.instructions[pc].opcode).unwrap(),
             Op::Return
         );
+    }
+
+    #[test]
+    fn identity_comparisons_are_native_and_membership_falls_back() {
+        for (source, same, different) in [
+            (
+                "def compare(a,b):\n    return a is b",
+                VALUE_TRUE,
+                VALUE_FALSE,
+            ),
+            (
+                "def compare(a,b):\n    return a is not b",
+                VALUE_FALSE,
+                VALUE_TRUE,
+            ),
+        ] {
+            let program = function(source);
+            let code = &program.program().code[1];
+            let compiled = compile(code).unwrap();
+            let mut registers = vec![VALUE_UNBOUND; code.registers as usize];
+            registers[0] = 0x2222_2220;
+            registers[1] = 0x2222_2220;
+            let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+                panic!("identity comparison unexpectedly deoptimized");
+            };
+            assert_eq!(value, same as u64);
+
+            registers[1] = 0x3333_3330;
+            let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+                panic!("identity comparison unexpectedly deoptimized");
+            };
+            assert_eq!(value, different as u64);
+        }
+
+        let program = function("def contains(value,items):\n    return value in items");
+        let code = &program.program().code[1];
+        assert!(matches!(
+            compile(code),
+            Err(Error::Unsupported(Unsupported {
+                opcode: Some(Op::Contains),
+                ..
+            }))
+        ));
     }
 
     #[test]

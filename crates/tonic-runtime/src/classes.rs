@@ -179,6 +179,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__le__"
                 | "__gt__"
                 | "__ge__"
+                | "__contains__"
                 | "__neg__"
                 | "__pos__"
                 | "__abs__"

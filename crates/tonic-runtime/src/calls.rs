@@ -4362,6 +4362,212 @@ impl Vm {
         self.invoke_equality_fallback(p, left, right, destination, action, output)
     }
 
+    pub(super) fn invoke_membership(
+        &mut self,
+        p: &Program,
+        needle: Value,
+        container: Value,
+        destination: usize,
+        negate: bool,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if let Some(call) = self.operator_method_call(container, "__contains__")? {
+            let depth = self.frames.len();
+            self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [needle, Value::UNBOUND, Value::UNBOUND],
+                    count: 1,
+                },
+                output,
+            )?;
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("membership protocol frame")
+                    .action = super::ReturnAction::MembershipContains { negate };
+            } else {
+                let value = self.registers[destination];
+                self.invoke_truth(
+                    p,
+                    value,
+                    destination,
+                    if negate {
+                        super::TruthAction::Not
+                    } else {
+                        super::TruthAction::Return
+                    },
+                    output,
+                )?;
+            }
+            return Ok(());
+        }
+        let native_container = self.heap.native_value(container);
+        if let Ok(Object::Str(text)) = self.heap.get(native_container) {
+            let native_needle = self.heap.native_value(needle);
+            let fragment = match self.heap.get(native_needle) {
+                Ok(Object::Str(fragment)) => fragment,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "string membership requires a string left operand",
+                    ));
+                }
+            };
+            self.registers[destination] = Value::bool(text.contains(fragment) != negate);
+            return Ok(());
+        }
+        match self.heap.iterator(container) {
+            Ok(iterator) => {
+                self.continue_membership(
+                    p,
+                    destination,
+                    super::Membership {
+                        needle,
+                        iterator,
+                        negate,
+                    },
+                    output,
+                )?;
+            }
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.operator_method_call(container, "__iter__")? else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "right operand is not iterable",
+                    ));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("membership __iter__ frame")
+                        .action = super::ReturnAction::MembershipIterStart { needle, negate };
+                } else {
+                    let iterator = self.registers[destination];
+                    self.finish_membership_iter(p, destination, needle, iterator, negate, output)?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_membership_iter(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        needle: Value,
+        iterator: Value,
+        negate: bool,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        self.validate_iterator(iterator)?;
+        self.continue_membership(
+            p,
+            destination,
+            super::Membership {
+                needle,
+                iterator,
+                negate,
+            },
+            output,
+        )
+    }
+
+    pub(super) fn continue_membership(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: super::Membership,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let item = if let Some(resumable) = self.iterator_resumable(state.iterator) {
+            match self.resume_generator(
+                p,
+                resumable,
+                destination,
+                Value::NONE,
+                super::ReturnAction::MembershipNext(state.clone()),
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
+                    return self.finish_membership(destination, false, state.negate);
+                }
+                Err(error) => return Err(error),
+            }
+        } else if self.heap.is_iterator(state.iterator) {
+            let Some(item) = self.heap.next(state.iterator)? else {
+                return self.finish_membership(destination, false, state.negate);
+            };
+            item
+        } else {
+            let Some(call) = self.operator_method_call(state.iterator, "__next__")? else {
+                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+            };
+            let depth = self.frames.len();
+            match self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [Value::UNBOUND; 3],
+                    count: 0,
+                },
+                output,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
+                    return self.finish_membership(destination, false, state.negate);
+                }
+                Err(error) => return Err(error),
+            }
+            if self.frames.len() > depth {
+                self.frames
+                    .last_mut()
+                    .expect("membership __next__ frame")
+                    .action = super::ReturnAction::MembershipNext(state);
+                return Ok(());
+            }
+            self.registers[destination]
+        };
+        self.invoke_equality(
+            p,
+            item,
+            state.needle,
+            destination,
+            super::EqualityAction::Membership(state),
+            output,
+        )
+    }
+
+    pub(super) fn finish_membership(
+        &mut self,
+        destination: usize,
+        found: bool,
+        negate: bool,
+    ) -> Result<()> {
+        self.registers[destination] = Value::bool(found != negate);
+        Ok(())
+    }
+
     pub(super) fn invoke_equality_fallback(
         &mut self,
         p: &Program,
@@ -4686,6 +4892,13 @@ impl Vm {
                         (state.op, state.depth + 1),
                         output,
                     )
+                }
+            }
+            super::EqualityAction::Membership(state) => {
+                if equal {
+                    self.finish_membership(destination, true, state.negate)
+                } else {
+                    self.continue_membership(p, destination, state, output)
                 }
             }
         }

@@ -318,6 +318,29 @@ async def main():
     print(await first,await second)
 print(asyncio.run(main()))
 ''',
+'''shared=[1]
+alias=shared
+print(shared is alias,shared is not [1],None is None)
+print(2 in [1,2,3],4 not in (1,2,3),'bc' in 'abcd','x' in {'x':1},2 in range(4))
+class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self): return self.value
+class Container:
+    def __contains__(self,item): return Truth(item==7)
+print(7 in Container(),8 not in Container())
+class Needle:
+    def __eq__(self,item): return item==2
+def values():
+    yield 1
+    yield 2
+    yield 3
+print(Needle() in values())
+class Meta(type):
+    def __contains__(cls,item): return item==cls.answer
+class TypeContainer(metaclass=Meta):
+    answer=9
+print(9 in TypeContainer,8 not in TypeContainer)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -357,4 +380,6 @@ ERRORS = [
 ('async def bad():\n    yield 1\n    raise StopAsyncIteration("escaped")\ngenerator=bad()\ntry:\n    generator.__anext__().send(None)\nexcept StopIteration:\n    pass\ngenerator.__anext__().send(None)', 'RuntimeError'),
 ('async def bad():\n    yield 1\n    return 2', 'SyntaxError'),
 ('async def bad():\n    yield from []', 'SyntaxError'),
+('1 in 2', 'TypeError'),
+('1 in "123"', 'TypeError'),
 ]

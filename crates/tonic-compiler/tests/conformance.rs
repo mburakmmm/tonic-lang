@@ -1,6 +1,6 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
-    ast::{ExprKind, StmtKind},
+    ast::{CompareOp, ExprKind, StmtKind},
     bytecode::Op,
 };
 #[test]
@@ -39,6 +39,32 @@ fn valid_python_forms() {
         "import package.child\nimport package.child as child\nfrom package import value as answer",
     ] {
         compile(src, "x").unwrap();
+    }
+}
+
+#[test]
+fn identity_and_membership_comparisons_are_tonic_owned() {
+    let source = "result = left is right is not other in values not in excluded";
+    let ast = parse(source, "comparisons").unwrap();
+    let StmtKind::Assign(_, expression) = &ast.body[0].kind else {
+        panic!("comparison assignment")
+    };
+    let ExprKind::Compare(_, pairs) = &expression.kind else {
+        panic!("comparison expression")
+    };
+    assert!(matches!(pairs[0].0, CompareOp::Is));
+    assert!(matches!(pairs[1].0, CompareOp::IsNot));
+    assert!(matches!(pairs[2].0, CompareOp::In));
+    assert!(matches!(pairs[3].0, CompareOp::NotIn));
+
+    let program = compile(source, "comparisons").unwrap();
+    let operations = program.program().code[0]
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    for expected in [Op::Is, Op::IsNot, Op::Contains, Op::NotContains] {
+        assert!(operations.contains(&expected), "missing {expected:?}");
     }
 }
 

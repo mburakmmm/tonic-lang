@@ -54,6 +54,25 @@ fn valid_program() {
 }
 
 #[test]
+fn identity_and_membership_operands_are_verified() {
+    for op in [Op::Is, Op::IsNot, Op::Contains, Op::NotContains] {
+        let mut valid = program();
+        valid.code[0]
+            .instructions
+            .insert(1, Instr::new(op, 0, 0, 1));
+        valid.code[0].spans.insert(1, Span::default());
+        valid.clone().verify().unwrap();
+
+        let mut invalid = valid;
+        invalid.code[0].instructions[1].c = invalid.code[0].registers;
+        assert!(
+            invalid.verify().is_err(),
+            "{op:?} accepted an invalid register"
+        );
+    }
+}
+
+#[test]
 fn yield_requires_generator_function_metadata() {
     let mut generator = program();
     generator.modules[0].code_count = 2;
