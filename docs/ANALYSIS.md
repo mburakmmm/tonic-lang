@@ -354,8 +354,27 @@ Coroutine code'u JIT adayı olmadığı için async context manager suspend nokt
 interpreter frame'inde kesin köklerle tutulur; JIT çağıran kod generic sınırdan
 aynı güvenli fallback'e geçer.
 
-Async generator ve event-loop/future/task protokolleri bu dilime dahil değildir. Ayrıntı
-[ADR 0073](adr/0073-coroutine-await-state-machine.md) dosyasındadır.
+Bytecode v20, async-generator kullanıcı `yield` noktalarını coroutine içindeki
+`await` askılarından ayıran `ASYNC_YIELD` opcode'unu ekler. `CodeObject` üzerinde
+`generator && coroutine` birleşimi ayrı `async_generator` türünü seçer; normal
+çağrı gövdeyi çalıştırmadan suspended frame üretir. `__anext__` ve `asend` bir
+`async_generator_asend`, `athrow` ve `aclose` ise bir
+`async_generator_athrow` awaitable'ı döndürür. Bu tek kullanımlık nesneler sınıf,
+kaynak generator, operation, exception/traceback ve durumlarını precise trace
+kenarlarıyla tutar.
+
+Awaitable sürücüsü iç `await` tarafından verilen değerleri dış coroutine'e normal
+`YIELD` ile iletir; kullanıcı `ASYNC_YIELD` değeri ise mevcut await'i
+`StopIteration.value` üzerinden tamamlar. Doğal bitiş `StopAsyncIteration`, kaçan
+`StopIteration` veya `StopAsyncIteration` ise async-generator sınırında
+`RuntimeError` olur. `throw`/`close` aktif await delegesine iletilir;
+`GeneratorExit` sırasında değer veren generator reddedilir. Askıdaki async
+generator aynı collector-dışı logical-finalization kuyruğunu kullanır. Async
+generator code'u Cranelift'e verilmez ve JIT çağıran kod generic sınırdan
+interpreter'a geçer. Ayrıntılar [ADR 0074](adr/0074-async-generator-protocol.md)
+dosyasındadır.
+
+Event-loop/future/task scheduling ve cancellation bu dilime dahil değildir.
 
 ## Uygulama sırası ve kabul kapıları
 

@@ -1,8 +1,9 @@
 //! Call binding: ordinary calls read a register window; only actual expansion
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
-    ArgumentExpansion, DictConstruction, DictConstructionStart, DictPairConstruction, Frame,
-    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, Vm,
+    ArgumentExpansion, AsyncGeneratorCompletion, DictConstruction, DictConstructionStart,
+    DictPairConstruction, Frame, IterableCollection, IterableCollectionKind, NativeSubclassFinish,
+    ReturnAction, Vm,
 };
 use crate::{
     dict::Dict,
@@ -10,7 +11,7 @@ use crate::{
         hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish, sequence_start,
         sequence_step,
     },
-    heap::{Builtin, GeneratorState, Object},
+    heap::{AsyncGeneratorAwaitState, AsyncGeneratorOperation, Builtin, GeneratorState, Object},
     native::Context,
     value::Value,
 };
@@ -185,6 +186,192 @@ fn native_hash_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
 }
 
 impl Vm {
+    fn alloc_async_generator_awaitable(
+        &mut self,
+        generator: Value,
+        operation: AsyncGeneratorOperation,
+        class: Value,
+    ) -> Result<Value> {
+        self.heap.alloc(Object::AsyncGeneratorAwaitable {
+            class,
+            generator,
+            operation,
+            state: AsyncGeneratorAwaitState::Created,
+        })
+    }
+
+    fn drive_async_generator_awaitable(
+        &mut self,
+        p: &Program,
+        awaitable: Value,
+        destination: usize,
+        sent: Value,
+    ) -> Result<()> {
+        let (generator, operation, state) = self
+            .heap
+            .async_generator_awaitable(awaitable)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "TypeError",
+                    "async-generator awaitable descriptor requires an awaitable",
+                )
+            })?;
+        if state == AsyncGeneratorAwaitState::Completed {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "cannot reuse already awaited async-generator awaitable",
+            ));
+        }
+        let (resume_value, injected, closing) = if state == AsyncGeneratorAwaitState::Created {
+            match operation {
+                AsyncGeneratorOperation::Send(value) => (value, None, false),
+                AsyncGeneratorOperation::Throw {
+                    exception,
+                    traceback,
+                } => {
+                    self.heap.set_exception_traceback(exception, traceback)?;
+                    (Value::NONE, Some(exception), false)
+                }
+                AsyncGeneratorOperation::Close => {
+                    let diagnostic = Diagnostic::new("GeneratorExit", String::new());
+                    let exception = self.exception_from_diagnostic(&diagnostic)?;
+                    (Value::NONE, Some(exception), true)
+                }
+            }
+        } else {
+            (
+                sent,
+                None,
+                matches!(operation, AsyncGeneratorOperation::Close),
+            )
+        };
+        match self.heap.generator_state(generator) {
+            Some(GeneratorState::Completed) => {
+                self.heap.set_async_generator_await_state(
+                    awaitable,
+                    AsyncGeneratorAwaitState::Completed,
+                )?;
+                return if closing {
+                    Err(self.generator_stop_iteration(Value::NONE)?)
+                } else {
+                    Err(Diagnostic::new("StopAsyncIteration", String::new()))
+                };
+            }
+            Some(GeneratorState::Created) if closing => {
+                self.heap.complete_generator(generator)?;
+                self.heap.set_async_generator_await_state(
+                    awaitable,
+                    AsyncGeneratorAwaitState::Completed,
+                )?;
+                return Err(self.generator_stop_iteration(Value::NONE)?);
+            }
+            _ => {}
+        }
+        self.heap
+            .claim_async_generator_driver(generator, awaitable)?;
+        self.heap
+            .set_async_generator_await_state(awaitable, AsyncGeneratorAwaitState::Running)?;
+        let delegated = self.heap.generator_yield_from(generator).is_some();
+        if let Err(error) = self.resume_generator(
+            p,
+            generator,
+            destination,
+            resume_value,
+            ReturnAction::AsyncGeneratorDrive {
+                awaitable,
+                closing,
+                completion: AsyncGeneratorCompletion::Direct,
+            },
+        ) {
+            self.heap
+                .release_async_generator_driver(generator, awaitable)?;
+            self.heap
+                .set_async_generator_await_state(awaitable, AsyncGeneratorAwaitState::Completed)?;
+            return Err(error);
+        }
+        if let Some(exception) = injected {
+            if delegated {
+                self.frames
+                    .last_mut()
+                    .expect("delegating async-generator frame")
+                    .injected_exception = Some(exception);
+                return Ok(());
+            }
+            self.pending_exception = Some(exception);
+            return Err(self.exception_diagnostic(exception)?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn inject_async_generator_awaitable(
+        &mut self,
+        p: &Program,
+        awaitable: Value,
+        destination: usize,
+        exception: Value,
+        closing: bool,
+    ) -> Result<()> {
+        let (generator, _, state) =
+            self.heap
+                .async_generator_awaitable(awaitable)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "TypeError",
+                        "async-generator awaitable descriptor requires an awaitable",
+                    )
+                })?;
+        if state == AsyncGeneratorAwaitState::Completed {
+            if closing {
+                self.registers[destination] = Value::NONE;
+                return Ok(());
+            }
+            self.pending_exception = Some(exception);
+            return Err(self.exception_diagnostic(exception)?);
+        }
+        if closing && self.heap.generator_state(generator) == Some(GeneratorState::Created) {
+            self.heap.complete_generator(generator)?;
+            self.heap
+                .set_async_generator_await_state(awaitable, AsyncGeneratorAwaitState::Completed)?;
+            self.registers[destination] = Value::NONE;
+            return Ok(());
+        }
+        self.heap
+            .claim_async_generator_driver(generator, awaitable)?;
+        self.heap
+            .set_async_generator_await_state(awaitable, AsyncGeneratorAwaitState::Running)?;
+        let delegated = self.heap.generator_yield_from(generator).is_some();
+        if let Err(error) = self.resume_generator(
+            p,
+            generator,
+            destination,
+            Value::NONE,
+            ReturnAction::AsyncGeneratorDrive {
+                awaitable,
+                closing,
+                completion: if closing {
+                    AsyncGeneratorCompletion::CloseMethod
+                } else {
+                    AsyncGeneratorCompletion::Direct
+                },
+            },
+        ) {
+            self.heap
+                .release_async_generator_driver(generator, awaitable)?;
+            self.heap
+                .set_async_generator_await_state(awaitable, AsyncGeneratorAwaitState::Completed)?;
+            return Err(error);
+        }
+        if delegated {
+            self.frames
+                .last_mut()
+                .expect("delegating async-generator frame")
+                .injected_exception = Some(exception);
+            return Ok(());
+        }
+        self.pending_exception = Some(exception);
+        Err(self.exception_diagnostic(exception)?)
+    }
+
     pub(super) fn invoke(
         &mut self,
         p: &Program,
@@ -228,6 +415,26 @@ impl Vm {
         }
         self.pending_exception = Some(exception);
         Err(self.exception_diagnostic(exception)?)
+    }
+
+    fn finish_async_generator_throw(
+        &mut self,
+        generator: Value,
+        destination: usize,
+        exception: Value,
+        traceback: Option<Value>,
+    ) -> Result<()> {
+        let exception = self.normalize_raised_exception(exception)?;
+        self.heap.set_exception_traceback(exception, traceback)?;
+        self.registers[destination] = self.alloc_async_generator_awaitable(
+            generator,
+            AsyncGeneratorOperation::Throw {
+                exception,
+                traceback,
+            },
+            self.runtime_types.async_generator_athrow,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn invoke_target(
@@ -517,6 +724,458 @@ impl Vm {
                         coroutine,
                     })?;
                     return Ok(());
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorIter) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async_generator.__aiter__ expects no arguments",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_async_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator descriptor requires an async generator",
+                        ));
+                    }
+                    self.registers[destination] = generator;
+                    return Ok(());
+                }
+                if matches!(
+                    builtin,
+                    Builtin::AsyncGeneratorNext | Builtin::AsyncGeneratorSend
+                ) {
+                    let expected = if matches!(builtin, Builtin::AsyncGeneratorNext) {
+                        1
+                    } else {
+                        2
+                    };
+                    if args.keyword_count() != 0 || args.count() != expected {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            if expected == 1 {
+                                "async_generator.__anext__ expects no arguments"
+                            } else {
+                                "async_generator.asend expects one argument"
+                            },
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_async_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator descriptor requires an async generator",
+                        ));
+                    }
+                    let value = if expected == 1 {
+                        Value::NONE
+                    } else {
+                        args.positional(&self.registers, 1)
+                    };
+                    self.registers[destination] = self.alloc_async_generator_awaitable(
+                        generator,
+                        AsyncGeneratorOperation::Send(value),
+                        self.runtime_types.async_generator_asend,
+                    )?;
+                    return Ok(());
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorClose) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async_generator.aclose expects no arguments",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_async_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator descriptor requires an async generator",
+                        ));
+                    }
+                    self.registers[destination] = self.alloc_async_generator_awaitable(
+                        generator,
+                        AsyncGeneratorOperation::Close,
+                        self.runtime_types.async_generator_athrow,
+                    )?;
+                    return Ok(());
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorThrow) {
+                    if args.keyword_count() != 0 || !(2..=4).contains(&args.count()) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async_generator.athrow expects one to three exception arguments",
+                        ));
+                    }
+                    let generator = args.positional(&self.registers, 0);
+                    if !self.heap.is_async_generator(generator) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator descriptor requires an async generator",
+                        ));
+                    }
+                    let explicit = args.count() - 1;
+                    let type_or_exception = args.positional(&self.registers, 1);
+                    let value = (explicit >= 2).then(|| args.positional(&self.registers, 2));
+                    let traceback = (explicit == 3)
+                        .then(|| args.positional(&self.registers, 3))
+                        .and_then(|traceback| (traceback != Value::NONE).then_some(traceback));
+                    if traceback.is_some_and(|traceback| {
+                        !matches!(self.heap.get(traceback), Ok(Object::Traceback { .. }))
+                    }) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "throw traceback must be a traceback object or None",
+                        ));
+                    }
+                    if matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Exception { .. })
+                    ) || matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Instance { .. })
+                    ) && self.instance_check(
+                        type_or_exception,
+                        self.runtime_types.base_exception,
+                        false,
+                        0,
+                    )? {
+                        if value.is_some_and(|value| value != Value::NONE) {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "instance exception may not have a separate value",
+                            ));
+                        }
+                        return self.finish_async_generator_throw(
+                            generator,
+                            destination,
+                            type_or_exception,
+                            traceback,
+                        );
+                    }
+                    if !matches!(self.heap.get(type_or_exception), Ok(Object::Class(_)))
+                        || !self.instance_check(
+                            type_or_exception,
+                            self.runtime_types.base_exception,
+                            true,
+                            0,
+                        )?
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exceptions must derive from BaseException",
+                        ));
+                    }
+                    if let Some(value) = value {
+                        if self.instance_check(value, type_or_exception, false, 0)? {
+                            return self.finish_async_generator_throw(
+                                generator,
+                                destination,
+                                value,
+                                traceback,
+                            );
+                        }
+                    }
+                    let positional = match value {
+                        None | Some(Value::NONE) => Vec::new(),
+                        Some(value) => match self.heap.get(value) {
+                            Ok(Object::Tuple(values)) => values.clone(),
+                            _ => vec![value],
+                        },
+                    };
+                    let message = self.heap.exception_message(&positional)?;
+                    let stop_iteration_value = self
+                        .instance_check(
+                            type_or_exception,
+                            self.runtime_types.stop_iteration,
+                            true,
+                            0,
+                        )?
+                        .then_some(positional.first().copied().unwrap_or(Value::NONE));
+                    let instance = self.heap.alloc(Object::Exception {
+                        class: type_or_exception,
+                        message,
+                        arguments: positional.clone(),
+                        stop_iteration_value,
+                        attributes: Default::default(),
+                        cause: None,
+                        context: None,
+                        suppress_context: false,
+                        traceback: None,
+                    })?;
+                    let initializer = self.heap.class_lookup(type_or_exception, "__init__")?;
+                    if initializer.is_none_or(|initializer| {
+                        matches!(
+                            self.heap.get(initializer),
+                            Ok(Object::Builtin(Builtin::ObjectInit))
+                        )
+                    }) {
+                        return self.finish_async_generator_throw(
+                            generator,
+                            destination,
+                            instance,
+                            traceback,
+                        );
+                    }
+                    let depth = self.frames.len();
+                    self.invoke_target(
+                        p,
+                        initializer.expect("checked exception initializer"),
+                        destination,
+                        Arguments::Expanded(ExpandedArgs {
+                            receiver: Some(instance),
+                            positional,
+                            ..ExpandedArgs::default()
+                        }),
+                        output,
+                    )?;
+                    if self.frames.len() > depth {
+                        self.frames
+                            .last_mut()
+                            .expect("exception initializer frame")
+                            .action = ReturnAction::AsyncGeneratorThrowInit {
+                            generator,
+                            traceback,
+                            instance,
+                        };
+                        return Ok(());
+                    }
+                    if self.registers[destination] != Value::NONE {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exception __init__ must return None",
+                        ));
+                    }
+                    return self.finish_async_generator_throw(
+                        generator,
+                        destination,
+                        instance,
+                        traceback,
+                    );
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorAwait) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator awaitable expects no arguments",
+                        ));
+                    }
+                    let awaitable = args.positional(&self.registers, 0);
+                    if self.heap.async_generator_awaitable(awaitable).is_none() {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "descriptor requires an async-generator awaitable",
+                        ));
+                    }
+                    self.registers[destination] = awaitable;
+                    return Ok(());
+                }
+                if matches!(
+                    builtin,
+                    Builtin::AsyncGeneratorAwaitNext | Builtin::AsyncGeneratorAwaitSend
+                ) {
+                    let expected = if matches!(builtin, Builtin::AsyncGeneratorAwaitNext) {
+                        1
+                    } else {
+                        2
+                    };
+                    if args.keyword_count() != 0 || args.count() != expected {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator awaitable received invalid arguments",
+                        ));
+                    }
+                    let awaitable = args.positional(&self.registers, 0);
+                    let sent = if expected == 1 {
+                        Value::NONE
+                    } else {
+                        args.positional(&self.registers, 1)
+                    };
+                    return self.drive_async_generator_awaitable(p, awaitable, destination, sent);
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorAwaitClose) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator awaitable.close expects no arguments",
+                        ));
+                    }
+                    let awaitable = args.positional(&self.registers, 0);
+                    let diagnostic = Diagnostic::new("GeneratorExit", String::new());
+                    let exception = self.exception_from_diagnostic(&diagnostic)?;
+                    return self.inject_async_generator_awaitable(
+                        p,
+                        awaitable,
+                        destination,
+                        exception,
+                        true,
+                    );
+                }
+                if matches!(builtin, Builtin::AsyncGeneratorAwaitThrow) {
+                    if args.keyword_count() != 0 || !(2..=4).contains(&args.count()) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "async-generator awaitable.throw expects one to three exception arguments",
+                        ));
+                    }
+                    let awaitable = args.positional(&self.registers, 0);
+                    if self.heap.async_generator_awaitable(awaitable).is_none() {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "descriptor requires an async-generator awaitable",
+                        ));
+                    }
+                    let explicit = args.count() - 1;
+                    let type_or_exception = args.positional(&self.registers, 1);
+                    let value = (explicit >= 2).then(|| args.positional(&self.registers, 2));
+                    let traceback = (explicit == 3)
+                        .then(|| args.positional(&self.registers, 3))
+                        .and_then(|traceback| (traceback != Value::NONE).then_some(traceback));
+                    if traceback.is_some_and(|traceback| {
+                        !matches!(self.heap.get(traceback), Ok(Object::Traceback { .. }))
+                    }) {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "throw traceback must be a traceback object or None",
+                        ));
+                    }
+                    if matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Exception { .. })
+                    ) || matches!(
+                        self.heap.get(type_or_exception),
+                        Ok(Object::Instance { .. })
+                    ) && self.instance_check(
+                        type_or_exception,
+                        self.runtime_types.base_exception,
+                        false,
+                        0,
+                    )? {
+                        if value.is_some_and(|value| value != Value::NONE) {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "instance exception may not have a separate value",
+                            ));
+                        }
+                        let exception = self.normalize_raised_exception(type_or_exception)?;
+                        self.heap.set_exception_traceback(exception, traceback)?;
+                        return self.inject_async_generator_awaitable(
+                            p,
+                            awaitable,
+                            destination,
+                            exception,
+                            false,
+                        );
+                    }
+                    if !matches!(self.heap.get(type_or_exception), Ok(Object::Class(_)))
+                        || !self.instance_check(
+                            type_or_exception,
+                            self.runtime_types.base_exception,
+                            true,
+                            0,
+                        )?
+                    {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exceptions must derive from BaseException",
+                        ));
+                    }
+                    if let Some(value) = value {
+                        if self.instance_check(value, type_or_exception, false, 0)? {
+                            let exception = self.normalize_raised_exception(value)?;
+                            self.heap.set_exception_traceback(exception, traceback)?;
+                            return self.inject_async_generator_awaitable(
+                                p,
+                                awaitable,
+                                destination,
+                                exception,
+                                false,
+                            );
+                        }
+                    }
+                    let positional = match value {
+                        None | Some(Value::NONE) => Vec::new(),
+                        Some(value) => match self.heap.get(value) {
+                            Ok(Object::Tuple(values)) => values.clone(),
+                            _ => vec![value],
+                        },
+                    };
+                    let message = self.heap.exception_message(&positional)?;
+                    let stop_iteration_value = self
+                        .instance_check(
+                            type_or_exception,
+                            self.runtime_types.stop_iteration,
+                            true,
+                            0,
+                        )?
+                        .then_some(positional.first().copied().unwrap_or(Value::NONE));
+                    let instance = self.heap.alloc(Object::Exception {
+                        class: type_or_exception,
+                        message,
+                        arguments: positional.clone(),
+                        stop_iteration_value,
+                        attributes: Default::default(),
+                        cause: None,
+                        context: None,
+                        suppress_context: false,
+                        traceback: None,
+                    })?;
+                    let initializer = self.heap.class_lookup(type_or_exception, "__init__")?;
+                    if initializer.is_none_or(|initializer| {
+                        matches!(
+                            self.heap.get(initializer),
+                            Ok(Object::Builtin(Builtin::ObjectInit))
+                        )
+                    }) {
+                        let exception = self.normalize_raised_exception(instance)?;
+                        self.heap.set_exception_traceback(exception, traceback)?;
+                        return self.inject_async_generator_awaitable(
+                            p,
+                            awaitable,
+                            destination,
+                            exception,
+                            false,
+                        );
+                    }
+                    let depth = self.frames.len();
+                    self.invoke_target(
+                        p,
+                        initializer.expect("checked exception initializer"),
+                        destination,
+                        Arguments::Expanded(ExpandedArgs {
+                            receiver: Some(instance),
+                            positional,
+                            ..ExpandedArgs::default()
+                        }),
+                        output,
+                    )?;
+                    if self.frames.len() > depth {
+                        self.frames
+                            .last_mut()
+                            .expect("exception initializer frame")
+                            .action = ReturnAction::AsyncGeneratorAwaitThrowInit {
+                            awaitable,
+                            traceback,
+                            instance,
+                        };
+                        return Ok(());
+                    }
+                    if self.registers[destination] != Value::NONE {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "exception __init__ must return None",
+                        ));
+                    }
+                    let exception = self.normalize_raised_exception(instance)?;
+                    self.heap.set_exception_traceback(exception, traceback)?;
+                    return self.inject_async_generator_awaitable(
+                        p,
+                        awaitable,
+                        destination,
+                        exception,
+                        false,
+                    );
                 }
                 if matches!(builtin, Builtin::GeneratorSend) {
                     if args.keyword_count() != 0 || args.count() != 2 {
@@ -4587,7 +5246,17 @@ impl Vm {
             | Builtin::GeneratorSend
             | Builtin::GeneratorThrow
             | Builtin::GeneratorClose
-            | Builtin::CoroutineAwait => {
+            | Builtin::CoroutineAwait
+            | Builtin::AsyncGeneratorIter
+            | Builtin::AsyncGeneratorNext
+            | Builtin::AsyncGeneratorSend
+            | Builtin::AsyncGeneratorThrow
+            | Builtin::AsyncGeneratorClose
+            | Builtin::AsyncGeneratorAwait
+            | Builtin::AsyncGeneratorAwaitNext
+            | Builtin::AsyncGeneratorAwaitSend
+            | Builtin::AsyncGeneratorAwaitThrow
+            | Builtin::AsyncGeneratorAwaitClose => {
                 unreachable!("iterator builtin has a suspending call path")
             }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),

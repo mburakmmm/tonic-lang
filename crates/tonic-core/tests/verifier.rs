@@ -109,9 +109,22 @@ fn await_requires_coroutine_metadata() {
     outside.code[0].instructions[0] = Instr::new(Op::GetAwaitable, 0, 1, 0);
     assert!(outside.verify().is_err());
 
-    let mut invalid = coroutine;
-    invalid.code[1].generator = true;
-    assert!(invalid.verify().is_err());
+    let mut async_generator = coroutine;
+    async_generator.code[1].generator = true;
+    async_generator.code[1]
+        .instructions
+        .insert(2, Instr::new(Op::AsyncYield, 0, 1, 0));
+    async_generator.code[1].spans.push(Span::default());
+    async_generator.verify().unwrap();
+
+    let mut outside = program();
+    outside.code[0].instructions[0] = Instr::new(Op::AsyncYield, 0, 1, 0);
+    assert!(outside.verify().is_err());
+
+    let mut coroutine_only = program();
+    coroutine_only.code[0].coroutine = true;
+    coroutine_only.code[0].instructions[0] = Instr::new(Op::AsyncYield, 0, 1, 0);
+    assert!(coroutine_only.verify().is_err());
 }
 
 #[test]

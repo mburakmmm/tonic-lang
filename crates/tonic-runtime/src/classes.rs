@@ -1286,7 +1286,17 @@ impl Heap {
                 | Builtin::GeneratorSend
                 | Builtin::GeneratorThrow
                 | Builtin::GeneratorClose
-                | Builtin::CoroutineAwait,
+                | Builtin::CoroutineAwait
+                | Builtin::AsyncGeneratorIter
+                | Builtin::AsyncGeneratorNext
+                | Builtin::AsyncGeneratorSend
+                | Builtin::AsyncGeneratorThrow
+                | Builtin::AsyncGeneratorClose
+                | Builtin::AsyncGeneratorAwait
+                | Builtin::AsyncGeneratorAwaitNext
+                | Builtin::AsyncGeneratorAwaitSend
+                | Builtin::AsyncGeneratorAwaitThrow
+                | Builtin::AsyncGeneratorAwaitClose,
             )) => DescriptorCall {
                 callable: value,
                 receiver: Some(descriptor),
@@ -1328,7 +1338,17 @@ impl Heap {
                 | Builtin::GeneratorSend
                 | Builtin::GeneratorThrow
                 | Builtin::GeneratorClose
-                | Builtin::CoroutineAwait,
+                | Builtin::CoroutineAwait
+                | Builtin::AsyncGeneratorIter
+                | Builtin::AsyncGeneratorNext
+                | Builtin::AsyncGeneratorSend
+                | Builtin::AsyncGeneratorThrow
+                | Builtin::AsyncGeneratorClose
+                | Builtin::AsyncGeneratorAwait
+                | Builtin::AsyncGeneratorAwaitNext
+                | Builtin::AsyncGeneratorAwaitSend
+                | Builtin::AsyncGeneratorAwaitThrow
+                | Builtin::AsyncGeneratorAwaitClose,
             )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
@@ -1450,6 +1470,16 @@ impl Heap {
                 return self.bind_descriptor(value, Some(owner), class);
             }
             Ok(Object::CoroutineIterator { class, .. }) => {
+                let class = *class;
+                if name == "__class__" {
+                    return Ok(class);
+                }
+                let Some(value) = self.class_lookup(class, name)? else {
+                    return Err(missing(name));
+                };
+                return self.bind_descriptor(value, Some(owner), class);
+            }
+            Ok(Object::AsyncGeneratorAwaitable { class, .. }) => {
                 let class = *class;
                 if name == "__class__" {
                     return Ok(class);

@@ -3,8 +3,8 @@ pub(crate) mod calls;
 use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
     heap::{
-        Builtin, GeneratorFrame, GeneratorKind, GeneratorState, Heap, Object, SuspendedGenerator,
-        TracebackEntry,
+        AsyncGeneratorAwaitState, Builtin, GeneratorFrame, GeneratorKind, GeneratorState, Heap,
+        Object, SuspendedGenerator, TracebackEntry,
     },
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
@@ -133,6 +133,35 @@ struct Frame {
     jit_attempted: bool,
     jit_resume: bool,
     jit_expanded_resume_depth: Option<usize>,
+}
+impl Frame {
+    fn set_yield_from_completion(&mut self, target: usize, pc: usize, iterator: Value) {
+        match &mut self.action {
+            ReturnAction::AsyncGeneratorDrive { completion, .. } => {
+                *completion = AsyncGeneratorCompletion::YieldFrom {
+                    target,
+                    pc,
+                    iterator,
+                };
+            }
+            action => {
+                *action = ReturnAction::YieldFrom {
+                    target,
+                    pc,
+                    iterator,
+                };
+            }
+        }
+    }
+
+    fn set_yield_from_close_completion(&mut self, exception: Value) {
+        match &mut self.action {
+            ReturnAction::AsyncGeneratorDrive { completion, .. } => {
+                *completion = AsyncGeneratorCompletion::YieldFromClose { exception };
+            }
+            action => *action = ReturnAction::YieldFromClose { exception },
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceModuleState {
@@ -610,6 +639,19 @@ struct FloatCallProfile {
     callee: Value,
     count: u8,
 }
+#[derive(Clone, Copy)]
+enum AsyncGeneratorCompletion {
+    Direct,
+    CloseMethod,
+    YieldFrom {
+        target: usize,
+        pc: usize,
+        iterator: Value,
+    },
+    YieldFromClose {
+        exception: Value,
+    },
+}
 enum ReturnAction {
     Value,
     Iterator,
@@ -631,6 +673,21 @@ enum ReturnAction {
     },
     GeneratorThrowInit {
         generator: Value,
+        traceback: Option<Value>,
+        instance: Value,
+    },
+    AsyncGeneratorDrive {
+        awaitable: Value,
+        closing: bool,
+        completion: AsyncGeneratorCompletion,
+    },
+    AsyncGeneratorThrowInit {
+        generator: Value,
+        traceback: Option<Value>,
+        instance: Value,
+    },
+    AsyncGeneratorAwaitThrowInit {
+        awaitable: Value,
         traceback: Option<Value>,
         instance: Value,
     },
@@ -971,6 +1028,9 @@ struct RuntimeTypes {
     generator: Value,
     coroutine: Value,
     coroutine_wrapper: Value,
+    async_generator: Value,
+    async_generator_asend: Value,
+    async_generator_athrow: Value,
     base_exception: Value,
     exception: Value,
     type_error: Value,
@@ -1010,6 +1070,9 @@ impl RuntimeTypes {
             generator: Value::UNBOUND,
             coroutine: Value::UNBOUND,
             coroutine_wrapper: Value::UNBOUND,
+            async_generator: Value::UNBOUND,
+            async_generator_asend: Value::UNBOUND,
+            async_generator_athrow: Value::UNBOUND,
             base_exception: Value::UNBOUND,
             exception: Value::UNBOUND,
             type_error: Value::UNBOUND,
@@ -1037,6 +1100,9 @@ impl RuntimeTypes {
             self.generator,
             self.coroutine,
             self.coroutine_wrapper,
+            self.async_generator,
+            self.async_generator_asend,
+            self.async_generator_athrow,
             self.base_exception,
             self.exception,
             self.type_error,
@@ -1102,6 +1168,36 @@ impl ReturnAction {
             | Self::Setter => {}
             Self::YieldFrom { iterator, .. } => visit(*iterator),
             Self::YieldFromClose { exception } => visit(*exception),
+            Self::AsyncGeneratorDrive {
+                awaitable,
+                completion,
+                ..
+            } => {
+                visit(*awaitable);
+                match completion {
+                    AsyncGeneratorCompletion::YieldFrom { iterator, .. } => visit(*iterator),
+                    AsyncGeneratorCompletion::YieldFromClose { exception } => visit(*exception),
+                    AsyncGeneratorCompletion::Direct | AsyncGeneratorCompletion::CloseMethod => {}
+                }
+            }
+            Self::AsyncGeneratorThrowInit {
+                generator,
+                traceback,
+                instance,
+            } => {
+                visit(*generator);
+                traceback.iter().copied().for_each(&mut visit);
+                visit(*instance);
+            }
+            Self::AsyncGeneratorAwaitThrowInit {
+                awaitable,
+                traceback,
+                instance,
+            } => {
+                visit(*awaitable);
+                traceback.iter().copied().for_each(&mut visit);
+                visit(*instance);
+            }
             Self::GeneratorThrowInit {
                 generator,
                 traceback,
@@ -1664,6 +1760,21 @@ impl Vm {
                 vec![vm.object_class],
                 vm.type_class,
             )?,
+            async_generator: vm.heap.builtin_class(
+                "async_generator",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
+            async_generator_asend: vm.heap.builtin_class(
+                "async_generator_asend",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
+            async_generator_athrow: vm.heap.builtin_class(
+                "async_generator_athrow",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
             base_exception,
             exception,
             type_error,
@@ -1730,6 +1841,91 @@ impl Vm {
                 vm.runtime_types.coroutine_wrapper,
                 "close",
                 Builtin::GeneratorClose,
+            ),
+            (
+                vm.runtime_types.async_generator,
+                "__aiter__",
+                Builtin::AsyncGeneratorIter,
+            ),
+            (
+                vm.runtime_types.async_generator,
+                "__anext__",
+                Builtin::AsyncGeneratorNext,
+            ),
+            (
+                vm.runtime_types.async_generator,
+                "asend",
+                Builtin::AsyncGeneratorSend,
+            ),
+            (
+                vm.runtime_types.async_generator,
+                "athrow",
+                Builtin::AsyncGeneratorThrow,
+            ),
+            (
+                vm.runtime_types.async_generator,
+                "aclose",
+                Builtin::AsyncGeneratorClose,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "__await__",
+                Builtin::AsyncGeneratorAwait,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "__iter__",
+                Builtin::AsyncGeneratorAwait,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "__next__",
+                Builtin::AsyncGeneratorAwaitNext,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "send",
+                Builtin::AsyncGeneratorAwaitSend,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "throw",
+                Builtin::AsyncGeneratorAwaitThrow,
+            ),
+            (
+                vm.runtime_types.async_generator_asend,
+                "close",
+                Builtin::AsyncGeneratorAwaitClose,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "__await__",
+                Builtin::AsyncGeneratorAwait,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "__iter__",
+                Builtin::AsyncGeneratorAwait,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "__next__",
+                Builtin::AsyncGeneratorAwaitNext,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "send",
+                Builtin::AsyncGeneratorAwaitSend,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "throw",
+                Builtin::AsyncGeneratorAwaitThrow,
+            ),
+            (
+                vm.runtime_types.async_generator_athrow,
+                "close",
+                Builtin::AsyncGeneratorAwaitClose,
             ),
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
@@ -3017,6 +3213,7 @@ impl Vm {
             Object::Function { .. } => self.runtime_types.function,
             Object::Generator(frame) => frame.class,
             Object::CoroutineIterator { class, .. } => *class,
+            Object::AsyncGeneratorAwaitable { class, .. } => *class,
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -3140,17 +3337,18 @@ impl Vm {
         let cells = self.cells.split_off(frame.cell_base);
         self.arguments.truncate(frame.argument_base);
         self.pending_classes.truncate(frame.pending_class_base);
+        let (class, kind) = match (metadata.generator, metadata.coroutine) {
+            (true, true) => (
+                self.runtime_types.async_generator,
+                GeneratorKind::AsyncGenerator,
+            ),
+            (false, true) => (self.runtime_types.coroutine, GeneratorKind::Coroutine),
+            (true, false) => (self.runtime_types.generator, GeneratorKind::Generator),
+            (false, false) => unreachable!("validated resumable metadata"),
+        };
         let generator = self.heap.alloc(Object::Generator(GeneratorFrame {
-            class: if metadata.coroutine {
-                self.runtime_types.coroutine
-            } else {
-                self.runtime_types.generator
-            },
-            kind: if metadata.coroutine {
-                GeneratorKind::Coroutine
-            } else {
-                GeneratorKind::Generator
-            },
+            class,
+            kind,
             execution: self.execution,
             code: frame.code as u16,
             ip: 0,
@@ -3159,6 +3357,7 @@ impl Vm {
             exception_stack: frame.exception_stack,
             resume_register: None,
             yield_from: None,
+            async_driver: None,
             return_value: Value::NONE,
             state: GeneratorState::Created,
         }))?;
@@ -3182,13 +3381,15 @@ impl Vm {
         }
         match self.heap.generator_state(generator) {
             Some(GeneratorState::Completed) => {
-                return Err(
-                    if self.heap.generator_kind(generator) == Some(GeneratorKind::Coroutine) {
+                return Err(match self.heap.generator_kind(generator) {
+                    Some(GeneratorKind::Coroutine) => {
                         Diagnostic::new("RuntimeError", "cannot reuse already awaited coroutine")
-                    } else {
-                        Diagnostic::new("StopIteration", String::new())
-                    },
-                )
+                    }
+                    Some(GeneratorKind::AsyncGenerator) => {
+                        Diagnostic::new("StopAsyncIteration", String::new())
+                    }
+                    _ => Diagnostic::new("StopIteration", String::new()),
+                })
             }
             Some(GeneratorState::Running) => {
                 return Err(Diagnostic::new("ValueError", "generator already executing"))
@@ -3463,6 +3664,8 @@ impl Vm {
         let last = self.frames.len().saturating_sub(1);
         let stop_iteration =
             self.instance_check(exception, self.runtime_types.stop_iteration, false, 0)?;
+        let stop_async_iteration =
+            self.instance_check(exception, self.runtime_types.stop_async_iteration, false, 0)?;
         let generator_exit =
             self.instance_check(exception, self.runtime_types.generator_exit, false, 0)?;
         let key_error_class = self
@@ -3517,17 +3720,30 @@ impl Vm {
                 selected = Some((frame_index, region));
                 break;
             }
-            if stop_iteration && frame.generator.is_some() && !completed_generator {
+            let generator_kind = frame
+                .generator
+                .and_then(|generator| self.heap.generator_kind(generator));
+            if !completed_generator
+                && ((stop_iteration && frame.generator.is_some())
+                    || (stop_async_iteration
+                        && generator_kind == Some(GeneratorKind::AsyncGenerator)))
+            {
                 let generator = frame.generator.expect("checked generator frame");
-                let resumable =
-                    if self.heap.generator_kind(generator) == Some(GeneratorKind::Coroutine) {
-                        "coroutine"
-                    } else {
-                        "generator"
-                    };
+                let resumable = match generator_kind {
+                    Some(GeneratorKind::Coroutine) => "coroutine",
+                    Some(GeneratorKind::AsyncGenerator) => "async generator",
+                    _ => "generator",
+                };
+                let exception_name = if stop_async_iteration {
+                    "StopAsyncIteration"
+                } else {
+                    "StopIteration"
+                };
                 self.heap.complete_generator(generator)?;
-                let converted =
-                    Diagnostic::new("RuntimeError", format!("{resumable} raised StopIteration"));
+                let converted = Diagnostic::new(
+                    "RuntimeError",
+                    format!("{resumable} raised {exception_name}"),
+                );
                 let converted_exception = self.exception_from_diagnostic(&converted)?;
                 self.heap
                     .set_exception_cause(converted_exception, Some(exception), true)?;
@@ -3543,6 +3759,99 @@ impl Vm {
                     return Ok(true);
                 }
                 return Err(converted);
+            }
+            if let ReturnAction::AsyncGeneratorDrive {
+                awaitable,
+                closing,
+                completion,
+            } = &frame.action
+            {
+                let awaitable = *awaitable;
+                let closing = *closing;
+                let completion = *completion;
+                self.heap.set_async_generator_await_state(
+                    awaitable,
+                    AsyncGeneratorAwaitState::Completed,
+                )?;
+                if closing && generator_exit {
+                    if let Some(generator) = frame.generator {
+                        self.heap.complete_generator(generator)?;
+                    }
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                        frame.destination,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    match completion {
+                        AsyncGeneratorCompletion::YieldFrom { target, pc, .. } => {
+                            let destination = unwind.4.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "async-generator close lost its destination",
+                                )
+                            })?;
+                            self.frames
+                                .last_mut()
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "BytecodeError",
+                                        "async-generator close lost its caller",
+                                    )
+                                })?
+                                .yield_from = None;
+                            self.registers[destination] = Value::NONE;
+                            self.jump(target, pc);
+                            return Ok(true);
+                        }
+                        AsyncGeneratorCompletion::CloseMethod => {
+                            let destination = unwind.4.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "async-generator close lost its destination",
+                                )
+                            })?;
+                            self.registers[destination] = Value::NONE;
+                            return Ok(true);
+                        }
+                        AsyncGeneratorCompletion::YieldFromClose {
+                            exception: outer_exception,
+                        } => {
+                            let diagnostic = self.exception_diagnostic(outer_exception)?;
+                            self.pending_exception = Some(outer_exception);
+                            let Some(caller) = self.frames.last() else {
+                                return Err(diagnostic);
+                            };
+                            return self.dispatch_exception(
+                                program,
+                                output,
+                                &diagnostic,
+                                minimum_depth,
+                                caller.code,
+                                caller.ip.saturating_sub(1),
+                            );
+                        }
+                        AsyncGeneratorCompletion::Direct => {}
+                    }
+                    let diagnostic = self.generator_stop_iteration(Value::NONE)?;
+                    let Some(caller) = self.frames.last() else {
+                        return Err(diagnostic);
+                    };
+                    return self.dispatch_exception(
+                        program,
+                        output,
+                        &diagnostic,
+                        minimum_depth,
+                        caller.code,
+                        caller.ip.saturating_sub(1),
+                    );
+                }
             }
             if let Some(generator) = frame.generator {
                 if !completed_generator {
@@ -4206,12 +4515,133 @@ impl Vm {
                                 .collect::<Result<_>>()?,
                         })?
                     }
-                    Op::Return | Op::Yield => {
-                        let yielding = op == Op::Yield;
+                    Op::Return | Op::Yield | Op::AsyncYield => {
+                        let yielding = matches!(op, Op::Yield | Op::AsyncYield);
+                        let async_yielding = op == Op::AsyncYield;
                         let mut value = self.read(if yielding { b } else { a })?;
                         if yielding {
                             self.registers[a] = Value::NONE;
                             self.suspend_active_generator(p)?;
+                            if async_yielding {
+                                let frame = self.frames.last().expect("active async generator");
+                                let generator = frame.generator.ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "BytecodeError",
+                                        "async yield outside resumed async generator",
+                                    )
+                                })?;
+                                if self.heap.generator_kind(generator)
+                                    != Some(GeneratorKind::AsyncGenerator)
+                                {
+                                    return Err(Diagnostic::new(
+                                        "BytecodeError",
+                                        "async yield executed by a non-async generator",
+                                    ));
+                                }
+                                let (awaitable, closing) = match &frame.action {
+                                    ReturnAction::AsyncGeneratorDrive {
+                                        awaitable,
+                                        closing,
+                                        ..
+                                    } => (*awaitable, *closing),
+                                    ReturnAction::Close => {
+                                        self.heap.complete_generator(generator)?;
+                                        return Err(Diagnostic::new(
+                                            "RuntimeError",
+                                            "async generator ignored GeneratorExit",
+                                        ));
+                                    }
+                                    _ => {
+                                        return Err(Diagnostic::new(
+                                            "BytecodeError",
+                                            "async generator has no awaitable driver",
+                                        ))
+                                    }
+                                };
+                                self.heap.set_async_generator_await_state(
+                                    awaitable,
+                                    AsyncGeneratorAwaitState::Completed,
+                                )?;
+                                self.heap
+                                    .release_async_generator_driver(generator, awaitable)?;
+                                let frame = self.frames.pop().expect("active async generator");
+                                self.registers.truncate(frame.base);
+                                self.cells.truncate(frame.cell_base);
+                                if closing {
+                                    self.heap.complete_generator(generator)?;
+                                    return Err(Diagnostic::new(
+                                        "RuntimeError",
+                                        "async generator ignored GeneratorExit",
+                                    ));
+                                }
+                                let ReturnAction::AsyncGeneratorDrive { completion, .. } =
+                                    frame.action
+                                else {
+                                    unreachable!("validated async-generator driver")
+                                };
+                                return match completion {
+                                    AsyncGeneratorCompletion::Direct => {
+                                        Err(self.generator_stop_iteration(value)?)
+                                    }
+                                    AsyncGeneratorCompletion::YieldFrom {
+                                        target,
+                                        pc,
+                                        iterator: _,
+                                    } => {
+                                        let destination = frame.destination.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "BytecodeError",
+                                                "async-generator await lost its destination",
+                                            )
+                                        })?;
+                                        self.frames
+                                            .last_mut()
+                                            .ok_or_else(|| {
+                                                Diagnostic::new(
+                                                    "BytecodeError",
+                                                    "async-generator await lost its caller",
+                                                )
+                                            })?
+                                            .yield_from = None;
+                                        self.registers[destination] = value;
+                                        self.jump(target, pc);
+                                        Ok(())
+                                    }
+                                    AsyncGeneratorCompletion::CloseMethod
+                                    | AsyncGeneratorCompletion::YieldFromClose { .. } => {
+                                        unreachable!("closing completion yielded asynchronously")
+                                    }
+                                };
+                            }
+                            if self.frames.last().is_some_and(|frame| {
+                                matches!(
+                                    &frame.action,
+                                    ReturnAction::AsyncGeneratorDrive {
+                                        closing: true,
+                                        completion: AsyncGeneratorCompletion::CloseMethod
+                                            | AsyncGeneratorCompletion::YieldFromClose { .. },
+                                        ..
+                                    }
+                                )
+                            }) {
+                                let (generator, awaitable) = match self.frames.last() {
+                                    Some(Frame {
+                                        generator: Some(generator),
+                                        action: ReturnAction::AsyncGeneratorDrive { awaitable, .. },
+                                        ..
+                                    }) => (*generator, *awaitable),
+                                    _ => unreachable!("validated async-generator close frame"),
+                                };
+                                self.heap.complete_generator(generator)?;
+                                self.heap.set_async_generator_await_state(
+                                    awaitable,
+                                    AsyncGeneratorAwaitState::Completed,
+                                )?;
+                                return Err(Diagnostic::new(
+                                    "RuntimeError",
+                                    "async generator ignored GeneratorExit",
+                                ));
+                            }
                             if self.frames.last().is_some_and(|frame| {
                                 matches!(
                                     &frame.action,
@@ -4233,6 +4663,77 @@ impl Vm {
                             self.frames.last().and_then(|frame| frame.generator)
                         {
                             self.heap.complete_generator_with_value(generator, value)?;
+                            if self.heap.generator_kind(generator)
+                                == Some(GeneratorKind::AsyncGenerator)
+                            {
+                                let action =
+                                    &self.frames.last().expect("active async generator").action;
+                                if matches!(action, ReturnAction::Close) {
+                                    return Err(self.generator_stop_iteration(Value::NONE)?);
+                                }
+                                let (awaitable, closing, completion) = match action {
+                                    ReturnAction::AsyncGeneratorDrive {
+                                        awaitable,
+                                        closing,
+                                        completion,
+                                    } => (*awaitable, *closing, *completion),
+                                    _ => {
+                                        return Err(Diagnostic::new(
+                                            "BytecodeError",
+                                            "async generator has no awaitable driver",
+                                        ))
+                                    }
+                                };
+                                self.heap.set_async_generator_await_state(
+                                    awaitable,
+                                    AsyncGeneratorAwaitState::Completed,
+                                )?;
+                                if closing
+                                    && !matches!(completion, AsyncGeneratorCompletion::Direct)
+                                {
+                                    let frame = self.frames.pop().expect("active async generator");
+                                    self.registers.truncate(frame.base);
+                                    self.cells.truncate(frame.cell_base);
+                                    let destination = frame.destination.ok_or_else(|| {
+                                        Diagnostic::new(
+                                            "BytecodeError",
+                                            "async-generator close lost its destination",
+                                        )
+                                    })?;
+                                    match completion {
+                                        AsyncGeneratorCompletion::YieldFrom {
+                                            target, pc, ..
+                                        } => {
+                                            self.frames
+                                                .last_mut()
+                                                .ok_or_else(|| {
+                                                    Diagnostic::new(
+                                                        "BytecodeError",
+                                                        "async-generator close lost its caller",
+                                                    )
+                                                })?
+                                                .yield_from = None;
+                                            self.registers[destination] = Value::NONE;
+                                            self.jump(target, pc);
+                                            return Ok(());
+                                        }
+                                        AsyncGeneratorCompletion::CloseMethod => {
+                                            self.registers[destination] = Value::NONE;
+                                            return Ok(());
+                                        }
+                                        AsyncGeneratorCompletion::YieldFromClose { exception } => {
+                                            self.pending_exception = Some(exception);
+                                            return Err(self.exception_diagnostic(exception)?);
+                                        }
+                                        AsyncGeneratorCompletion::Direct => unreachable!(),
+                                    }
+                                }
+                                return if closing {
+                                    Err(self.generator_stop_iteration(Value::NONE)?)
+                                } else {
+                                    Err(Diagnostic::new("StopAsyncIteration", String::new()))
+                                };
+                            }
                             return Err(self.generator_stop_iteration(value)?);
                         }
                         let frame = self.frames.pop().expect("active frame");
@@ -4262,6 +4763,8 @@ impl Vm {
                         let mut yield_from_item = None;
                         let mut yield_from_close = None;
                         let mut generator_throw = None;
+                        let mut async_generator_throw = None;
+                        let mut async_generator_await_throw = None;
                         match frame.action {
                             ReturnAction::Value => {}
                             ReturnAction::Iterator => self.validate_iterator(value)?,
@@ -4289,6 +4792,40 @@ impl Vm {
                                 }
                                 value = instance;
                                 generator_throw = Some((generator, traceback));
+                            }
+                            ReturnAction::AsyncGeneratorDrive { completion, .. } => {
+                                if let AsyncGeneratorCompletion::YieldFrom { iterator, .. } =
+                                    completion
+                                {
+                                    yield_from_item = Some(iterator);
+                                }
+                            }
+                            ReturnAction::AsyncGeneratorThrowInit {
+                                generator,
+                                traceback,
+                                instance,
+                            } => {
+                                if value != Value::NONE {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "exception __init__ must return None",
+                                    ));
+                                }
+                                async_generator_throw = Some((generator, traceback, instance));
+                            }
+                            ReturnAction::AsyncGeneratorAwaitThrowInit {
+                                awaitable,
+                                traceback,
+                                instance,
+                            } => {
+                                if value != Value::NONE {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "exception __init__ must return None",
+                                    ));
+                                }
+                                async_generator_await_throw =
+                                    Some((awaitable, traceback, instance));
                             }
                             ReturnAction::CollectIterableStart(kind) => {
                                 iterable_start = Some((kind, value));
@@ -4443,6 +4980,46 @@ impl Vm {
                                 destination,
                                 value,
                                 traceback,
+                            )?;
+                            return Ok(());
+                        }
+                        if let Some((generator, traceback, exception)) = async_generator_throw {
+                            let destination = frame.destination.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "async-generator throw constructor has no destination",
+                                )
+                            })?;
+                            let exception = self.normalize_raised_exception(exception)?;
+                            self.heap.set_exception_traceback(exception, traceback)?;
+                            self.registers[destination] =
+                                self.heap.alloc(Object::AsyncGeneratorAwaitable {
+                                    class: self.runtime_types.async_generator_athrow,
+                                    generator,
+                                    operation: crate::heap::AsyncGeneratorOperation::Throw {
+                                        exception,
+                                        traceback,
+                                    },
+                                    state: AsyncGeneratorAwaitState::Created,
+                                })?;
+                            return Ok(());
+                        }
+                        if let Some((awaitable, traceback, exception)) = async_generator_await_throw
+                        {
+                            let destination = frame.destination.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "async-generator awaitable throw has no destination",
+                                )
+                            })?;
+                            let exception = self.normalize_raised_exception(exception)?;
+                            self.heap.set_exception_traceback(exception, traceback)?;
+                            self.inject_async_generator_awaitable(
+                                p,
+                                awaitable,
+                                destination,
+                                exception,
+                                false,
                             )?;
                             return Ok(());
                         }
@@ -5259,7 +5836,15 @@ impl Vm {
                                         .unwrap_or(Value::NONE);
                                     self.jump(i.c as usize, pc);
                                 }
-                                Err(error) => return Err(error),
+                                Err(error) => {
+                                    if self.frames.len() > depth {
+                                        self.frames
+                                            .last_mut()
+                                            .expect("delegate throw frame")
+                                            .set_yield_from_completion(i.c as usize, pc, iterator);
+                                    }
+                                    return Err(error);
+                                }
                             }
                         } else if self.heap.is_iterator(iterator) {
                             if let Some(value) = self.heap.next(iterator)? {
@@ -5431,7 +6016,7 @@ impl Vm {
                                     self.heap.special_method_call(iterator, "close")?
                                 {
                                     let depth = self.frames.len();
-                                    self.invoke(
+                                    let result = self.invoke(
                                         p,
                                         call.callable,
                                         a,
@@ -5441,13 +6026,15 @@ impl Vm {
                                             count: 0,
                                         },
                                         output,
-                                    )?;
+                                    );
                                     if self.frames.len() > depth {
                                         self.frames
                                             .last_mut()
                                             .expect("delegate close frame")
-                                            .action = ReturnAction::YieldFromClose { exception };
+                                            .set_yield_from_close_completion(exception);
+                                        result?;
                                     } else {
+                                        result?;
                                         let diagnostic = self.exception_diagnostic(exception)?;
                                         self.pending_exception = Some(exception);
                                         return Err(diagnostic);
@@ -5499,15 +6086,25 @@ impl Vm {
                                         self.registers[a] = return_value;
                                         self.jump(i.c as usize, pc);
                                     }
-                                    Err(error) => return Err(error),
+                                    Err(error) => {
+                                        if self.frames.len() > depth {
+                                            self.frames
+                                                .last_mut()
+                                                .expect("delegate throw frame")
+                                                .set_yield_from_completion(
+                                                    i.c as usize,
+                                                    pc,
+                                                    iterator,
+                                                );
+                                        }
+                                        return Err(error);
+                                    }
                                 }
                                 if self.frames.len() > depth {
-                                    self.frames.last_mut().expect("delegate throw frame").action =
-                                        ReturnAction::YieldFrom {
-                                            target: i.c as usize,
-                                            pc,
-                                            iterator,
-                                        };
+                                    self.frames
+                                        .last_mut()
+                                        .expect("delegate throw frame")
+                                        .set_yield_from_completion(i.c as usize, pc, iterator);
                                 } else if self.frames.last().is_some_and(|frame| frame.ip == pc + 1)
                                 {
                                     self.frames
@@ -5595,15 +6192,21 @@ impl Vm {
                                     self.registers[a] = return_value;
                                     self.jump(i.c as usize, pc);
                                 }
-                                Err(error) => return Err(error),
+                                Err(error) => {
+                                    if self.frames.len() > depth {
+                                        self.frames
+                                            .last_mut()
+                                            .expect("yield-from frame")
+                                            .set_yield_from_completion(i.c as usize, pc, iterator);
+                                    }
+                                    return Err(error);
+                                }
                             }
                             if self.frames.len() > depth {
-                                self.frames.last_mut().expect("yield-from frame").action =
-                                    ReturnAction::YieldFrom {
-                                        target: i.c as usize,
-                                        pc,
-                                        iterator,
-                                    };
+                                self.frames
+                                    .last_mut()
+                                    .expect("yield-from frame")
+                                    .set_yield_from_completion(i.c as usize, pc, iterator);
                             } else if self.frames.last().is_some_and(|frame| frame.ip == pc + 1) {
                                 self.frames
                                     .last_mut()

@@ -4,17 +4,18 @@
 
 Kısmen uygulandı. Bu karar `async def`, `await`, coroutine nesnesi,
 `coroutine_wrapper`, `async for` ve `async with` çekirdeğini kapsar. Async generator
-ve event-loop/future/task protokolleri açık kalır.
+[ADR 0074](0074-async-generator-protocol.md) ile tamamlanmıştır;
+event-loop/future/task protokolleri açık kalır.
 
 ## Karar
 
-`CodeObject`, `generator` bayrağından ayrı bir `coroutine` bayrağı taşır; iki
-bayrak aynı anda doğru olamaz. Parser Tonic-owned AST'ye async function ve
-`Await` düğümlerini aktarır. Lexical HIR async function scope'unu coroutine olarak
-işaretler ve ilk dilimde async generator'ı açık `UnsupportedSyntax` tanısıyla
-reddeder. Bytecode v17 `GET_AWAITABLE` ekler. Verifier opcode'u yalnız coroutine
-code'unda kabul eder; module/class entry ve generator/coroutine çakışmasını da
-yürütmeden önce reddeder.
+`CodeObject`, `generator` bayrağından ayrı bir `coroutine` bayrağı taşır. Bu
+karar diliminde ordinary coroutine yalnız `coroutine` bayrağını kullanır; daha
+sonra ADR 0074 iki bayrağın birleşimini async generator olarak tanımlar. Parser
+Tonic-owned AST'ye async function ve `Await` düğümlerini aktarır. Lexical HIR
+async function scope'unu coroutine olarak işaretler. Bytecode v17
+`GET_AWAITABLE` ekler. Verifier opcode'u yalnız coroutine code'unda kabul eder ve
+module/class entry metadata'sını yürütmeden önce doğrular.
 
 `async def` normal call binder ile argüman ve closure cell'lerini bağlar, fakat
 gövdeyi çağrı anında yürütmez. Register, cell, instruction pointer ve exception
@@ -78,14 +79,13 @@ suspend noktaları native stack-map gerektirmeden interpreter fallback'inde kal�
 
 ## Açık kapsam
 
-- Async generator'ın `asend`/`athrow`/`aclose` ve finalization semantiği.
 - Future/task/event-loop scheduling, cancellation ve thread entegrasyonu.
 - Coroutine frame'lerinin JIT edilmesi ve native suspended-root metadata'sı.
 
 ## Doğrulama
 
-Compiler ve verifier testleri owned AST/HIR metadata'yı, bytecode v17–v19 operand
-kurallarını, coroutine/generator ayrımını ve async-generator reddini kapsar.
+Compiler ve verifier testleri owned AST/HIR metadata'yı ve bytecode v17–v19
+operand kurallarını kapsar.
 Runtime testleri tembel yürütme, nested coroutine, özel awaitable, public
 `coroutine_wrapper`, `send`/`throw`/`close`, yanlış `__await__` sonucu ve await
 edilemeyen değerleri interpreter ile JIT-caller altında stress GC kullanarak

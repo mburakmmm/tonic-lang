@@ -47,6 +47,8 @@ impl Scope {
             children: Vec::new(),
             module,
             yield_span: None,
+            yield_from_span: None,
+            return_value_span: None,
         };
         scan.block(body)?;
         if module || class_body {
@@ -55,11 +57,16 @@ impl Scope {
             }
         }
         if coroutine && scan.yield_span.is_some() {
-            return Err(Diagnostic::new(
-                "UnsupportedSyntax",
-                "async generators are not implemented yet",
-            )
-            .at(scan.yield_span.expect("checked async generator yield")));
+            if let Some(span) = scan.yield_from_span {
+                return Err(
+                    Diagnostic::new("SyntaxError", "yield from inside async function").at(span),
+                );
+            }
+            if let Some(span) = scan.return_value_span {
+                return Err(
+                    Diagnostic::new("SyntaxError", "return with value in async generator").at(span),
+                );
+            }
         }
         for name in &scan.nonlocals {
             if !bound.contains(name) {
@@ -185,6 +192,8 @@ struct Scan<'a> {
     children: Vec<(u32, Child<'a>)>,
     module: bool,
     yield_span: Option<Span>,
+    yield_from_span: Option<Span>,
+    return_value_span: Option<Span>,
 }
 enum Child<'a> {
     Function(&'a Parameters, &'a [Stmt], bool),
@@ -273,6 +282,7 @@ impl<'a> Scan<'a> {
             }
             ExprKind::YieldFrom(value) => {
                 self.yield_span.get_or_insert(e.span);
+                self.yield_from_span.get_or_insert(e.span);
                 self.expr(value);
             }
             ExprKind::Await(value) => self.expr(value),
@@ -307,7 +317,10 @@ impl<'a> Scan<'a> {
                     }
                 }
                 StmtKind::Expr(e) => self.expr(e),
-                StmtKind::Return(Some(e)) => self.expr(e),
+                StmtKind::Return(Some(e)) => {
+                    self.return_value_span.get_or_insert(s.span);
+                    self.expr(e);
+                }
                 StmtKind::Raise { value, cause } => {
                     if let Some(value) = value {
                         self.expr(value);

@@ -142,6 +142,38 @@ fn unreachable_suspended_generators_run_finally_outside_the_collector() {
 }
 
 #[test]
+fn unreachable_suspended_async_generators_run_finally_outside_the_collector() {
+    let source = r#"async def closing(label):
+    try:
+        yield label
+    finally:
+        print('async-finalized',label)
+def abandon():
+    generator=closing('one')
+    try:
+        generator.__anext__().send(None)
+    except StopIteration as error:
+        print(error.value)
+abandon()
+print('body-complete')"#;
+    let program = compile(source, "async-generator-finalization").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"one\nbody-complete\n");
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(out, b"one\nbody-complete\nasync-finalized one\n");
+        assert_eq!(vm.stats.generator_finalizers, 1);
+        assert_eq!(vm.stats.generator_finalizer_errors, 0);
+        let reclaimed = vm.collect_garbage().unwrap().reclaimed;
+        assert!(reclaimed >= 1, "physical reclamation follows logical close");
+    }
+}
+
+#[test]
 fn generator_finalization_closes_delegates_and_contains_unraisable_errors() {
     let source = "def inner():\n    try:\n        yield 'ready'\n    finally:\n        print('inner-finally')\ndef outer():\n    try:\n        yield from inner()\n    finally:\n        print('outer-finally')\ndef bad():\n    try:\n        yield 'bad-ready'\n    finally:\n        print('bad-finally')\n        raise ValueError('unraisable')\ndef abandon():\n    delegated=outer()\n    broken=bad()\n    print(next(delegated),next(broken))\nabandon()\ni=0\nwhile i<40:\n    marker=[i]\n    i+=1\nprint('body-complete')";
     let program = compile(source, "delegated-generator-finalization").unwrap();
@@ -197,6 +229,199 @@ fn unreachable_suspended_coroutines_close_awaited_iterators() {
         assert_eq!(vm.stats.generator_finalizers, 1);
         assert_eq!(vm.stats.generator_finalizer_errors, 0);
     }
+}
+
+#[test]
+fn async_generators_support_iteration_asend_and_suspended_awaits() {
+    let source = r#"class Pause:
+    def __init__(self,value):
+        self.value=value
+    def __await__(self):
+        yield 'pause-'+str(self.value)
+        return self.value
+async def values():
+    first=yield 1
+    print('received-first',first)
+    second=await Pause(2)
+    received=yield second
+    print('received-second',received)
+generator=values()
+print(type(generator).__name__,generator.__aiter__()==generator)
+first=generator.__anext__()
+print(type(first).__name__,iter(first)==first)
+try:
+    first.send(None)
+except StopIteration as error:
+    print('first',error.value)
+try:
+    first.send(None)
+except RuntimeError as error:
+    print(str(error))
+second=generator.asend('sent')
+print(second.send(None))
+try:
+    second.send(None)
+except StopIteration as error:
+    print('second',error.value)
+try:
+    generator.asend('done').send(None)
+except StopAsyncIteration:
+    print('manual-done')
+fresh=values()
+try:
+    fresh.asend('early').send(None)
+except TypeError as error:
+    print(str(error))
+async def collect():
+    result=[]
+    async for value in values():
+        result=result+[value]
+    return result
+coroutine=collect()
+print('collect-pause',coroutine.send(None))
+try:
+    coroutine.send(None)
+except StopIteration as error:
+    print('collected',error.value)"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"async_generator True\nasync_generator_asend True\nfirst 1\ncannot reuse already awaited async-generator awaitable\nreceived-first sent\npause-2\nsecond 2\nreceived-second done\nmanual-done\ncannot send non-None value to a just-started generator\nreceived-first None\ncollect-pause pause-2\nreceived-second None\ncollected [1, 2]\n",
+    );
+}
+
+#[test]
+fn async_generator_athrow_aclose_and_exception_boundaries_are_exact() {
+    let source = r#"async def guarded():
+    try:
+        yield 'ready'
+    except ValueError as error:
+        yield 'caught-'+str(error)
+    finally:
+        print('guarded-finally')
+async def run():
+    generator=guarded()
+    print(await generator.__anext__())
+    print(await generator.athrow(ValueError('boom')))
+    print('closed',await generator.aclose())
+    return 'done'
+try:
+    run().send(None)
+except StopIteration as error:
+    print(error.value)
+async def ignores_close():
+    try:
+        yield 1
+    except GeneratorExit:
+        yield 2
+bad=ignores_close()
+try:
+    bad.__anext__().send(None)
+except StopIteration as error:
+    print('bad-first',error.value)
+try:
+    bad.aclose().send(None)
+except RuntimeError as error:
+    print(str(error))
+async def escaped():
+    yield 'start'
+    raise StopAsyncIteration('bad')
+escaped_generator=escaped()
+try:
+    escaped_generator.__anext__().send(None)
+except StopIteration as error:
+    print(error.value)
+try:
+    escaped_generator.__anext__().send(None)
+except RuntimeError as error:
+    print(str(error))
+class CustomError(Exception):
+    def __init__(self,value):
+        print('custom-init',value)
+async def catches_custom():
+    try:
+        yield 'custom-ready'
+    except CustomError:
+        yield 'custom-caught'
+custom=catches_custom()
+try:
+    custom.__anext__().send(None)
+except StopIteration as error:
+    print(error.value)
+try:
+    custom.athrow(CustomError,'value').send(None)
+except StopIteration as error:
+    print(error.value)"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"ready\ncaught-boom\nguarded-finally\nclosed None\ndone\nbad-first 1\nasync generator ignored GeneratorExit\nstart\nasync generator raised StopAsyncIteration\ncustom-ready\ncustom-init value\ncustom-caught\n",
+    );
+}
+
+#[test]
+fn async_generator_awaitables_forward_throw_and_close_through_await() {
+    let source = r#"class Pause:
+    def __await__(self):
+        try:
+            yield 'paused'
+        finally:
+            print('pause-finally')
+async def catches():
+    try:
+        await Pause()
+    except ValueError as error:
+        yield 'caught-'+str(error)
+async def outer_throw():
+    return await catches().__anext__()
+coroutine=outer_throw()
+print(coroutine.send(None))
+try:
+    coroutine.throw(ValueError('boom'))
+except StopIteration as error:
+    print(error.value)
+async def closing():
+    try:
+        await Pause()
+        yield 'unreachable'
+    finally:
+        print('generator-finally')
+async def outer_close():
+    return await closing().__anext__()
+coroutine=outer_close()
+print(coroutine.send(None))
+print('close-result',coroutine.close())
+async def direct():
+    try:
+        await Pause()
+    except CustomError:
+        yield 'direct-caught'
+class CustomError(Exception):
+    def __init__(self,value):
+        print('direct-init',value)
+awaitable=direct().__anext__()
+print(awaitable.send(None))
+try:
+    awaitable.throw(CustomError,'value')
+except StopIteration as error:
+    print(error.value)
+async def blocked():
+    await Pause()
+    yield 'released'
+blocked_generator=blocked()
+owner=blocked_generator.__anext__()
+print(owner.send(None))
+contender=blocked_generator.__anext__()
+try:
+    contender.send(None)
+except RuntimeError as error:
+    print(str(error))
+try:
+    owner.send(None)
+except StopIteration as error:
+    print(error.value)"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"paused\npause-finally\ncaught-boom\npaused\npause-finally\ngenerator-finally\nclose-result None\npaused\ndirect-init value\npause-finally\ndirect-caught\npaused\nasynchronous generator is already running\npause-finally\nreleased\n",
+    );
 }
 
 #[test]

@@ -151,7 +151,12 @@ sonra alınır.
   - [x] Bytecode v19 `async with`; girişte yakalanan `__aexit__`, await edilen
     `__aenter__`/`__aexit__`, suppression ve exception replacement, çoklu manager,
     bütün yapısal çıkışlar, precise suspended roots ve JIT güvenli fallback.
-  - [ ] Async generator ve event-loop/future/task protokolleri.
+  - [x] Bytecode v20 async generator; ayrı `ASYNC_YIELD`, tembel
+    `async_generator`, `__aiter__`/`__anext__`, tek kullanımlık GC-traced
+    `asend`/`athrow`/`aclose` awaitable'ları, iç `await` forwarding,
+    `StopAsyncIteration`/PEP 479 sınırı, logical finalization ve JIT-caller
+    interpreter fallback'i.
+  - [ ] Event-loop/future/task protokolleri, scheduling ve cancellation.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
@@ -251,7 +256,7 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler kalan builtin protokolleri, async generator ve
+Sıradaki çekirdek işler kalan builtin protokolleri,
 event-loop/future/task protokolleri, genel kullanıcı finalizer semantiği ve HPy H1
 shared-library loader/handle yüzeyidir. JIT'in desteklenen tier'ı
 x86-64/AArch64 debug-release, normal/stress

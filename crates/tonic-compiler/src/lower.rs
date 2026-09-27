@@ -1048,7 +1048,17 @@ impl Lower<'_> {
                     self.constant(Constant::None, s)?
                 };
                 let result = self.alloc(1)?;
-                self.emit(Op::Yield, result, value, 0, s)?;
+                self.emit(
+                    if self.scope.generator && self.scope.coroutine {
+                        Op::AsyncYield
+                    } else {
+                        Op::Yield
+                    },
+                    result,
+                    value,
+                    0,
+                    s,
+                )?;
                 Ok(result)
             }
             ExprKind::YieldFrom(value) => {

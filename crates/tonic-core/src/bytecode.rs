@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 19;
+pub const BYTECODE_VERSION: u16 = 20;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -95,6 +95,7 @@ pub enum Op {
     EndAsyncFor = 100,
     AsyncContextEnter = 101,
     AsyncContextExit = 102,
+    AsyncYield = 103,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -187,6 +188,7 @@ impl TryFrom<u16> for Op {
             100 => Self::EndAsyncFor,
             101 => Self::AsyncContextEnter,
             102 => Self::AsyncContextExit,
+            103 => Self::AsyncYield,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -358,9 +360,6 @@ impl Program {
             return Err(bad("module code ranges do not cover the program"));
         }
         for code in &self.code {
-            if code.generator && code.coroutine {
-                return Err(bad("code cannot be both generator and coroutine"));
-            }
             if code.class_body && (code.params != 0 || code.generator || code.coroutine) {
                 return Err(bad("class body cannot be a function"));
             }
@@ -669,6 +668,16 @@ impl Program {
                     Op::Yield => {
                         if !code.generator && !code.coroutine {
                             return Err(bad("yield outside resumable code"));
+                        }
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c != 0 {
+                            return Err(bad("nonzero reserved operand"));
+                        }
+                    }
+                    Op::AsyncYield => {
+                        if !code.generator || !code.coroutine {
+                            return Err(bad("async yield outside async generator code"));
                         }
                         reg(i.a)?;
                         reg(i.b)?;

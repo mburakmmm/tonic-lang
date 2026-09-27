@@ -244,8 +244,29 @@ fn async_functions_and_await_have_owned_ast_and_coroutine_metadata() {
         .iter()
         .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::GetAwaitable)));
 
-    let error = compile("async def values():\n    yield 1", "async-generator").unwrap_err();
-    assert_eq!(error.kind, "UnsupportedSyntax");
+    let program = compile("async def values():\n    yield 1", "async-generator").unwrap();
+    let code = &program.program().code[1];
+    assert!(code.generator);
+    assert!(code.coroutine);
+    assert!(code
+        .instructions
+        .iter()
+        .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::AsyncYield)));
+
+    for (source, message) in [
+        (
+            "async def values():\n    yield from []",
+            "yield from inside async function",
+        ),
+        (
+            "async def values():\n    yield 1\n    return 2",
+            "return with value in async generator",
+        ),
+    ] {
+        let error = compile(source, "invalid-async-generator").unwrap_err();
+        assert_eq!(error.kind, "SyntaxError");
+        assert!(error.message.contains(message), "{error:?}");
+    }
 }
 
 #[test]

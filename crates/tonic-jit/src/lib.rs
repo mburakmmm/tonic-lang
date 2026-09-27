@@ -1823,6 +1823,13 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
+            Op::Yield | Op::AsyncYield => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
             Op::Raise => {
                 if instruction.b > 2 || (instruction.b != 2 && instruction.c != 0) {
                     return Err(invalid(Some(pc), "invalid raise operand"));

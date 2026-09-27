@@ -43,10 +43,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 19, core verifier 13, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 92, CPython bridge 15 ve HPy manifest 5; toplam 317 test.
+native handles 5, language/runtime 96, CPython bridge 15 ve HPy manifest 5; toplam 321 test.
 
-Differential corpus: 308 stdout vakası ve 159 exception türü vakası. Seed 42.
-Async context-manager diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 309 stdout vakası ve 162 exception türü vakası. Seed 42.
+Async-generator diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -93,6 +93,14 @@ gerçekten askıya alınan enter/exit, return/break/continue cleanup'ı, kısmi 
 başarısızlığı, yakalanmış eski exit metodu, target atama hatası, bare reraise,
 özel truthiness ve metaclass manager davranışını interpreter/JIT-caller altında
 her allocation'da GC ile doğrular.
+Async-generator corpus'u tembel oluşturmayı, `__aiter__`/`__anext__`, tek
+kullanımlık `asend`/`athrow`/`aclose`, custom exception initializer'ı, iç
+`await` askılarını, async-for tüketimini, awaitable `throw`/`close` forwarding'ini,
+eşzamanlı sürücü reddini, `StopAsyncIteration` ve ignored `GeneratorExit`
+sınırlarını kapsar. Ayrı finalization testi ulaşılamayan suspended async
+generator'ın `finally` bloğunu collector dışında çalıştırır. Başarı ve syntax/
+runtime hata vakaları CPython oracle'ıyla; tüm runtime yolları interpreter/JIT
+caller ve normal/her-allocation GC modlarında doğrulanır.
 Decorator expression/default/base değerlendirme sırası, ters uygulama sırası,
 function/class decorator sonuçları, inherited staticmethod/classmethod binding
 descriptor hata yolları ve list/tuple/Unicode string slice semantiği de CPython

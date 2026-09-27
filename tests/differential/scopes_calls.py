@@ -275,6 +275,37 @@ try:
 except StopIteration as error:
     print(error.value)
 ''',
+'''async def values():
+    received=yield 1
+    print('received',received)
+    yield 2
+async def collect():
+    result=[]
+    async for value in values():
+        result=result+[value]
+    return result
+generator=values()
+print(type(generator).__name__,generator.__aiter__()==generator)
+first=generator.__anext__()
+print(type(first).__name__,iter(first)==first)
+try:
+    first.send(None)
+except StopIteration as error:
+    print(error.value)
+try:
+    generator.asend('sent').send(None)
+except StopIteration as error:
+    print(error.value)
+try:
+    generator.aclose().send(None)
+except StopIteration as error:
+    print('closed',error.value)
+coroutine=collect()
+try:
+    coroutine.send(None)
+except StopIteration as error:
+    print(error.value)
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
@@ -311,4 +342,7 @@ ERRORS = [
 ('class Bad:\n    def __aenter__(self):\n        return 1\n    async def __aexit__(self,a,b,c):\n        pass\nasync def run():\n    async with Bad():\n        pass\nrun().send(None)', 'TypeError'),
 ('class Bad:\n    async def __aenter__(self):\n        pass\nasync def run():\n    async with Bad():\n        pass\nrun().send(None)', 'TypeError'),
 ('class Bad:\n    async def __aenter__(self):\n        pass\n    def __aexit__(self,a,b,c):\n        return 1\nasync def run():\n    async with Bad():\n        raise ValueError("body")\nrun().send(None)', 'TypeError'),
+('async def bad():\n    yield 1\n    raise StopAsyncIteration("escaped")\ngenerator=bad()\ntry:\n    generator.__anext__().send(None)\nexcept StopIteration:\n    pass\ngenerator.__anext__().send(None)', 'RuntimeError'),
+('async def bad():\n    yield 1\n    return 2', 'SyntaxError'),
+('async def bad():\n    yield from []', 'SyntaxError'),
 ]

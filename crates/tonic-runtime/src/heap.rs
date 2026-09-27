@@ -25,6 +25,24 @@ pub(crate) enum GeneratorState {
 pub(crate) enum GeneratorKind {
     Generator,
     Coroutine,
+    AsyncGenerator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsyncGeneratorOperation {
+    Send(Value),
+    Throw {
+        exception: Value,
+        traceback: Option<Value>,
+    },
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsyncGeneratorAwaitState {
+    Created,
+    Running,
+    Completed,
 }
 
 #[derive(Debug)]
@@ -39,6 +57,7 @@ pub(crate) struct GeneratorFrame {
     pub exception_stack: Vec<Value>,
     pub resume_register: Option<u16>,
     pub yield_from: Option<Value>,
+    pub async_driver: Option<Value>,
     pub return_value: Value,
     pub state: GeneratorState,
 }
@@ -81,6 +100,16 @@ pub(crate) enum Builtin {
     GeneratorThrow,
     GeneratorClose,
     CoroutineAwait,
+    AsyncGeneratorIter,
+    AsyncGeneratorNext,
+    AsyncGeneratorSend,
+    AsyncGeneratorThrow,
+    AsyncGeneratorClose,
+    AsyncGeneratorAwait,
+    AsyncGeneratorAwaitNext,
+    AsyncGeneratorAwaitSend,
+    AsyncGeneratorAwaitThrow,
+    AsyncGeneratorAwaitClose,
     Hash,
     Abs,
     IsInstance,
@@ -185,6 +214,12 @@ pub(crate) enum Object {
         class: Value,
         coroutine: Value,
     },
+    AsyncGeneratorAwaitable {
+        class: Value,
+        generator: Value,
+        operation: AsyncGeneratorOperation,
+        state: AsyncGeneratorAwaitState,
+    },
     Cell(Value),
     Builtin(Builtin),
     Native(usize),
@@ -220,7 +255,8 @@ impl Object {
             Self::Instance { class, .. }
             | Self::Exception { class, .. }
             | Self::Generator(GeneratorFrame { class, .. })
-            | Self::CoroutineIterator { class, .. } => Some(*class),
+            | Self::CoroutineIterator { class, .. }
+            | Self::AsyncGeneratorAwaitable { class, .. } => Some(*class),
             _ => None,
         }
     }
@@ -322,12 +358,33 @@ impl Object {
                     .chain(&frame.cells)
                     .chain(&frame.exception_stack)
                     .chain(&frame.yield_from)
+                    .chain(&frame.async_driver)
                     .copied()
                     .for_each(visit);
             }
             Self::CoroutineIterator { class, coroutine } => {
                 visit(*class);
                 visit(*coroutine);
+            }
+            Self::AsyncGeneratorAwaitable {
+                class,
+                generator,
+                operation,
+                ..
+            } => {
+                visit(*class);
+                visit(*generator);
+                match operation {
+                    AsyncGeneratorOperation::Send(value) => visit(*value),
+                    AsyncGeneratorOperation::Throw {
+                        exception,
+                        traceback,
+                    } => {
+                        visit(*exception);
+                        traceback.iter().copied().for_each(visit);
+                    }
+                    AsyncGeneratorOperation::Close => {}
+                }
             }
             Self::Dict(dict) => {
                 for (key, value) in &dict.entries {
@@ -795,8 +852,24 @@ impl Heap {
         )
     }
 
+    pub(crate) fn is_async_generator(&self, value: Value) -> bool {
+        matches!(
+            self.try_get(value),
+            Some(Object::Generator(GeneratorFrame {
+                kind: GeneratorKind::AsyncGenerator,
+                ..
+            }))
+        )
+    }
+
     pub(crate) fn is_resumable(&self, value: Value) -> bool {
-        matches!(self.try_get(value), Some(Object::Generator(_)))
+        matches!(
+            self.try_get(value),
+            Some(Object::Generator(GeneratorFrame {
+                kind: GeneratorKind::Generator | GeneratorKind::Coroutine,
+                ..
+            }))
+        )
     }
 
     pub(crate) fn coroutine_iterator_source(&self, value: Value) -> Option<Value> {
@@ -804,6 +877,84 @@ impl Heap {
             Some(Object::CoroutineIterator { coroutine, .. }) => Some(*coroutine),
             _ => None,
         }
+    }
+
+    pub(crate) fn async_generator_awaitable(
+        &self,
+        value: Value,
+    ) -> Option<(Value, AsyncGeneratorOperation, AsyncGeneratorAwaitState)> {
+        match self.try_get(value) {
+            Some(Object::AsyncGeneratorAwaitable {
+                generator,
+                operation,
+                state,
+                ..
+            }) => Some((*generator, *operation, *state)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_async_generator_await_state(
+        &mut self,
+        owner: Value,
+        state: AsyncGeneratorAwaitState,
+    ) -> Result<()> {
+        let Object::AsyncGeneratorAwaitable { state: current, .. } = self.get_mut(owner)? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "object is not an async-generator awaitable",
+            ));
+        };
+        *current = state;
+        Ok(())
+    }
+
+    pub(crate) fn claim_async_generator_driver(
+        &mut self,
+        generator: Value,
+        awaitable: Value,
+    ) -> Result<()> {
+        self.write_barrier(generator, awaitable);
+        let Object::Generator(frame) = self.get_mut(generator)? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "object is not an async generator",
+            ));
+        };
+        if frame.kind != GeneratorKind::AsyncGenerator {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "object is not an async generator",
+            ));
+        }
+        if frame
+            .async_driver
+            .is_some_and(|current| current != awaitable)
+        {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "asynchronous generator is already running",
+            ));
+        }
+        frame.async_driver = Some(awaitable);
+        Ok(())
+    }
+
+    pub(crate) fn release_async_generator_driver(
+        &mut self,
+        generator: Value,
+        awaitable: Value,
+    ) -> Result<()> {
+        let Object::Generator(frame) = self.get_mut(generator)? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "object is not an async generator",
+            ));
+        };
+        if frame.async_driver == Some(awaitable) {
+            frame.async_driver = None;
+        }
+        Ok(())
     }
 
     pub(crate) fn generator_state(&self, value: Value) -> Option<GeneratorState> {
@@ -931,6 +1082,7 @@ impl Heap {
         frame.cells = Vec::new();
         frame.exception_stack = Vec::new();
         frame.yield_from = None;
+        frame.async_driver = None;
         frame.return_value = value;
         frame.state = GeneratorState::Completed;
         let after = self.get(owner)?.estimated_bytes();
@@ -1259,8 +1411,10 @@ impl Heap {
             Object::Generator(frame) => match frame.kind {
                 GeneratorKind::Generator => "<generator object>".into(),
                 GeneratorKind::Coroutine => "<coroutine object>".into(),
+                GeneratorKind::AsyncGenerator => "<async_generator object>".into(),
             },
             Object::CoroutineIterator { .. } => "<coroutine_wrapper object>".into(),
+            Object::AsyncGeneratorAwaitable { .. } => "<async_generator_awaitable object>".into(),
             Object::Dict(dict) => {
                 if path.contains(&v) {
                     return Ok("{...}".into());
