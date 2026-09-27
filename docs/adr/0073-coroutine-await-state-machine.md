@@ -4,8 +4,9 @@
 
 Kısmen uygulandı. Bu karar `async def`, `await`, coroutine nesnesi,
 `coroutine_wrapper`, `async for` ve `async with` çekirdeğini kapsar. Async generator
-[ADR 0074](0074-async-generator-protocol.md) ile tamamlanmıştır;
-event-loop/future/task protokolleri açık kalır.
+[ADR 0074](0074-async-generator-protocol.md) ile tamamlanmıştır. Temel
+event-loop/future/task protokolleri [ADR 0075](0075-asyncio-event-loop-future-task.md)
+ile eklenmiştir.
 
 ## Karar
 
@@ -79,7 +80,7 @@ suspend noktaları native stack-map gerektirmeden interpreter fallback'inde kal�
 
 ## Açık kapsam
 
-- Future/task/event-loop scheduling, cancellation ve thread entegrasyonu.
+- OS I/O selector'ları, gerçek zamanlı timer ve thread-safe scheduling.
 - Coroutine frame'lerinin JIT edilmesi ve native suspended-root metadata'sı.
 
 ## Doğrulama

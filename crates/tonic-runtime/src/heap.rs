@@ -45,6 +45,35 @@ pub(crate) enum AsyncGeneratorAwaitState {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsyncState {
+    Pending,
+    Finished(Value),
+    Failed(Value),
+    Cancelled(Value),
+}
+
+#[derive(Debug)]
+pub(crate) struct AsyncFuture {
+    pub class: Value,
+    pub state: AsyncState,
+    pub waiters: Vec<Value>,
+    pub callbacks: Vec<Value>,
+    pub due_tick: Option<u64>,
+    pub timer_result: Value,
+}
+
+#[derive(Debug)]
+pub(crate) struct AsyncTask {
+    pub class: Value,
+    pub coroutine: Value,
+    pub state: AsyncState,
+    pub waiters: Vec<Value>,
+    pub callbacks: Vec<Value>,
+    pub waiting_on: Option<Value>,
+    pub cancel_requested: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct GeneratorFrame {
     pub class: Value,
@@ -110,6 +139,29 @@ pub(crate) enum Builtin {
     AsyncGeneratorAwaitSend,
     AsyncGeneratorAwaitThrow,
     AsyncGeneratorAwaitClose,
+    AsyncioRun,
+    AsyncioCreateTask,
+    AsyncioCurrentTask,
+    AsyncioGetRunningLoop,
+    AsyncioSleep,
+    AsyncioFutureNew,
+    AsyncioFutureAwait,
+    AsyncioFutureNext,
+    AsyncioFutureSend,
+    AsyncioFutureDone,
+    AsyncioFutureCancelled,
+    AsyncioFutureCancel,
+    AsyncioFutureResult,
+    AsyncioFutureException,
+    AsyncioFutureSetResult,
+    AsyncioFutureSetException,
+    AsyncioFutureAddDoneCallback,
+    AsyncioTaskDone,
+    AsyncioTaskCancelled,
+    AsyncioTaskCancel,
+    AsyncioTaskResult,
+    AsyncioTaskException,
+    AsyncioTaskAddDoneCallback,
     Hash,
     Abs,
     IsInstance,
@@ -220,6 +272,16 @@ pub(crate) enum Object {
         operation: AsyncGeneratorOperation,
         state: AsyncGeneratorAwaitState,
     },
+    AsyncFuture(AsyncFuture),
+    AsyncTask(AsyncTask),
+    AsyncFutureIterator {
+        class: Value,
+        source: Value,
+    },
+    AsyncEventLoop {
+        class: Value,
+        generation: u64,
+    },
     Cell(Value),
     Builtin(Builtin),
     Native(usize),
@@ -256,7 +318,11 @@ impl Object {
             | Self::Exception { class, .. }
             | Self::Generator(GeneratorFrame { class, .. })
             | Self::CoroutineIterator { class, .. }
-            | Self::AsyncGeneratorAwaitable { class, .. } => Some(*class),
+            | Self::AsyncGeneratorAwaitable { class, .. }
+            | Self::AsyncFuture(AsyncFuture { class, .. })
+            | Self::AsyncTask(AsyncTask { class, .. })
+            | Self::AsyncFutureIterator { class, .. }
+            | Self::AsyncEventLoop { class, .. } => Some(*class),
             _ => None,
         }
     }
@@ -386,6 +452,36 @@ impl Object {
                     AsyncGeneratorOperation::Close => {}
                 }
             }
+            Self::AsyncFuture(future) => {
+                visit(future.class);
+                visit(future.timer_result);
+                match future.state {
+                    AsyncState::Pending => {}
+                    AsyncState::Finished(value)
+                    | AsyncState::Failed(value)
+                    | AsyncState::Cancelled(value) => visit(value),
+                }
+                future.waiters.iter().copied().for_each(&mut visit);
+                future.callbacks.iter().copied().for_each(visit);
+            }
+            Self::AsyncTask(task) => {
+                visit(task.class);
+                visit(task.coroutine);
+                match task.state {
+                    AsyncState::Pending => {}
+                    AsyncState::Finished(value)
+                    | AsyncState::Failed(value)
+                    | AsyncState::Cancelled(value) => visit(value),
+                }
+                task.waiters.iter().copied().for_each(&mut visit);
+                task.callbacks.iter().copied().for_each(&mut visit);
+                task.waiting_on.iter().copied().for_each(visit);
+            }
+            Self::AsyncFutureIterator { class, source } => {
+                visit(*class);
+                visit(*source);
+            }
+            Self::AsyncEventLoop { class, .. } => visit(*class),
             Self::Dict(dict) => {
                 for (key, value) in &dict.entries {
                     visit(*key);
@@ -957,6 +1053,182 @@ impl Heap {
         Ok(())
     }
 
+    pub(crate) fn async_state(&self, value: Value) -> Option<AsyncState> {
+        match self.try_get(value) {
+            Some(Object::AsyncFuture(future)) => Some(future.state),
+            Some(Object::AsyncTask(task)) => Some(task.state),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn async_future_iterator_source(&self, value: Value) -> Option<Value> {
+        match self.try_get(value) {
+            Some(Object::AsyncFutureIterator { source, .. }) => Some(*source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn async_future_timer(&self, value: Value) -> Option<(u64, Value)> {
+        match self.try_get(value) {
+            Some(Object::AsyncFuture(future)) if future.state == AsyncState::Pending => {
+                future.due_tick.map(|tick| (tick, future.timer_result))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn async_task_coroutine(&self, value: Value) -> Option<Value> {
+        match self.try_get(value) {
+            Some(Object::AsyncTask(task)) => Some(task.coroutine),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn request_task_cancel(&mut self, value: Value) -> Result<(bool, Option<Value>)> {
+        let Object::AsyncTask(task) = self.get_mut(value)? else {
+            return Err(Diagnostic::new("TypeError", "object is not a task"));
+        };
+        if task.state != AsyncState::Pending || task.cancel_requested {
+            return Ok((false, None));
+        }
+        task.cancel_requested = true;
+        let waiting_on = task.waiting_on.take();
+        Ok((true, waiting_on))
+    }
+
+    pub(crate) fn clear_task_cancel_request(&mut self, value: Value) -> Result<()> {
+        let Object::AsyncTask(task) = self.get_mut(value)? else {
+            return Err(Diagnostic::new("TypeError", "object is not a task"));
+        };
+        task.cancel_requested = false;
+        Ok(())
+    }
+
+    pub(crate) fn remove_async_waiter(&mut self, source: Value, task: Value) -> Result<()> {
+        let before = self.get(source)?.estimated_bytes();
+        match self.get_mut(source)? {
+            Object::AsyncFuture(future) => future.waiters.retain(|waiter| *waiter != task),
+            Object::AsyncTask(source_task) => source_task.waiters.retain(|waiter| *waiter != task),
+            _ => return Err(Diagnostic::new("TypeError", "object is not a future")),
+        }
+        let after = self.get(source)?.estimated_bytes();
+        self.bytes = self.bytes.saturating_sub(before.saturating_sub(after));
+        Ok(())
+    }
+
+    pub(crate) fn add_async_waiter(&mut self, source: Value, task: Value) -> Result<()> {
+        self.write_barrier(source, task);
+        let before = self.get(source)?.estimated_bytes();
+        match self.get_mut(source)? {
+            Object::AsyncFuture(future) if future.state == AsyncState::Pending => {
+                if !future.waiters.contains(&task) {
+                    future.waiters.push(task);
+                }
+            }
+            Object::AsyncTask(source_task) if source_task.state == AsyncState::Pending => {
+                if !source_task.waiters.contains(&task) {
+                    source_task.waiters.push(task);
+                }
+            }
+            Object::AsyncFuture(_) | Object::AsyncTask(_) => {}
+            _ => return Err(Diagnostic::new("TypeError", "object is not awaitable")),
+        }
+        let after = self.get(source)?.estimated_bytes();
+        self.bytes += after.saturating_sub(before);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(())
+    }
+
+    pub(crate) fn add_async_callback(&mut self, source: Value, callback: Value) -> Result<bool> {
+        self.write_barrier(source, callback);
+        let before = self.get(source)?.estimated_bytes();
+        let pending = match self.get_mut(source)? {
+            Object::AsyncFuture(future) => {
+                if future.state == AsyncState::Pending {
+                    future.callbacks.push(callback);
+                    true
+                } else {
+                    false
+                }
+            }
+            Object::AsyncTask(task) => {
+                if task.state == AsyncState::Pending {
+                    task.callbacks.push(callback);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => return Err(Diagnostic::new("TypeError", "object is not a future")),
+        };
+        let after = self.get(source)?.estimated_bytes();
+        self.bytes += after.saturating_sub(before);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        Ok(pending)
+    }
+
+    pub(crate) fn complete_async(
+        &mut self,
+        source: Value,
+        state: AsyncState,
+    ) -> Result<(Vec<Value>, Vec<Value>)> {
+        if state == AsyncState::Pending {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "future completion state must be terminal",
+            ));
+        }
+        match state {
+            AsyncState::Finished(value)
+            | AsyncState::Failed(value)
+            | AsyncState::Cancelled(value) => self.write_barrier(source, value),
+            AsyncState::Pending => unreachable!(),
+        }
+        let before = self.get(source)?.estimated_bytes();
+        let (waiters, callbacks) = match self.get_mut(source)? {
+            Object::AsyncFuture(future) => {
+                if future.state != AsyncState::Pending {
+                    return Err(Diagnostic::new(
+                        "InvalidStateError",
+                        "future is already done",
+                    ));
+                }
+                future.state = state;
+                future.due_tick = None;
+                (
+                    std::mem::take(&mut future.waiters),
+                    std::mem::take(&mut future.callbacks),
+                )
+            }
+            Object::AsyncTask(task) => {
+                if task.state != AsyncState::Pending {
+                    return Err(Diagnostic::new("InvalidStateError", "task is already done"));
+                }
+                task.state = state;
+                task.waiting_on = None;
+                (
+                    std::mem::take(&mut task.waiters),
+                    std::mem::take(&mut task.callbacks),
+                )
+            }
+            _ => return Err(Diagnostic::new("TypeError", "object is not a future")),
+        };
+        let after = self.get(source)?.estimated_bytes();
+        self.bytes = self.bytes.saturating_sub(before.saturating_sub(after));
+        Ok((waiters, callbacks))
+    }
+
+    pub(crate) fn set_task_waiting(&mut self, task: Value, source: Option<Value>) -> Result<()> {
+        if let Some(source) = source {
+            self.write_barrier(task, source);
+        }
+        let Object::AsyncTask(task) = self.get_mut(task)? else {
+            return Err(Diagnostic::new("TypeError", "object is not a task"));
+        };
+        task.waiting_on = source;
+        Ok(())
+    }
+
     pub(crate) fn generator_state(&self, value: Value) -> Option<GeneratorState> {
         match self.try_get(value) {
             Some(Object::Generator(frame)) => Some(frame.state),
@@ -1415,6 +1687,22 @@ impl Heap {
             },
             Object::CoroutineIterator { .. } => "<coroutine_wrapper object>".into(),
             Object::AsyncGeneratorAwaitable { .. } => "<async_generator_awaitable object>".into(),
+            Object::AsyncFuture(future) => match future.state {
+                AsyncState::Pending => "<Future pending>".into(),
+                AsyncState::Finished(_) => "<Future finished>".into(),
+                AsyncState::Failed(_) => "<Future finished exception>".into(),
+                AsyncState::Cancelled(_) => "<Future cancelled>".into(),
+            },
+            Object::AsyncTask(task) => match task.state {
+                AsyncState::Pending => "<Task pending>".into(),
+                AsyncState::Finished(_) => "<Task finished>".into(),
+                AsyncState::Failed(_) => "<Task finished exception>".into(),
+                AsyncState::Cancelled(_) => "<Task cancelled>".into(),
+            },
+            Object::AsyncFutureIterator { .. } => "<_asyncio_future_iter object>".into(),
+            Object::AsyncEventLoop { generation, .. } => {
+                format!("<EventLoop running generation={generation}>")
+            }
             Object::Dict(dict) => {
                 if path.contains(&v) {
                     return Ok("{...}".into());
@@ -1533,6 +1821,14 @@ impl Object {
                     captures, defaults, ..
                 } => (captures.capacity() + defaults.capacity()) * 8,
                 Self::Generator(frame) => frame.payload_bytes(),
+                Self::AsyncFuture(future) => {
+                    (future.waiters.capacity() + future.callbacks.capacity())
+                        * std::mem::size_of::<Value>()
+                }
+                Self::AsyncTask(task) => {
+                    (task.waiters.capacity() + task.callbacks.capacity())
+                        * std::mem::size_of::<Value>()
+                }
                 Self::Dict(dict) => dict.estimated_bytes(),
                 _ => 0,
             }

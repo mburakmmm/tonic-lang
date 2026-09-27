@@ -2,8 +2,8 @@
 
 ## Durum
 
-Uygulandı. Event-loop, future/task scheduling ve cancellation ayrı açık
-kapsamdır.
+Uygulandı. Event-loop, future/task scheduling ve cancellation ADR 0075 ile
+tamamlanmıştır.
 
 ## Karar
 

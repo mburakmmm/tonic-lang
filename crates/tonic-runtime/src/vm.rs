@@ -16,7 +16,12 @@ use crate::{
 };
 use calls::{Arguments, ExpandedArgs};
 use num_bigint::BigInt;
-use std::{collections::HashMap, io::Write, sync::Arc, thread::ThreadId};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Write,
+    sync::Arc,
+    thread::ThreadId,
+};
 use tonic_core::{
     ast::Constant,
     bytecode::{Op, Program, VerifiedProgram},
@@ -133,6 +138,50 @@ struct Frame {
     jit_attempted: bool,
     jit_resume: bool,
     jit_expanded_resume_depth: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum AsyncWake {
+    Value(Value),
+    Exception(Value),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum EventLoopReady {
+    Task { task: Value, wake: AsyncWake },
+    Callback { callback: Value, future: Value },
+}
+
+pub(super) struct EventLoopState {
+    object: Value,
+    tick: u64,
+    current_task: Option<Value>,
+    main_task: Value,
+    ready: VecDeque<EventLoopReady>,
+    timers: Vec<Value>,
+    tasks: Vec<Value>,
+}
+
+impl EventLoopState {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        visit(self.object);
+        visit(self.main_task);
+        self.current_task.iter().copied().for_each(&mut visit);
+        self.ready.iter().for_each(|ready| match ready {
+            EventLoopReady::Task { task, wake } => {
+                visit(*task);
+                match wake {
+                    AsyncWake::Value(value) | AsyncWake::Exception(value) => visit(*value),
+                }
+            }
+            EventLoopReady::Callback { callback, future } => {
+                visit(*callback);
+                visit(*future);
+            }
+        });
+        self.timers.iter().copied().for_each(&mut visit);
+        self.tasks.iter().copied().for_each(visit);
+    }
 }
 impl Frame {
     fn set_yield_from_completion(&mut self, target: usize, pc: usize, iterator: Value) {
@@ -1031,6 +1080,10 @@ struct RuntimeTypes {
     async_generator: Value,
     async_generator_asend: Value,
     async_generator_athrow: Value,
+    async_future: Value,
+    async_task: Value,
+    async_future_iterator: Value,
+    async_event_loop: Value,
     base_exception: Value,
     exception: Value,
     type_error: Value,
@@ -1039,6 +1092,8 @@ struct RuntimeTypes {
     stop_iteration: Value,
     stop_async_iteration: Value,
     generator_exit: Value,
+    cancelled_error: Value,
+    invalid_state_error: Value,
     other_exceptions: Vec<(String, Value)>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1073,6 +1128,10 @@ impl RuntimeTypes {
             async_generator: Value::UNBOUND,
             async_generator_asend: Value::UNBOUND,
             async_generator_athrow: Value::UNBOUND,
+            async_future: Value::UNBOUND,
+            async_task: Value::UNBOUND,
+            async_future_iterator: Value::UNBOUND,
+            async_event_loop: Value::UNBOUND,
             base_exception: Value::UNBOUND,
             exception: Value::UNBOUND,
             type_error: Value::UNBOUND,
@@ -1081,6 +1140,8 @@ impl RuntimeTypes {
             stop_iteration: Value::UNBOUND,
             stop_async_iteration: Value::UNBOUND,
             generator_exit: Value::UNBOUND,
+            cancelled_error: Value::UNBOUND,
+            invalid_state_error: Value::UNBOUND,
             other_exceptions: Vec::new(),
         }
     }
@@ -1103,6 +1164,10 @@ impl RuntimeTypes {
             self.async_generator,
             self.async_generator_asend,
             self.async_generator_athrow,
+            self.async_future,
+            self.async_task,
+            self.async_future_iterator,
+            self.async_event_loop,
             self.base_exception,
             self.exception,
             self.type_error,
@@ -1111,6 +1176,8 @@ impl RuntimeTypes {
             self.stop_iteration,
             self.stop_async_iteration,
             self.generator_exit,
+            self.cancelled_error,
+            self.invalid_state_error,
         ];
         roots.extend(self.other_exceptions.iter().map(|(_, value)| *value));
         roots
@@ -1477,6 +1544,8 @@ pub struct Vm {
     frames: Vec<Frame>,
     pending_classes: Vec<PendingClass>,
     pending_exception: Option<Value>,
+    event_loop: Option<EventLoopState>,
+    next_event_loop_generation: u64,
     draining_generator_finalizers: bool,
     finalizer_roots: Vec<Value>,
     pub limits: Limits,
@@ -1540,6 +1609,8 @@ impl Vm {
             frames: Vec::new(),
             pending_classes: Vec::new(),
             pending_exception: None,
+            event_loop: None,
+            next_event_loop_generation: 1,
             draining_generator_finalizers: false,
             finalizer_roots: Vec::new(),
             limits: Limits::default(),
@@ -1646,6 +1717,12 @@ impl Vm {
         let generator_exit =
             vm.heap
                 .builtin_class("GeneratorExit", vec![base_exception], vm.type_class)?;
+        let cancelled_error =
+            vm.heap
+                .builtin_class("CancelledError", vec![base_exception], vm.type_class)?;
+        let invalid_state_error =
+            vm.heap
+                .builtin_class("InvalidStateError", vec![exception], vm.type_class)?;
         let arithmetic_error =
             vm.heap
                 .builtin_class("ArithmeticError", vec![exception], vm.type_class)?;
@@ -1717,6 +1794,18 @@ impl Vm {
                     .builtin_class("MemoryError", vec![exception], vm.type_class)?,
             ),
         ];
+        let async_future = vm
+            .heap
+            .builtin_class("Future", vec![vm.object_class], vm.type_class)?;
+        let async_task = vm
+            .heap
+            .builtin_class("Task", vec![async_future], vm.type_class)?;
+        let async_future_iterator =
+            vm.heap
+                .builtin_class("_asyncio_future_iter", vec![vm.object_class], vm.type_class)?;
+        let async_event_loop =
+            vm.heap
+                .builtin_class("EventLoop", vec![vm.object_class], vm.type_class)?;
         vm.runtime_types = RuntimeTypes {
             none: vm
                 .heap
@@ -1775,6 +1864,10 @@ impl Vm {
                 vec![vm.object_class],
                 vm.type_class,
             )?,
+            async_future,
+            async_task,
+            async_future_iterator,
+            async_event_loop,
             base_exception,
             exception,
             type_error,
@@ -1783,6 +1876,8 @@ impl Vm {
             stop_iteration,
             stop_async_iteration,
             generator_exit,
+            cancelled_error,
+            invalid_state_error,
             other_exceptions,
         };
         for (class, name, builtin) in [
@@ -1927,9 +2022,119 @@ impl Vm {
                 "close",
                 Builtin::AsyncGeneratorAwaitClose,
             ),
+            (
+                vm.runtime_types.async_future,
+                "__await__",
+                Builtin::AsyncioFutureAwait,
+            ),
+            (
+                vm.runtime_types.async_future_iterator,
+                "__iter__",
+                Builtin::AsyncioFutureAwait,
+            ),
+            (
+                vm.runtime_types.async_future_iterator,
+                "__next__",
+                Builtin::AsyncioFutureNext,
+            ),
+            (
+                vm.runtime_types.async_future_iterator,
+                "send",
+                Builtin::AsyncioFutureSend,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "done",
+                Builtin::AsyncioFutureDone,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "cancelled",
+                Builtin::AsyncioFutureCancelled,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "cancel",
+                Builtin::AsyncioFutureCancel,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "result",
+                Builtin::AsyncioFutureResult,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "exception",
+                Builtin::AsyncioFutureException,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "set_result",
+                Builtin::AsyncioFutureSetResult,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "set_exception",
+                Builtin::AsyncioFutureSetException,
+            ),
+            (
+                vm.runtime_types.async_future,
+                "add_done_callback",
+                Builtin::AsyncioFutureAddDoneCallback,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "done",
+                Builtin::AsyncioTaskDone,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "cancelled",
+                Builtin::AsyncioTaskCancelled,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "cancel",
+                Builtin::AsyncioTaskCancel,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "result",
+                Builtin::AsyncioTaskResult,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "exception",
+                Builtin::AsyncioTaskException,
+            ),
+            (
+                vm.runtime_types.async_task,
+                "add_done_callback",
+                Builtin::AsyncioTaskAddDoneCallback,
+            ),
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, name, value)?;
+        }
+        let asyncio = vm.heap.alloc(Object::Module(Vec::new()))?;
+        vm.modules.insert("asyncio".into(), asyncio);
+        for (name, builtin) in [
+            ("run", Builtin::AsyncioRun),
+            ("create_task", Builtin::AsyncioCreateTask),
+            ("current_task", Builtin::AsyncioCurrentTask),
+            ("get_running_loop", Builtin::AsyncioGetRunningLoop),
+            ("sleep", Builtin::AsyncioSleep),
+            ("Future", Builtin::AsyncioFutureNew),
+        ] {
+            let value = vm.heap.alloc(Object::Builtin(builtin))?;
+            vm.heap.add_module_member(asyncio, name, value)?;
+        }
+        for (name, value) in [
+            ("Task", vm.runtime_types.async_task),
+            ("CancelledError", vm.runtime_types.cancelled_error),
+            ("InvalidStateError", vm.runtime_types.invalid_state_error),
+        ] {
+            vm.heap.add_module_member(asyncio, name, value)?;
         }
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
@@ -2078,6 +2283,7 @@ impl Vm {
         self.frames.clear();
         self.pending_classes.clear();
         self.pending_exception = None;
+        self.event_loop = None;
         self.registers.push(Value::UNBOUND);
         let first = self.registers.len();
         self.registers.extend(values);
@@ -2359,6 +2565,9 @@ impl Vm {
         }
         for pending in &self.pending_classes {
             pending.state.trace(|value| roots.push(value));
+        }
+        if let Some(event_loop) = &self.event_loop {
+            event_loop.trace(|value| roots.push(value));
         }
         if include_handles {
             self.handles.roots(|value| roots.push(value));
@@ -3214,6 +3423,11 @@ impl Vm {
             Object::Generator(frame) => frame.class,
             Object::CoroutineIterator { class, .. } => *class,
             Object::AsyncGeneratorAwaitable { class, .. } => *class,
+            Object::AsyncFuture(future) => future.class,
+            Object::AsyncTask(task) => task.class,
+            Object::AsyncFutureIterator { class, .. } | Object::AsyncEventLoop { class, .. } => {
+                *class
+            }
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -3585,6 +3799,8 @@ impl Vm {
             "StopIteration" => self.runtime_types.stop_iteration,
             "StopAsyncIteration" => self.runtime_types.stop_async_iteration,
             "GeneratorExit" => self.runtime_types.generator_exit,
+            "CancelledError" => self.runtime_types.cancelled_error,
+            "InvalidStateError" => self.runtime_types.invalid_state_error,
             "RuntimeError" => self.runtime_types.runtime_error,
             name => self
                 .runtime_types

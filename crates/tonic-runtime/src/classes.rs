@@ -1296,7 +1296,24 @@ impl Heap {
                 | Builtin::AsyncGeneratorAwaitNext
                 | Builtin::AsyncGeneratorAwaitSend
                 | Builtin::AsyncGeneratorAwaitThrow
-                | Builtin::AsyncGeneratorAwaitClose,
+                | Builtin::AsyncGeneratorAwaitClose
+                | Builtin::AsyncioFutureAwait
+                | Builtin::AsyncioFutureNext
+                | Builtin::AsyncioFutureSend
+                | Builtin::AsyncioFutureDone
+                | Builtin::AsyncioFutureCancelled
+                | Builtin::AsyncioFutureCancel
+                | Builtin::AsyncioFutureResult
+                | Builtin::AsyncioFutureException
+                | Builtin::AsyncioFutureSetResult
+                | Builtin::AsyncioFutureSetException
+                | Builtin::AsyncioFutureAddDoneCallback
+                | Builtin::AsyncioTaskDone
+                | Builtin::AsyncioTaskCancelled
+                | Builtin::AsyncioTaskCancel
+                | Builtin::AsyncioTaskResult
+                | Builtin::AsyncioTaskException
+                | Builtin::AsyncioTaskAddDoneCallback,
             )) => DescriptorCall {
                 callable: value,
                 receiver: Some(descriptor),
@@ -1348,7 +1365,24 @@ impl Heap {
                 | Builtin::AsyncGeneratorAwaitNext
                 | Builtin::AsyncGeneratorAwaitSend
                 | Builtin::AsyncGeneratorAwaitThrow
-                | Builtin::AsyncGeneratorAwaitClose,
+                | Builtin::AsyncGeneratorAwaitClose
+                | Builtin::AsyncioFutureAwait
+                | Builtin::AsyncioFutureNext
+                | Builtin::AsyncioFutureSend
+                | Builtin::AsyncioFutureDone
+                | Builtin::AsyncioFutureCancelled
+                | Builtin::AsyncioFutureCancel
+                | Builtin::AsyncioFutureResult
+                | Builtin::AsyncioFutureException
+                | Builtin::AsyncioFutureSetResult
+                | Builtin::AsyncioFutureSetException
+                | Builtin::AsyncioFutureAddDoneCallback
+                | Builtin::AsyncioTaskDone
+                | Builtin::AsyncioTaskCancelled
+                | Builtin::AsyncioTaskCancel
+                | Builtin::AsyncioTaskResult
+                | Builtin::AsyncioTaskException
+                | Builtin::AsyncioTaskAddDoneCallback,
             )) if instance.is_some() => Binding::Instance(value),
             _ => Binding::Plain,
         };
@@ -1480,6 +1514,30 @@ impl Heap {
                 return self.bind_descriptor(value, Some(owner), class);
             }
             Ok(Object::AsyncGeneratorAwaitable { class, .. }) => {
+                let class = *class;
+                if name == "__class__" {
+                    return Ok(class);
+                }
+                let Some(value) = self.class_lookup(class, name)? else {
+                    return Err(missing(name));
+                };
+                return self.bind_descriptor(value, Some(owner), class);
+            }
+            Ok(
+                Object::AsyncFuture(crate::heap::AsyncFuture { class, .. })
+                | Object::AsyncTask(crate::heap::AsyncTask { class, .. }),
+            ) => {
+                let class = *class;
+                if name == "__class__" {
+                    return Ok(class);
+                }
+                let Some(value) = self.class_lookup(class, name)? else {
+                    return Err(missing(name));
+                };
+                return self.bind_descriptor(value, Some(owner), class);
+            }
+            Ok(Object::AsyncFutureIterator { class, .. })
+            | Ok(Object::AsyncEventLoop { class, .. }) => {
                 let class = *class;
                 if name == "__class__" {
                     return Ok(class);

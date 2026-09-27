@@ -306,6 +306,18 @@ try:
 except StopIteration as error:
     print(error.value)
 ''',
+'''import asyncio
+async def worker(label):
+    print('start',label)
+    await asyncio.sleep(0)
+    print('end',label)
+    return label
+async def main():
+    first=asyncio.create_task(worker('a'))
+    second=asyncio.create_task(worker('b'))
+    print(await first,await second)
+print(asyncio.run(main()))
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),

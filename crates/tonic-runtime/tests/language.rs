@@ -232,6 +232,127 @@ fn unreachable_suspended_coroutines_close_awaited_iterators() {
 }
 
 #[test]
+fn asyncio_runs_tasks_futures_callbacks_and_timers() {
+    let source = r#"import asyncio
+def completed(future):
+    print('callback',future.done(),future.result())
+async def producer(future):
+    await asyncio.sleep(0)
+    future.set_result(42)
+    return 'producer'
+async def worker(name):
+    print('start',name,type(asyncio.current_task()).__name__)
+    value=await asyncio.sleep(0,name)
+    print('end',name)
+    return value
+async def main():
+    print(type(asyncio.get_running_loop()).__name__)
+    future=asyncio.Future()
+    future.add_done_callback(completed)
+    producer_task=asyncio.create_task(producer(future))
+    first=asyncio.create_task(worker('a'))
+    second=asyncio.create_task(worker('b'))
+    print(type(first).__name__,first.done(),await future,await producer_task)
+    print(await first,await second)
+    return 'ok'
+print(asyncio.run(main()))"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"EventLoop\nstart a Task\nstart b Task\nend a\nend b\ncallback True 42\nTask False 42 producer\na b\nok\n",
+    );
+}
+
+#[test]
+fn asyncio_cancellation_and_failure_propagate_through_task_protocol() {
+    let source = r#"import asyncio
+async def cancelled_worker():
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        print('worker-cancelled')
+        raise
+async def failed_worker():
+    await asyncio.sleep(0)
+    raise ValueError('failed')
+async def main():
+    cancelled=asyncio.create_task(cancelled_worker())
+    failed=asyncio.create_task(failed_worker())
+    await asyncio.sleep(0)
+    print('cancel-request',cancelled.cancel())
+    try:
+        await cancelled
+    except asyncio.CancelledError:
+        print('cancel-state',cancelled.done(),cancelled.cancelled())
+    try:
+        await failed
+    except ValueError as error:
+        print('failure',str(error),type(failed.exception()).__name__)
+    return 'done'
+print(asyncio.run(main()))"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"cancel-request True\nworker-cancelled\ncancel-state True True\nfailure failed ValueError\ndone\n",
+    );
+}
+
+#[test]
+fn asyncio_cancellation_preempts_stale_wakes_and_can_be_requested_again() {
+    let source = r#"import asyncio
+async def worker():
+    try:
+        await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        print('caught-first')
+    await asyncio.sleep(1)
+async def main():
+    task=asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    print('first',task.cancel())
+    await asyncio.sleep(0)
+    print('second',task.cancel())
+    try:
+        await task
+    except asyncio.CancelledError:
+        print('done',task.done(),task.cancelled())
+asyncio.run(main())"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"first True\ncaught-first\nsecond True\ndone True True\n",
+    );
+}
+
+#[test]
+fn asyncio_rejects_invalid_state_and_nested_event_loops() {
+    let source = r#"import asyncio
+async def inner():
+    return 1
+async def main():
+    future=asyncio.Future()
+    for method in [future.result,future.exception]:
+        try:
+            method()
+        except asyncio.InvalidStateError:
+            print('pending')
+    future.set_result(7)
+    try:
+        future.set_result(8)
+    except asyncio.InvalidStateError:
+        print('already-done')
+    nested=inner()
+    try:
+        asyncio.run(nested)
+    except RuntimeError as error:
+        print(str(error))
+        nested.close()
+    return await future
+print(asyncio.run(main()))"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"pending\npending\nalready-done\nasyncio.run cannot be called from a running event loop\n7\n",
+    );
+}
+
+#[test]
 fn async_generators_support_iteration_asend_and_suspended_awaits() {
     let source = r#"class Pause:
     def __init__(self,value):

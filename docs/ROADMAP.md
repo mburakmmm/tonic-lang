@@ -156,7 +156,11 @@ sonra alınır.
     `asend`/`athrow`/`aclose` awaitable'ları, iç `await` forwarding,
     `StopAsyncIteration`/PEP 479 sınırı, logical finalization ve JIT-caller
     interpreter fallback'i.
-  - [ ] Event-loop/future/task protokolleri, scheduling ve cancellation.
+  - [x] Tonic-owned tek thread event loop; GC-traced Future/Task/await iterator,
+    FIFO scheduling, deterministik timer, done callback, exception propagation,
+    cancellation ve temel native `asyncio` modülü (`run`, `create_task`,
+    `current_task`, `get_running_loop`, `sleep`, `Future`). Gerçek zamanlı I/O
+    selector ve thread-safe scheduling standart kütüphane kapsamında kalır.
 - [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
@@ -256,8 +260,8 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler kalan builtin protokolleri,
-event-loop/future/task protokolleri, genel kullanıcı finalizer semantiği ve HPy H1
+Sıradaki çekirdek işler kalan builtin protokolleri, kapsamlı syntax korpusu,
+genel kullanıcı finalizer semantiği, OS destekli async I/O ve HPy H1
 shared-library loader/handle yüzeyidir. JIT'in desteklenen tier'ı
 x86-64/AArch64 debug-release, normal/stress
 GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;

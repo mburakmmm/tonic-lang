@@ -1,9 +1,9 @@
 //! Call binding: ordinary calls read a register window; only actual expansion
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
-    ArgumentExpansion, AsyncGeneratorCompletion, DictConstruction, DictConstructionStart,
-    DictPairConstruction, Frame, IterableCollection, IterableCollectionKind, NativeSubclassFinish,
-    ReturnAction, Vm,
+    ArgumentExpansion, AsyncGeneratorCompletion, AsyncWake, DictConstruction,
+    DictConstructionStart, DictPairConstruction, EventLoopReady, EventLoopState, Frame,
+    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, Vm,
 };
 use crate::{
     dict::Dict,
@@ -11,7 +11,10 @@ use crate::{
         hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish, sequence_start,
         sequence_step,
     },
-    heap::{AsyncGeneratorAwaitState, AsyncGeneratorOperation, Builtin, GeneratorState, Object},
+    heap::{
+        AsyncFuture, AsyncGeneratorAwaitState, AsyncGeneratorOperation, AsyncState, AsyncTask,
+        Builtin, GeneratorState, Object,
+    },
     native::Context,
     value::Value,
 };
@@ -548,6 +551,34 @@ impl Vm {
             }
             Object::Builtin(builtin) => {
                 let builtin = *builtin;
+                if matches!(
+                    builtin,
+                    Builtin::AsyncioRun
+                        | Builtin::AsyncioCreateTask
+                        | Builtin::AsyncioCurrentTask
+                        | Builtin::AsyncioGetRunningLoop
+                        | Builtin::AsyncioSleep
+                        | Builtin::AsyncioFutureNew
+                        | Builtin::AsyncioFutureAwait
+                        | Builtin::AsyncioFutureNext
+                        | Builtin::AsyncioFutureSend
+                        | Builtin::AsyncioFutureDone
+                        | Builtin::AsyncioFutureCancelled
+                        | Builtin::AsyncioFutureCancel
+                        | Builtin::AsyncioFutureResult
+                        | Builtin::AsyncioFutureException
+                        | Builtin::AsyncioFutureSetResult
+                        | Builtin::AsyncioFutureSetException
+                        | Builtin::AsyncioFutureAddDoneCallback
+                        | Builtin::AsyncioTaskDone
+                        | Builtin::AsyncioTaskCancelled
+                        | Builtin::AsyncioTaskCancel
+                        | Builtin::AsyncioTaskResult
+                        | Builtin::AsyncioTaskException
+                        | Builtin::AsyncioTaskAddDoneCallback
+                ) {
+                    return self.invoke_asyncio_builtin(p, builtin, destination, &args, output);
+                }
                 if let Some(kind) = native_new_kind(builtin) {
                     return self.invoke_native_new(p, kind, destination, &args, output);
                 }
@@ -5214,6 +5245,663 @@ impl Vm {
         }
     }
 
+    fn invoke_asyncio_builtin(
+        &mut self,
+        p: &Program,
+        builtin: Builtin,
+        destination: usize,
+        args: &Arguments<'_>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.keyword_count() != 0 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "asyncio builtin does not accept keyword arguments",
+            ));
+        }
+        let count = args.count();
+        let argument = |index| args.positional(&self.registers, index);
+        match builtin {
+            Builtin::AsyncioRun => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.run expects one coroutine",
+                    ));
+                }
+                let result = self.run_async_event_loop(p, argument(0), output)?;
+                self.registers[destination] = result;
+            }
+            Builtin::AsyncioCreateTask => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.create_task expects one coroutine",
+                    ));
+                }
+                let task = self.create_async_task(argument(0))?;
+                self.registers[destination] = task;
+            }
+            Builtin::AsyncioCurrentTask => {
+                if count != 0 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.current_task expects no arguments",
+                    ));
+                }
+                self.registers[destination] = self
+                    .event_loop
+                    .as_ref()
+                    .and_then(|event_loop| event_loop.current_task)
+                    .unwrap_or(Value::NONE);
+            }
+            Builtin::AsyncioGetRunningLoop => {
+                if count != 0 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.get_running_loop expects no arguments",
+                    ));
+                }
+                self.registers[destination] = self
+                    .event_loop
+                    .as_ref()
+                    .map(|event_loop| event_loop.object)
+                    .ok_or_else(|| Diagnostic::new("RuntimeError", "no running event loop"))?;
+            }
+            Builtin::AsyncioSleep => {
+                if !(1..=2).contains(&count) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.sleep expects a delay and optional result",
+                    ));
+                }
+                let delay = self.async_delay_ticks(argument(0))?;
+                let result = if count == 2 { argument(1) } else { Value::NONE };
+                let due_tick = self
+                    .event_loop
+                    .as_ref()
+                    .ok_or_else(|| Diagnostic::new("RuntimeError", "no running event loop"))?
+                    .tick
+                    .saturating_add(delay.max(1));
+                let future = self.heap.alloc(Object::AsyncFuture(AsyncFuture {
+                    class: self.runtime_types.async_future,
+                    state: AsyncState::Pending,
+                    waiters: Vec::new(),
+                    callbacks: Vec::new(),
+                    due_tick: Some(due_tick),
+                    timer_result: result,
+                }))?;
+                self.event_loop
+                    .as_mut()
+                    .expect("running event loop")
+                    .timers
+                    .push(future);
+                self.registers[destination] = future;
+            }
+            Builtin::AsyncioFutureNew => {
+                if count != 0 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "asyncio.Future expects no arguments",
+                    ));
+                }
+                if self.event_loop.is_none() {
+                    return Err(Diagnostic::new("RuntimeError", "no running event loop"));
+                }
+                self.registers[destination] =
+                    self.heap.alloc(Object::AsyncFuture(AsyncFuture {
+                        class: self.runtime_types.async_future,
+                        state: AsyncState::Pending,
+                        waiters: Vec::new(),
+                        callbacks: Vec::new(),
+                        due_tick: None,
+                        timer_result: Value::NONE,
+                    }))?;
+            }
+            Builtin::AsyncioFutureAwait => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.__await__ expects no arguments",
+                    ));
+                }
+                let source = argument(0);
+                if self.heap.async_future_iterator_source(source).is_some() {
+                    self.registers[destination] = source;
+                } else if self.heap.async_state(source).is_some() {
+                    self.registers[destination] = self.heap.alloc(Object::AsyncFutureIterator {
+                        class: self.runtime_types.async_future_iterator,
+                        source,
+                    })?;
+                } else {
+                    return Err(Diagnostic::new("TypeError", "descriptor requires a Future"));
+                }
+            }
+            Builtin::AsyncioFutureNext | Builtin::AsyncioFutureSend => {
+                let expected = if matches!(builtin, Builtin::AsyncioFutureNext) {
+                    1
+                } else {
+                    2
+                };
+                if count != expected {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future iterator received invalid arguments",
+                    ));
+                }
+                let source = self
+                    .heap
+                    .async_future_iterator_source(argument(0))
+                    .ok_or_else(|| {
+                        Diagnostic::new("TypeError", "descriptor requires a Future iterator")
+                    })?;
+                match self
+                    .heap
+                    .async_state(source)
+                    .expect("Future iterator source")
+                {
+                    AsyncState::Pending => {
+                        if expected == 2 && argument(1) != Value::NONE {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "cannot send a non-None value to a pending Future iterator",
+                            ));
+                        }
+                        self.registers[destination] = source;
+                    }
+                    AsyncState::Finished(value) => {
+                        return Err(self.generator_stop_iteration(value)?)
+                    }
+                    AsyncState::Failed(exception) | AsyncState::Cancelled(exception) => {
+                        self.pending_exception = Some(exception);
+                        return Err(self.exception_diagnostic(exception)?);
+                    }
+                }
+            }
+            Builtin::AsyncioFutureDone | Builtin::AsyncioTaskDone => {
+                let source = self.require_async_receiver(args, "done")?;
+                self.registers[destination] = Value::bool(
+                    self.heap.async_state(source).expect("validated future") != AsyncState::Pending,
+                );
+            }
+            Builtin::AsyncioFutureCancelled | Builtin::AsyncioTaskCancelled => {
+                let source = self.require_async_receiver(args, "cancelled")?;
+                self.registers[destination] = Value::bool(matches!(
+                    self.heap.async_state(source).expect("validated future"),
+                    AsyncState::Cancelled(_)
+                ));
+            }
+            Builtin::AsyncioFutureCancel => {
+                let source = self.require_async_receiver(args, "cancel")?;
+                if matches!(self.heap.get(source), Ok(Object::AsyncTask(_))) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.cancel descriptor does not accept Task",
+                    ));
+                }
+                let cancelled = if self.heap.async_state(source) == Some(AsyncState::Pending) {
+                    let exception =
+                        self.exception_from_diagnostic(&Diagnostic::new("CancelledError", ""))?;
+                    self.complete_async_source(source, AsyncState::Cancelled(exception))?;
+                    true
+                } else {
+                    false
+                };
+                self.registers[destination] = Value::bool(cancelled);
+            }
+            Builtin::AsyncioTaskCancel => {
+                let task = self.require_async_receiver(args, "cancel")?;
+                if !matches!(self.heap.get(task), Ok(Object::AsyncTask(_))) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Task.cancel descriptor requires a Task",
+                    ));
+                }
+                let (cancelled, waiting_on) = self.heap.request_task_cancel(task)?;
+                if cancelled {
+                    let exception =
+                        self.exception_from_diagnostic(&Diagnostic::new("CancelledError", ""))?;
+                    if let Some(waiting_on) = waiting_on {
+                        self.heap.remove_async_waiter(waiting_on, task)?;
+                    }
+                    let event_loop = self
+                        .event_loop
+                        .as_mut()
+                        .ok_or_else(|| Diagnostic::new("RuntimeError", "no running event loop"))?;
+                    event_loop.ready.retain(|ready| {
+                        !matches!(ready, EventLoopReady::Task { task: queued, .. } if *queued == task)
+                    });
+                    event_loop.ready.push_front(EventLoopReady::Task {
+                        task,
+                        wake: AsyncWake::Exception(exception),
+                    });
+                }
+                self.registers[destination] = Value::bool(cancelled);
+            }
+            Builtin::AsyncioFutureResult | Builtin::AsyncioTaskResult => {
+                let source = self.require_async_receiver(args, "result")?;
+                match self.heap.async_state(source).expect("validated future") {
+                    AsyncState::Pending => {
+                        return Err(Diagnostic::new("InvalidStateError", "result is not ready"))
+                    }
+                    AsyncState::Finished(value) => self.registers[destination] = value,
+                    AsyncState::Failed(exception) | AsyncState::Cancelled(exception) => {
+                        self.pending_exception = Some(exception);
+                        return Err(self.exception_diagnostic(exception)?);
+                    }
+                }
+            }
+            Builtin::AsyncioFutureException | Builtin::AsyncioTaskException => {
+                let source = self.require_async_receiver(args, "exception")?;
+                match self.heap.async_state(source).expect("validated future") {
+                    AsyncState::Pending => {
+                        return Err(Diagnostic::new("InvalidStateError", "exception is not set"))
+                    }
+                    AsyncState::Finished(_) => self.registers[destination] = Value::NONE,
+                    AsyncState::Failed(exception) => self.registers[destination] = exception,
+                    AsyncState::Cancelled(exception) => {
+                        self.pending_exception = Some(exception);
+                        return Err(self.exception_diagnostic(exception)?);
+                    }
+                }
+            }
+            Builtin::AsyncioFutureSetResult => {
+                if count != 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.set_result expects one argument",
+                    ));
+                }
+                let source = argument(0);
+                if !matches!(self.heap.get(source), Ok(Object::AsyncFuture(_))) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.set_result descriptor requires a Future",
+                    ));
+                }
+                self.complete_async_source(source, AsyncState::Finished(argument(1)))?;
+                self.registers[destination] = Value::NONE;
+            }
+            Builtin::AsyncioFutureSetException => {
+                if count != 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.set_exception expects one argument",
+                    ));
+                }
+                let source = argument(0);
+                if !matches!(self.heap.get(source), Ok(Object::AsyncFuture(_))) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "Future.set_exception descriptor requires a Future",
+                    ));
+                }
+                let exception = self.normalize_raised_exception(argument(1))?;
+                self.complete_async_source(source, AsyncState::Failed(exception))?;
+                self.registers[destination] = Value::NONE;
+            }
+            Builtin::AsyncioFutureAddDoneCallback | Builtin::AsyncioTaskAddDoneCallback => {
+                if count != 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "add_done_callback expects one callback",
+                    ));
+                }
+                let source = argument(0);
+                if self.heap.async_state(source).is_none() {
+                    return Err(Diagnostic::new("TypeError", "descriptor requires a Future"));
+                }
+                let callback = argument(1);
+                if !self.heap.add_async_callback(source, callback)? {
+                    self.schedule_async_callback(callback, source)?;
+                }
+                self.registers[destination] = Value::NONE;
+            }
+            _ => unreachable!("non-asyncio builtin passed to asyncio dispatcher"),
+        }
+        Ok(())
+    }
+
+    fn require_async_receiver(&self, args: &Arguments<'_>, method: &str) -> Result<Value> {
+        if args.count() != 1 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                format!("{method} expects no arguments"),
+            ));
+        }
+        let source = args.positional(&self.registers, 0);
+        if self.heap.async_state(source).is_none() {
+            return Err(Diagnostic::new(
+                "TypeError",
+                format!("{method} descriptor requires a Future"),
+            ));
+        }
+        Ok(source)
+    }
+
+    fn async_delay_ticks(&self, value: Value) -> Result<u64> {
+        if self.heap.is_integer(value) {
+            let integer = self.heap.integer(value)?;
+            return Ok(integer.to_u64().unwrap_or(0));
+        }
+        if self.heap.is_float(value) {
+            let delay = self.heap.float(value)?;
+            if !delay.is_finite() {
+                return Err(Diagnostic::new("ValueError", "sleep delay must be finite"));
+            }
+            return Ok(delay.max(0.0).ceil() as u64);
+        }
+        Err(Diagnostic::new("TypeError", "sleep delay must be a number"))
+    }
+
+    fn create_async_task(&mut self, coroutine: Value) -> Result<Value> {
+        if self.event_loop.is_none() {
+            return Err(Diagnostic::new("RuntimeError", "no running event loop"));
+        }
+        if !self.heap.is_coroutine(coroutine) {
+            return Err(Diagnostic::new("TypeError", "a coroutine was expected"));
+        }
+        let task = self.heap.alloc(Object::AsyncTask(AsyncTask {
+            class: self.runtime_types.async_task,
+            coroutine,
+            state: AsyncState::Pending,
+            waiters: Vec::new(),
+            callbacks: Vec::new(),
+            waiting_on: None,
+            cancel_requested: false,
+        }))?;
+        let event_loop = self.event_loop.as_mut().expect("checked event loop");
+        event_loop.tasks.push(task);
+        event_loop.ready.push_back(EventLoopReady::Task {
+            task,
+            wake: AsyncWake::Value(Value::NONE),
+        });
+        Ok(task)
+    }
+
+    fn schedule_async_task(&mut self, task: Value, wake: AsyncWake) -> Result<()> {
+        let event_loop = self
+            .event_loop
+            .as_mut()
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "no running event loop"))?;
+        event_loop
+            .ready
+            .push_back(EventLoopReady::Task { task, wake });
+        Ok(())
+    }
+
+    fn schedule_async_callback(&mut self, callback: Value, future: Value) -> Result<()> {
+        let event_loop = self
+            .event_loop
+            .as_mut()
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "no running event loop"))?;
+        event_loop
+            .ready
+            .push_back(EventLoopReady::Callback { callback, future });
+        Ok(())
+    }
+
+    fn complete_async_source(&mut self, source: Value, state: AsyncState) -> Result<()> {
+        let (waiters, callbacks) = self.heap.complete_async(source, state)?;
+        let wake = match state {
+            AsyncState::Finished(value) => AsyncWake::Value(value),
+            AsyncState::Failed(exception) | AsyncState::Cancelled(exception) => {
+                AsyncWake::Exception(exception)
+            }
+            AsyncState::Pending => unreachable!("terminal completion required"),
+        };
+        for callback in callbacks {
+            self.schedule_async_callback(callback, source)?;
+        }
+        for waiter in waiters {
+            self.schedule_async_task(waiter, wake)?;
+        }
+        Ok(())
+    }
+
+    fn mature_async_timers(&mut self) -> Result<()> {
+        let (tick, timers) = {
+            let event_loop = self.event_loop.as_mut().expect("running event loop");
+            (event_loop.tick, std::mem::take(&mut event_loop.timers))
+        };
+        let mut pending = Vec::new();
+        for future in timers {
+            match self.heap.async_future_timer(future) {
+                Some((due_tick, result)) if due_tick <= tick => {
+                    self.complete_async_source(future, AsyncState::Finished(result))?;
+                }
+                Some(_) => pending.push(future),
+                None => {}
+            }
+        }
+        self.event_loop
+            .as_mut()
+            .expect("running event loop")
+            .timers
+            .extend(pending);
+        Ok(())
+    }
+
+    fn run_async_event_loop(
+        &mut self,
+        p: &Program,
+        coroutine: Value,
+        output: &mut dyn Write,
+    ) -> Result<Value> {
+        if self.event_loop.is_some() {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "asyncio.run cannot be called from a running event loop",
+            ));
+        }
+        if !self.heap.is_coroutine(coroutine) {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "asyncio.run expects a coroutine",
+            ));
+        }
+        let generation = self.next_event_loop_generation;
+        self.next_event_loop_generation = self.next_event_loop_generation.saturating_add(1);
+        let object = self.heap.alloc(Object::AsyncEventLoop {
+            class: self.runtime_types.async_event_loop,
+            generation,
+        })?;
+        self.event_loop = Some(EventLoopState {
+            object,
+            tick: 0,
+            current_task: None,
+            main_task: Value::UNBOUND,
+            ready: Default::default(),
+            timers: Vec::new(),
+            tasks: Vec::new(),
+        });
+        let run_result = (|| {
+            let main_task = self.create_async_task(coroutine)?;
+            self.event_loop.as_mut().expect("event loop").main_task = main_task;
+            loop {
+                match self.heap.async_state(main_task).expect("main task") {
+                    AsyncState::Finished(value) => return Ok(value),
+                    AsyncState::Failed(exception) | AsyncState::Cancelled(exception) => {
+                        self.pending_exception = Some(exception);
+                        return Err(self.exception_diagnostic(exception)?);
+                    }
+                    AsyncState::Pending => {}
+                }
+                {
+                    let event_loop = self.event_loop.as_mut().expect("event loop");
+                    event_loop.tick = event_loop.tick.saturating_add(1);
+                }
+                self.mature_async_timers()?;
+                let ready = self
+                    .event_loop
+                    .as_mut()
+                    .expect("event loop")
+                    .ready
+                    .pop_front();
+                let Some(ready) = ready else {
+                    let next_tick = self
+                        .event_loop
+                        .as_ref()
+                        .expect("event loop")
+                        .timers
+                        .iter()
+                        .filter_map(|future| self.heap.async_future_timer(*future))
+                        .map(|(tick, _)| tick)
+                        .min();
+                    if let Some(next_tick) = next_tick {
+                        self.event_loop.as_mut().expect("event loop").tick = next_tick;
+                        self.mature_async_timers()?;
+                        continue;
+                    }
+                    return Err(Diagnostic::new(
+                        "RuntimeError",
+                        "event loop stopped before the main task completed",
+                    ));
+                };
+                match ready {
+                    EventLoopReady::Task { task, wake } => {
+                        if self.heap.async_state(task) != Some(AsyncState::Pending) {
+                            continue;
+                        }
+                        self.event_loop.as_mut().expect("event loop").current_task = Some(task);
+                        let result = self.step_async_task(p, task, wake, output);
+                        self.event_loop.as_mut().expect("event loop").current_task = None;
+                        result?;
+                    }
+                    EventLoopReady::Callback { callback, future } => {
+                        if self
+                            .reenter_from_native(p, callback, &[future], output)
+                            .is_err()
+                        {
+                            self.pending_exception = None;
+                        }
+                    }
+                }
+            }
+        })();
+        self.event_loop = None;
+        run_result
+    }
+
+    fn step_async_task(
+        &mut self,
+        p: &Program,
+        task: Value,
+        wake: AsyncWake,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let coroutine = self
+            .heap
+            .async_task_coroutine(task)
+            .ok_or_else(|| Diagnostic::new("TypeError", "object is not a task"))?;
+        self.heap.set_task_waiting(task, None)?;
+        if matches!(wake, AsyncWake::Exception(exception) if self.instance_check(
+            exception,
+            self.runtime_types.cancelled_error,
+            false,
+            0,
+        )?) {
+            self.heap.clear_task_cancel_request(task)?;
+        }
+        let register_len = self.registers.len();
+        let cell_len = self.cells.len();
+        let argument_depth = self.arguments.len();
+        let frame_depth = self.frames.len();
+        let pending_class_depth = self.pending_classes.len();
+        let saved_exception = self.pending_exception.take();
+        self.registers.push(Value::UNBOUND);
+        let destination = register_len;
+        let result = (|| {
+            let sent = match wake {
+                AsyncWake::Value(value) => value,
+                AsyncWake::Exception(_) => Value::NONE,
+            };
+            self.resume_generator(p, coroutine, destination, sent, ReturnAction::Next(None))?;
+            if let AsyncWake::Exception(exception) = wake {
+                if self.heap.generator_yield_from(coroutine).is_some() {
+                    self.frames
+                        .last_mut()
+                        .expect("resumed coroutine")
+                        .injected_exception = Some(exception);
+                } else {
+                    self.pending_exception = Some(exception);
+                    let diagnostic = self.exception_diagnostic(exception)?;
+                    let frame = self.frames.last().expect("resumed coroutine");
+                    if !self.dispatch_exception(
+                        p,
+                        output,
+                        &diagnostic,
+                        frame_depth,
+                        frame.code,
+                        frame.ip.saturating_sub(1),
+                    )? {
+                        return Err(diagnostic);
+                    }
+                }
+            }
+            self.execute_until_depth(p, output, frame_depth)?;
+            self.read(destination)
+        })();
+        let task_exception = self.pending_exception.take();
+        self.frames.truncate(frame_depth);
+        self.registers.truncate(register_len);
+        self.cells.truncate(cell_len);
+        self.arguments.truncate(argument_depth);
+        self.pending_classes.truncate(pending_class_depth);
+        self.pending_exception = saved_exception;
+        match result {
+            Ok(yielded) => {
+                if yielded == Value::NONE {
+                    self.schedule_async_task(task, AsyncWake::Value(Value::NONE))?;
+                } else if let Some(state) = self.heap.async_state(yielded) {
+                    match state {
+                        AsyncState::Pending => {
+                            self.heap.add_async_waiter(yielded, task)?;
+                            self.heap.set_task_waiting(task, Some(yielded))?;
+                        }
+                        AsyncState::Finished(value) => {
+                            self.schedule_async_task(task, AsyncWake::Value(value))?;
+                        }
+                        AsyncState::Failed(exception) | AsyncState::Cancelled(exception) => {
+                            self.schedule_async_task(task, AsyncWake::Exception(exception))?;
+                        }
+                    }
+                } else {
+                    let exception = self.exception_from_diagnostic(&Diagnostic::new(
+                        "RuntimeError",
+                        "Task received an unsupported yield",
+                    ))?;
+                    self.complete_async_source(task, AsyncState::Failed(exception))?;
+                }
+            }
+            Err(error) if error.kind == "StopIteration" => {
+                let value = task_exception
+                    .and_then(|exception| self.heap.stop_iteration_value(exception))
+                    .or_else(|| self.heap.generator_return_value(coroutine))
+                    .unwrap_or(Value::NONE);
+                self.complete_async_source(task, AsyncState::Finished(value))?;
+            }
+            Err(error) => {
+                let exception = match task_exception {
+                    Some(exception) => exception,
+                    None => self.exception_from_diagnostic(&error)?,
+                };
+                let state = if self.instance_check(
+                    exception,
+                    self.runtime_types.cancelled_error,
+                    false,
+                    0,
+                )? {
+                    AsyncState::Cancelled(exception)
+                } else {
+                    AsyncState::Failed(exception)
+                };
+                self.complete_async_source(task, state)?;
+            }
+        }
+        Ok(())
+    }
+
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -5256,7 +5944,30 @@ impl Vm {
             | Builtin::AsyncGeneratorAwaitNext
             | Builtin::AsyncGeneratorAwaitSend
             | Builtin::AsyncGeneratorAwaitThrow
-            | Builtin::AsyncGeneratorAwaitClose => {
+            | Builtin::AsyncGeneratorAwaitClose
+            | Builtin::AsyncioRun
+            | Builtin::AsyncioCreateTask
+            | Builtin::AsyncioCurrentTask
+            | Builtin::AsyncioGetRunningLoop
+            | Builtin::AsyncioSleep
+            | Builtin::AsyncioFutureNew
+            | Builtin::AsyncioFutureAwait
+            | Builtin::AsyncioFutureNext
+            | Builtin::AsyncioFutureSend
+            | Builtin::AsyncioFutureDone
+            | Builtin::AsyncioFutureCancelled
+            | Builtin::AsyncioFutureCancel
+            | Builtin::AsyncioFutureResult
+            | Builtin::AsyncioFutureException
+            | Builtin::AsyncioFutureSetResult
+            | Builtin::AsyncioFutureSetException
+            | Builtin::AsyncioFutureAddDoneCallback
+            | Builtin::AsyncioTaskDone
+            | Builtin::AsyncioTaskCancelled
+            | Builtin::AsyncioTaskCancel
+            | Builtin::AsyncioTaskResult
+            | Builtin::AsyncioTaskException
+            | Builtin::AsyncioTaskAddDoneCallback => {
                 unreachable!("iterator builtin has a suspending call path")
             }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
