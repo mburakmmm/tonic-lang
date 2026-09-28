@@ -255,6 +255,9 @@ pub struct FunctionSite {
     /// Indices into the creating frame's local-cell + free-cell window.
     pub captures: Vec<u16>,
     pub defaults: Vec<u16>,
+    /// Definition-time annotation values in source order. The synthetic
+    /// `return` symbol denotes the return annotation.
+    pub annotations: Vec<(SymbolId, u16)>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExceptionRegion {
@@ -449,6 +452,15 @@ impl Program {
                     || site.defaults.iter().any(|r| *r >= code.registers)
                 {
                     return Err(bad("invalid function defaults"));
+                }
+                let mut annotation_names = std::collections::HashSet::new();
+                for (name, register) in &site.annotations {
+                    if name.0 as usize >= self.symbols.len()
+                        || *register >= code.registers
+                        || !annotation_names.insert(*name)
+                    {
+                        return Err(bad("invalid function annotations"));
+                    }
                 }
                 for capture in &site.captures {
                     if *capture as usize >= cell_count {

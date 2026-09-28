@@ -406,6 +406,16 @@ dışında açıkça generic runtime'a düşer. Set storage ve async comprehensi
 dilimin parçası değildir. Ayrıntılar
 [ADR 0077](adr/0077-comprehension-scopes.md) dosyasındadır.
 
+Fonksiyon parametre ve dönüş annotation'ları parser adapter'dan Tonic-owned
+AST/HIR'e alınır ve defining scope içinde register değerlerine indirilir.
+Function-site metadata yalnız `SymbolId` ve doğrulanmış register index'i taşır;
+runtime bunlardan insertion-ordered, managed `__annotations__` dict'i kurar.
+Annotation'sız fonksiyonun boş dict'i ilk erişime kadar ayrılmadığı için sıradan
+fonksiyon tahsis bütçesi değişmez. Dict function object tarafından trace edilir;
+Cranelift call ABI'si ve exact-callee guard'ları annotation depolamasından
+bağımsız kalır. Ayrıntılar [ADR 0079](adr/0079-function-annotations.md)
+dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

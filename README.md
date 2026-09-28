@@ -30,7 +30,8 @@ The current implementation includes:
 - Python-compatible parsing through a replaceable parser adapter and a Tonic-owned AST/HIR;
 - versioned 8-byte register bytecode with verification before execution;
 - immediate integers, booleans and `None`, plus arbitrary-precision integers;
-- functions, closures, defaults, positional-only/keyword-only and variadic calls;
+- functions, closures, defaults, positional-only/keyword-only and variadic calls,
+  plus GC-traced parameter and return annotations;
 - classes, C3 multiple inheritance, shapes, descriptors, properties and `super`;
 - canonical builtin constructors, native builtin subclasses, and suspending numeric/index conversion protocols;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
@@ -52,8 +53,8 @@ work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
 The unsupported surface is reported explicitly. Set/async comprehensions,
-OS-backed async I/O, structural matching, f-strings, a full standard library,
-and several remaining protocols are still tracked in the
+variable annotations and type parameters, OS-backed async I/O, structural
+matching, f-strings, a full standard library, and several remaining protocols are still tracked in the
 [roadmap](docs/ROADMAP.md).
 
 ## Architecture
@@ -145,8 +146,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 334 Rust tests and a differential corpus of
-312 output cases plus 166 exception cases. The documented local matrix covers
+The repository currently contains 336 Rust tests and a differential corpus of
+313 output cases plus 166 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

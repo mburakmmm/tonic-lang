@@ -260,6 +260,7 @@ pub(crate) enum Object {
         execution: u64,
         captures: Vec<Value>,
         defaults: Vec<Value>,
+        annotations: Option<Value>,
     },
     Generator(GeneratorFrame),
     CoroutineIterator {
@@ -413,8 +414,18 @@ impl Object {
             Self::Module(m) => m.iter().for_each(|(_, v)| visit(*v)),
             Self::Iterator { source, .. } => visit(*source),
             Self::Function {
-                captures, defaults, ..
-            } => captures.iter().chain(defaults).copied().for_each(visit),
+                captures,
+                defaults,
+                annotations,
+                ..
+            } => {
+                captures
+                    .iter()
+                    .chain(defaults)
+                    .copied()
+                    .for_each(&mut visit);
+                annotations.iter().copied().for_each(visit);
+            }
             Self::Generator(frame) => {
                 visit(frame.class);
                 visit(frame.return_value);

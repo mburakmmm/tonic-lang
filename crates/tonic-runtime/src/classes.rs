@@ -1402,6 +1402,32 @@ impl Heap {
         }
     }
     pub fn attr(&mut self, owner: Value, name: &str) -> Result<Value> {
+        let annotation_function = (name == "__annotations__")
+            .then(|| match self.get(owner) {
+                Ok(Object::Function { .. }) => Some(owner),
+                Ok(Object::BoundMethod { function, .. }) => Some(*function),
+                _ => None,
+            })
+            .flatten();
+        if let Some(function) = annotation_function {
+            if let Object::Function {
+                annotations: Some(annotations),
+                ..
+            } = self.get(function)?
+            {
+                return Ok(*annotations);
+            }
+            let annotations = self.alloc(Object::Dict(Default::default()))?;
+            self.write_barrier(function, annotations);
+            let Object::Function {
+                annotations: slot, ..
+            } = self.get_mut(function)?
+            else {
+                unreachable!("checked function changed kind")
+            };
+            *slot = Some(annotations);
+            return Ok(annotations);
+        }
         let value = match self.get(owner) {
             Ok(Object::Module(values)) => {
                 return values

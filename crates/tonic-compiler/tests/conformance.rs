@@ -231,6 +231,28 @@ fn unsupported_syntax_is_explicit() {
 }
 
 #[test]
+fn function_annotations_are_owned_and_lowered() {
+    let source = "def f(a: int, /, b: str = 'x', *args: tuple, c: float = 1.0, **kwargs: dict) -> bool:\n    return True\n";
+    let ast = parse(source, "annotations").unwrap();
+    let StmtKind::Function {
+        params, returns, ..
+    } = &ast.body[0].kind
+    else {
+        panic!("function")
+    };
+    assert!(params.positional[0].annotation.is_some());
+    assert!(params.positional[1].annotation.is_some());
+    assert!(params.vararg_annotation.is_some());
+    assert!(params.keyword_only[0].annotation.is_some());
+    assert!(params.kwarg_annotation.is_some());
+    assert!(returns.is_some());
+
+    let program = compile(source, "annotations").unwrap();
+    let site = &program.program().code[0].functions[0];
+    assert_eq!(site.annotations.len(), 6);
+}
+
+#[test]
 fn slice_ast_and_bytecode_are_tonic_owned() {
     let source = "x = values[1:4:2]\n";
     let ast = parse(source, "slice").unwrap();

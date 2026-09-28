@@ -381,6 +381,19 @@ stream=(element(value) for value in Source())
 print('made',type(stream).__name__)
 print(next(stream),list(stream))
 ''',
+'''def annotated(x: int, *args: str, y: float = 1, **kwargs: dict) -> str:
+    return str(x)
+def bare():
+    pass
+class Holder:
+    def method(self, value: int) -> str:
+        return str(value)
+bare.__annotations__['late']=int
+print(annotated.__annotations__)
+print(bare.__annotations__)
+print(Holder().method.__annotations__)
+print(annotated(7))
+''',
 ]
 ERRORS = [
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),

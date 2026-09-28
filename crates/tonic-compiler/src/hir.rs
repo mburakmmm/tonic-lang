@@ -383,6 +383,7 @@ impl<'a> Scan<'a> {
                     is_async,
                     decorators,
                     params,
+                    returns,
                     body,
                     ..
                 } => {
@@ -391,6 +392,20 @@ impl<'a> Scan<'a> {
                     }
                     for (_, default) in params.defaults() {
                         self.expr(default);
+                    }
+                    for parameter in params.positional.iter().chain(&params.keyword_only) {
+                        if let Some(annotation) = &parameter.annotation {
+                            self.expr(annotation);
+                        }
+                    }
+                    if let Some(annotation) = &params.vararg_annotation {
+                        self.expr(annotation);
+                    }
+                    if let Some(annotation) = &params.kwarg_annotation {
+                        self.expr(annotation);
+                    }
+                    if let Some(annotation) = returns {
+                        self.expr(annotation);
                     }
                     self.bind(*name);
                     self.children
@@ -523,6 +538,7 @@ fn comprehension_scope(comprehension: &Comprehension) -> (Parameters, Vec<Stmt>)
         positional: vec![Parameter {
             name: comprehension.iterator_parameter,
             default: None,
+            annotation: None,
         }],
         ..Parameters::default()
     };

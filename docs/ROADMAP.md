@@ -175,6 +175,13 @@ sonra alınır.
   - [ ] Structural pattern matching (`match`/`case`).
   - [ ] F-string/format-spec lowering.
   - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
+    - [x] Positional-only, positional, variadic, keyword-only ve mapping
+      parametreleri ile dönüş annotation ifadeleri; Tonic-owned AST/HIR,
+      definition-scope evaluation, doğrulanmış function-site metadata,
+      GC-traced `function.__annotations__` ve interpreter/JIT-caller stress-GC
+      testleri.
+    - [ ] Değişken annotation'ları, class/module `__annotations__` ve type
+      parameter/type-alias yüzeyi.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

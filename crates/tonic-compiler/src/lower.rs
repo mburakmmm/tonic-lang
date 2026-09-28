@@ -153,6 +153,7 @@ fn build_comprehension(
         positional: vec![Parameter {
             name: comprehension.iterator_parameter,
             default: None,
+            annotation: None,
         }],
         ..Parameters::default()
     };
@@ -237,6 +238,43 @@ struct Lower<'a> {
     with_bypasses: Vec<Vec<FinallyBypass>>,
 }
 impl Lower<'_> {
+    fn lower_annotations(
+        &mut self,
+        params: &Parameters,
+        returns: Option<&Expr>,
+    ) -> Result<Vec<(SymbolId, u16)>> {
+        let mut annotations = Vec::new();
+        for parameter in params.positional.iter() {
+            if let Some(annotation) = &parameter.annotation {
+                annotations.push((parameter.name, self.expr(annotation)?));
+            }
+        }
+        if let (Some(name), Some(annotation)) = (params.vararg, &params.vararg_annotation) {
+            annotations.push((name, self.expr(annotation)?));
+        }
+        for parameter in &params.keyword_only {
+            if let Some(annotation) = &parameter.annotation {
+                annotations.push((parameter.name, self.expr(annotation)?));
+            }
+        }
+        if let (Some(name), Some(annotation)) = (params.kwarg, &params.kwarg_annotation) {
+            annotations.push((name, self.expr(annotation)?));
+        }
+        if let Some(annotation) = returns {
+            let name = self
+                .program
+                .symbols
+                .iter()
+                .position(|symbol| symbol == "return")
+                .map(|symbol| SymbolId(symbol as u16))
+                .ok_or_else(|| {
+                    Diagnostic::new("BytecodeError", "missing return annotation symbol")
+                })?;
+            annotations.push((name, self.expr(annotation)?));
+        }
+        Ok(annotations)
+    }
+
     fn apply_decorators(&mut self, mut value: u16, decorators: &[(u16, Span)]) -> Result<u16> {
         // Expressions were evaluated top-to-bottom. Applications are
         // bottom-to-top and use the ordinary call path, preserving arbitrary
@@ -758,6 +796,7 @@ impl Lower<'_> {
                     code: id,
                     captures,
                     defaults: Vec::new(),
+                    annotations: Vec::new(),
                 });
                 let function = self.alloc(1)?;
                 self.emit(Op::Function, function, site, 0, s)?;
@@ -821,6 +860,7 @@ impl Lower<'_> {
                 is_async,
                 decorators,
                 params,
+                returns,
                 body,
             } => {
                 debug_assert_eq!(
@@ -847,10 +887,12 @@ impl Lower<'_> {
                     .defaults()
                     .map(|(_, e)| self.expr(e))
                     .collect::<Result<_>>()?;
+                let annotations = self.lower_annotations(params, returns.as_ref())?;
                 self.code.functions.push(FunctionSite {
                     code: id,
                     captures,
                     defaults,
+                    annotations,
                 });
                 let r = self.alloc(1)?;
                 self.emit(Op::Function, r, site, 0, s)?;
@@ -1220,6 +1262,7 @@ impl Lower<'_> {
                     code: id,
                     captures,
                     defaults,
+                    annotations: Vec::new(),
                 });
                 let result = self.alloc(1)?;
                 self.emit(Op::Function, result, site, 0, s)?;
@@ -1251,6 +1294,7 @@ impl Lower<'_> {
                     code: id,
                     captures,
                     defaults: Vec::new(),
+                    annotations: Vec::new(),
                 });
                 let function = self.alloc(1)?;
                 self.emit(Op::Function, function, site, 0, s)?;

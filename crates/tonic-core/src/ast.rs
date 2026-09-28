@@ -33,6 +33,7 @@ pub enum StmtKind {
         is_async: bool,
         decorators: Vec<Expr>,
         params: Parameters,
+        returns: Option<Expr>,
         body: Vec<Stmt>,
     },
     Class {
@@ -165,11 +166,14 @@ pub struct Parameters {
     pub keyword_only: Vec<Parameter>,
     pub vararg: Option<SymbolId>,
     pub kwarg: Option<SymbolId>,
+    pub vararg_annotation: Option<Box<Expr>>,
+    pub kwarg_annotation: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug)]
 pub struct Parameter {
     pub name: SymbolId,
     pub default: Option<Expr>,
+    pub annotation: Option<Expr>,
 }
 impl Parameters {
     pub fn names(&self) -> Vec<SymbolId> {

@@ -1107,6 +1107,23 @@ fn builtin_rebinding_and_function_aliases() {
         "12\n"
     );
 }
+
+#[test]
+fn function_annotations_evaluate_and_survive_jit_and_stress_gc() {
+    let source = "def f(x: int, *args: str, y: float = 1, **kwargs: dict) -> str:\n    return str(x)\ndef bare():\n    pass\nclass Holder:\n    def method(self, value: int) -> str:\n        return str(value)\ndef make():\n    class Marker:\n        pass\n    def tagged(value: Marker) -> Marker:\n        return value\n    return tagged\ntagged=make()\nbare.__annotations__['late']=int\nprint(f.__annotations__)\nprint(bare.__annotations__)\nprint(Holder().method.__annotations__)\nprint(tagged.__annotations__['value'].__name__,tagged.__annotations__['return'].__name__)\nprint(f(7))";
+    let program = compile(source, "function-annotations").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"{'x': <class 'int'>, 'args': <class 'str'>, 'y': <class 'float'>, 'kwargs': <class 'dict'>, 'return': <class 'str'>}\n{'late': <class 'int'>}\n{'value': <class 'int'>, 'return': <class 'str'>}\nMarker Marker\n7\n"
+        );
+    }
+}
 #[test]
 fn short_circuit_and_chains() {
     assert_eq!(output("def tick(n):\n    print(n)\n    return n\nprint(3 < tick(2) < tick(1))\nprint(0 and missing, 5 or missing, not [])\nprint(tick(1) if True else missing)\n"),"2\nFalse\n0 5 True\n1\n1\n");

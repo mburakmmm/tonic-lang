@@ -4885,6 +4885,19 @@ impl Vm {
                             .iter()
                             .map(|c| self.cells[cell_base + *c as usize])
                             .collect();
+                        let annotations = if site.annotations.is_empty() {
+                            None
+                        } else {
+                            let annotations = self.heap.alloc(Object::Dict(Default::default()))?;
+                            for (symbol, register) in &site.annotations {
+                                let key = self
+                                    .heap
+                                    .alloc(Object::Str(p.symbols[symbol.0 as usize].clone()))?;
+                                let value = self.read(base + *register as usize)?;
+                                self.heap.dict_set(annotations, key, value)?;
+                            }
+                            Some(annotations)
+                        };
                         self.registers[a] = self.heap.alloc(Object::Function {
                             code: site.code,
                             execution: self.execution,
@@ -4894,6 +4907,7 @@ impl Vm {
                                 .iter()
                                 .map(|r| self.read(base + *r as usize))
                                 .collect::<Result<_>>()?,
+                            annotations,
                         })?
                     }
                     Op::Return | Op::Yield | Op::AsyncYield => {
@@ -6936,6 +6950,7 @@ impl Vm {
             execution,
             captures,
             defaults,
+            ..
         } = self.heap.get(callee).ok()?
         else {
             return None;
@@ -7223,6 +7238,7 @@ impl Vm {
                             execution,
                             captures,
                             defaults,
+                            ..
                         }) if usize::from(*code) == target
                             && *execution == self.execution
                             && captures.is_empty() =>

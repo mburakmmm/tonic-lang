@@ -316,6 +316,7 @@ fn closure_and_signature_metadata() {
         code: 2,
         captures: vec![0],
         defaults: vec![1],
+        annotations: vec![(SymbolId(0), 1)],
     }];
     let mut child = p.code[0].clone();
     child.params = 1;
@@ -339,6 +340,15 @@ fn closure_and_signature_metadata() {
     variants.push(bad);
     let mut bad = p.clone();
     bad.code[1].functions[0].defaults.clear();
+    variants.push(bad);
+    let mut bad = p.clone();
+    bad.code[1].functions[0].annotations[0].1 = 2;
+    variants.push(bad);
+    let mut bad = p.clone();
+    bad.code[1].functions[0].annotations[0].0 = SymbolId(1);
+    variants.push(bad);
+    let mut bad = p.clone();
+    bad.code[1].functions[0].annotations.push((SymbolId(0), 0));
     variants.push(bad);
     let mut bad = p.clone();
     bad.code[1].cell_locals.push(0);

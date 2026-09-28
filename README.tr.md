@@ -43,7 +43,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 |---|---|
 | M0 temel | Cargo workspace, CLI, tanılar, benchmark harness |
 | M1 yürütme | sabitler, isimler, atama, aritmetik, `print` |
-| Fonksiyonlar | `def`, nested functions, closure/cells, `global/nonlocal`, recursion; defaults, positional-only/keyword-only, keywords, `*args/**kwargs` |
+| Fonksiyonlar | `def`, nested functions, closure/cells, `global/nonlocal`, recursion; defaults, positional-only/keyword-only, keywords, `*args/**kwargs`, parametre ve dönüş annotation'ları |
 | Lambda | bağımsız lexical scope, closure/cells, defaults ve tam mevcut call binder |
 | Kontrol akışı | return, if/while/for, break/continue/else |
 | Ek ifadeler | bool/None, bigint/float/string, tuple/list/dict, unpack, indexing/item assignment, kısa devre, zincirli karşılaştırma, koşullu ifade |
@@ -59,7 +59,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | M4–M7 | expanded sequence/mapping, observed variadic, exact-float direct ve loop-carried F64 yolları; PC-indexli deopt map ve tam register rekonstrüksiyonu |
 | İstisnalar | managed exception nesneleri ve traceback state, typed/tuple/bare `try/except/else`, bare reraise, `raise from`, cause/context zinciri, frame unwind, `finally` ve senkron `with` |
 | Generator/coroutine | senkron generator, tam `yield from`, logical finalization; tembel `async def`, exact/özel awaitable `await`, `coroutine_wrapper`, `async for`, `async with`, `asend`/`athrow`/`aclose` destekli async generator ve Future/Task/cancellation içeren Tonic-owned tek thread `asyncio` loop'u |
-| Geniş dil | comprehension, OS destekli async I/O, match ve f-string henüz yok |
+| Geniş dil | lexical scope'lu senkron list/dict comprehension ve generator expression var; set/async comprehension, değişken annotation/type parameter, OS destekli async I/O, match ve f-string henüz yok |
 | CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve bounded iki-collector graph/cycle taraması |
 | HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
 | Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
@@ -73,8 +73,8 @@ Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlard
 oluşan tuple'ları kabul eder. `object.__init__`, int/bool/float/str/list/tuple/
 dict/range `__new__` ve list/dict `__init__` descriptor'ları doğrudan çağrılabilir;
 native builtin alt sınıfları kendi `__new__` metotlarıyla backing oluşturabilir.
-`import` yalnızca kayıtlı native modülleri
-bulur; `import fastmath as fm` desteklenir.
+`import`, kayıtlı native modülleri ve `.tonic`/`.py` kaynak modül/paketlerini;
+dotted ve `from ... import ...` biçimlerini destekler.
 `fastmath.array(list_or_tuple)` sayıları tek seferde non-moving C-contiguous f64
 buffer'a çevirir; `fastmath.sum(buffer)` sonrasında eleman boxing veya buffer copy
 yapmadan typed slice üzerinde çalışır. `fastmath.sum` liste/tuple için generic
@@ -95,7 +95,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 281 Rust testi ile 296 stdout ve 136 exception türü
+Güncel yerel matris 336 Rust testi ile 313 stdout ve 166 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -168,7 +168,8 @@ yazar; her 32. otomatik collection full-heap major collection'dır. Varsayılan
 collection aralığı 1024 allocation'dır. `--gc-every 1` stress, `--no-gc`
 karşılaştırma içindir. Collection instruction/JIT safepoint sınırlarında çalışır,
 native Context scope'u içinde çalışmaz. Henüz bounded-pause garantisi veya
-user-language finalizer semantiği yoktur. Foreign payload destructor'ları sweep
+tam finalization-order garantisi yoktur; kullanıcı `__del__` çağrıları bounded
+kuyruk, resurrection ve exactly-once yürütmeyle desteklenir. Foreign payload destructor'ları sweep
 sonrasında ayrı queue'da çalışır. Float ve büyük integer sonuçları heap'e ayrılır;
 küçük integer döngüleri ayrılmaz. Kalıcı native handle açıkça serbest bırakılmalıdır.
 Heap metadata kapasitesi bırakılmayabilir; native kod uzun çalışırken GC gecikir.
@@ -223,7 +224,7 @@ fonksiyon varsayılan sekizinci girişte derlenir; sekiz guard kaybı site'ı ye
 interpreter'a indirir. Yedi instruction'dan küçük düz fonksiyonlar ölçülen bridge
 maliyeti nedeniyle adaptive interpreter'da kalır.
 
-**Kapsam:** annotation execution, list/dict metotları,
+**Kapsam:** değişken annotation'ları/type parameter'lar, list/dict metotları,
 slice assignment, range/custom-object slicing, string repetition, geniş standart
 kütüphane ve REPL yoktur. List, tuple ve Unicode string üzerinde read-only slice;
 açık uçlar, negatif sınırlar ve negatif adım desteklenir.

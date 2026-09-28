@@ -214,8 +214,8 @@ impl Adapter {
                 }
             }
             py::Stmt::FunctionDef(f) => {
-                if f.returns.is_some() || !f.type_params.is_empty() {
-                    return Err(unsupported(s, "annotations/type parameters"));
+                if !f.type_params.is_empty() {
+                    return Err(unsupported(s, "type parameters"));
                 }
                 let label = f.name.to_string();
                 // Decorator expressions precede defaults; applications happen
@@ -226,6 +226,13 @@ impl Adapter {
                     .map(|d| self.expr(d))
                     .collect::<Result<_>>()?;
                 let params = self.parameters(*f.args, s)?;
+                let returns = f
+                    .returns
+                    .map(|e| {
+                        self.symbol("return")?;
+                        self.expr(*e)
+                    })
+                    .transpose()?;
                 let name = self.symbol(f.name.as_str())?;
                 let previous_async = std::mem::replace(&mut self.async_function, false);
                 self.depth += 1;
@@ -238,12 +245,13 @@ impl Adapter {
                     is_async: false,
                     decorators,
                     params,
+                    returns,
                     body,
                 }
             }
             py::Stmt::AsyncFunctionDef(f) => {
-                if f.returns.is_some() || !f.type_params.is_empty() {
-                    return Err(unsupported(s, "annotations/type parameters"));
+                if !f.type_params.is_empty() {
+                    return Err(unsupported(s, "type parameters"));
                 }
                 let label = f.name.to_string();
                 let decorators = f
@@ -252,6 +260,13 @@ impl Adapter {
                     .map(|d| self.expr(d))
                     .collect::<Result<_>>()?;
                 let params = self.parameters(*f.args, s)?;
+                let returns = f
+                    .returns
+                    .map(|e| {
+                        self.symbol("return")?;
+                        self.expr(*e)
+                    })
+                    .transpose()?;
                 let name = self.symbol(f.name.as_str())?;
                 let previous_async = std::mem::replace(&mut self.async_function, true);
                 self.depth += 1;
@@ -264,6 +279,7 @@ impl Adapter {
                     is_async: true,
                     decorators,
                     params,
+                    returns,
                     body,
                 }
             }
@@ -460,33 +476,32 @@ impl Adapter {
             ..Parameters::default()
         };
         for arg in args.posonlyargs.into_iter().chain(args.args) {
-            if arg.def.annotation.is_some() {
-                return Err(unsupported(s, "parameter annotations"));
-            }
             params.positional.push(Parameter {
                 name: self.symbol(arg.def.arg.as_str())?,
                 default: arg.default.map(|e| self.expr(*e)).transpose()?,
+                annotation: arg.def.annotation.map(|e| self.expr(*e)).transpose()?,
             });
         }
         for arg in args.kwonlyargs {
-            if arg.def.annotation.is_some() {
-                return Err(unsupported(s, "parameter annotations"));
-            }
             params.keyword_only.push(Parameter {
                 name: self.symbol(arg.def.arg.as_str())?,
                 default: arg.default.map(|e| self.expr(*e)).transpose()?,
+                annotation: arg.def.annotation.map(|e| self.expr(*e)).transpose()?,
             });
         }
-        for (arg, dest) in [
-            (args.vararg, &mut params.vararg),
-            (args.kwarg, &mut params.kwarg),
-        ] {
-            if let Some(arg) = arg {
-                if arg.annotation.is_some() {
-                    return Err(unsupported(s, "parameter annotations"));
-                }
-                *dest = Some(self.symbol(arg.arg.as_str())?);
-            }
+        if let Some(arg) = args.vararg {
+            params.vararg = Some(self.symbol(arg.arg.as_str())?);
+            params.vararg_annotation = arg
+                .annotation
+                .map(|e| self.expr(*e).map(Box::new))
+                .transpose()?;
+        }
+        if let Some(arg) = args.kwarg {
+            params.kwarg = Some(self.symbol(arg.arg.as_str())?);
+            params.kwarg_annotation = arg
+                .annotation
+                .map(|e| self.expr(*e).map(Box::new))
+                .transpose()?;
         }
         let mut seen = std::collections::HashSet::new();
         if params.names().iter().any(|n| !seen.insert(*n)) {

@@ -40,12 +40,12 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 19, core verifier 13, Cranelift JIT 16, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 22, core verifier 15, Cranelift JIT 18, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 103, CPython bridge 15 ve HPy manifest 5; toplam 334 test.
+native handles 5, language/runtime 104, CPython bridge 15 ve HPy manifest 5; toplam 336 test.
 
-Differential corpus: 309 stdout vakası ve 162 exception türü vakası. Seed 42.
+Differential corpus: 313 stdout vakası ve 166 exception türü vakası. Seed 42.
 Async-generator diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -448,6 +448,16 @@ matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
 User finalizer testi erişilemeyen `__del__` sahibi nesnelerin collector dışında
 bounded kuyrukla çalıştırılmasını, resurrection'ı, exactly-once çağrıyı ve
 unraisable hataların yalıtılmasını interpreter/JIT-caller altında doğrular.
+
+Fonksiyon annotation dilimi positional-only/positional, `*args`, keyword-only,
+`**kwargs` ve dönüş annotation ifadelerini Tonic-owned AST'ten doğrulanmış
+function-site metadata'sına taşır. Runtime `return` anahtarlı insertion-ordered
+`function.__annotations__` sözlüğünü oluşturur; annotation'sız fonksiyonlar boş
+sözlüğü yalnız ilk erişimde ayırır. Verifier symbol/register sınırlarını ve tekil
+anahtarları denetler. Runtime testi yalnız annotation sözlüğünden erişilebilen
+bir sınıfı interpreter/JIT-caller × allocation-stress GC altında canlı tutar;
+Python differential vakası gözlenebilir sözlük sırasını ve çağrı davranışını
+karşılaştırır.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.
