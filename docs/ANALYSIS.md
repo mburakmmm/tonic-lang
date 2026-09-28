@@ -402,9 +402,21 @@ Liste sonucu tek elemanlı geçici guest listeler üretmeden write-barrier'lı
 `Heap::append_list` sınırından büyütülür. Dict comprehension mevcut suspending
 hash/equality-aware `SET_ITEM` yolunu paylaşır. Comprehension code'u iterator,
 mutation ve olası kullanıcı frame'leri içerdiğinden Cranelift destek kümesinin
-dışında açıkça generic runtime'a düşer. Set storage ve async comprehension bu
-dilimin parçası değildir. Ayrıntılar
+dışında açıkça generic runtime'a düşer. Set storage bu dilimin parçası değildir. Ayrıntılar
 [ADR 0077](adr/0077-comprehension-scopes.md) dosyasındadır.
+
+Async comprehension genişletmesi clause başına sync/async iteration bilgisini
+Tonic-owned AST'te taşır. İlk iterable enclosing scope'ta değerlendirilip `ITER`
+veya `GET_AITER` ile hemen iterator'a çevrilir. Async clause'lar hidden scope'ta
+`GET_ANEXT` + mevcut await state machine'i ve `END_ASYNC_FOR` exception sınırını
+kullanır. Eager list/dict comprehension'ın hidden function'ı coroutine olur ve
+çağıran expression sonucu otomatik await eder; async generator expression aynı
+gövdeyi `ASYNC_YIELD` ile tembel async-generator nesnesi olarak döndürür. Yalnız
+element/filter/later iterable içinde `await` bulunan comprehension'lar da aynı
+coroutine sınıflandırmasını kullanır. Modül düzeyindeki async generator
+expression için `GET_AITER` verifier'da coroutine dışı code object'te güvenlidir;
+`GET_ANEXT`, await ve exhaustion işlemleri coroutine sınırında kalır. Ayrıntılar
+[ADR 0080](adr/0080-async-comprehensions.md) dosyasındadır.
 
 Fonksiyon parametre ve dönüş annotation'ları parser adapter'dan Tonic-owned
 AST/HIR'e alınır ve defining scope içinde register değerlerine indirilir.

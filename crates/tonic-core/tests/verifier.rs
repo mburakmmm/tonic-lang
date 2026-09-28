@@ -165,6 +165,12 @@ fn await_requires_coroutine_metadata() {
 
 #[test]
 fn async_iteration_requires_coroutine_metadata_and_valid_targets() {
+    let mut eager_aiter = program();
+    eager_aiter.code[0].instructions[0] = Instr::new(Op::GetAIter, 0, 1, 0);
+    eager_aiter.clone().verify().unwrap();
+    eager_aiter.code[0].instructions[0].b = eager_aiter.code[0].registers;
+    assert!(eager_aiter.verify().is_err());
+
     let mut async_for = program();
     async_for.modules[0].code_count = 2;
     let mut code = async_for.code[0].clone();

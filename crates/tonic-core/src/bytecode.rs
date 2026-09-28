@@ -736,7 +736,7 @@ impl Program {
                         }
                     }
                     Op::GetAIter | Op::GetANext => {
-                        if !code.coroutine {
+                        if op == Op::GetANext && !code.coroutine {
                             return Err(bad("async iteration outside coroutine code"));
                         }
                         reg(i.a)?;

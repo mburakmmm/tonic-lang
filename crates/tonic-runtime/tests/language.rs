@@ -1286,6 +1286,43 @@ print(next(stream),list(stream))"#;
         "NameError"
     );
 }
+
+#[test]
+fn async_comprehensions_suspend_scope_and_preserve_outer_iteration_timing() {
+    let source = r#"import asyncio
+class Source:
+    def __init__(self,limit):
+        self.value=0
+        self.limit=limit
+    def __aiter__(self):
+        print('aiter',self.limit)
+        return self
+    async def __anext__(self):
+        if self.value>=self.limit:
+            raise StopAsyncIteration
+        value=self.value
+        self.value+=1
+        return value
+async def transform(value):
+    return value*10
+async def collect():
+    values=[await transform(x) async for x in Source(4) if x%2]
+    awaited=[await transform(x) for x in [2,3]]
+    lambdas=[lambda value=await transform(x):value for x in [4,5]]
+    mapping={x:await transform(x) async for x in Source(3)}
+    nested=[x+y async for x in Source(2) for y in [10,20]]
+    return values,awaited,lambdas[0](),lambdas[1](),mapping,nested
+print(asyncio.run(collect()))
+stream=(await transform(x) async for x in Source(3))
+print(type(stream).__name__)
+async def consume(stream):
+    return [value async for value in stream]
+print(asyncio.run(consume(stream)))"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"aiter 4\naiter 3\naiter 2\n([10, 30], [20, 30], 40, 50, {0: 0, 1: 10, 2: 20}, [10, 20, 11, 21])\naiter 3\nasync_generator\n[0, 10, 20]\n",
+    );
+}
 #[test]
 fn runtime_errors_have_spans() {
     let e = error("def f():\n    return 1//0\nf()\n");

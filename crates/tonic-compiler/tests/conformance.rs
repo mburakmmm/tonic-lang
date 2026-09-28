@@ -109,6 +109,56 @@ fn comprehensions_have_hidden_scopes_and_owned_bytecode() {
 }
 
 #[test]
+fn async_comprehensions_have_coroutine_scopes_and_owned_bytecode() {
+    let source = "async def collect(source):\n    values=[await transform(x) async for x in source if x]\n    awaited=[await transform(x) for x in [1,2]]\n    mapping={x:await transform(x) async for x in source}\n    return values,awaited,mapping,(await transform(x) async for x in source)\nstream=(x async for x in source)";
+    let ast = parse(source, "async-comprehensions").unwrap();
+    let StmtKind::Function { body, .. } = &ast.body[0].kind else {
+        panic!("async function")
+    };
+    for statement in &body[..3] {
+        let StmtKind::Assign(_, expression) = &statement.kind else {
+            panic!("comprehension assignment")
+        };
+        let ExprKind::Comprehension(comprehension) = &expression.kind else {
+            panic!("comprehension expression")
+        };
+        assert!(comprehension.coroutine);
+    }
+
+    let program = compile(source, "async-comprehensions").unwrap();
+    let list = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("<listcomp>"))
+        .expect("async list comprehension code");
+    assert!(list.coroutine);
+    assert!(!list.generator);
+    assert!(list
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::GetANext as u16));
+    let async_generators = program
+        .program()
+        .code
+        .iter()
+        .filter(|code| code.name.ends_with("<genexpr>"))
+        .collect::<Vec<_>>();
+    assert_eq!(async_generators.len(), 2);
+    assert!(async_generators
+        .iter()
+        .all(|code| code.coroutine && code.generator));
+    assert!(async_generators.iter().all(|code| code
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::AsyncYield as u16)));
+
+    let error = compile("result=[x async for x in source]", "invalid-async-comp")
+        .expect_err("eager async comprehension outside async function");
+    assert_eq!(error.kind, "SyntaxError");
+}
+
+#[test]
 fn raise_ast_and_bytecode_are_tonic_owned() {
     let source = "raise ValueError('boom')";
     let ast = parse(source, "raise").unwrap();
@@ -216,7 +266,6 @@ fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
         "x={i for i in range(3)}",
-        "async def collect(source):\n    return [item async for item in source]",
         "print(f'{1}')",
         "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",

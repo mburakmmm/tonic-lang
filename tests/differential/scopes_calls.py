@@ -381,6 +381,36 @@ stream=(element(value) for value in Source())
 print('made',type(stream).__name__)
 print(next(stream),list(stream))
 ''',
+'''import asyncio
+class AsyncCompSource:
+    def __init__(self,limit):
+        self.value=0
+        self.limit=limit
+    def __aiter__(self):
+        print('aiter',self.limit)
+        return self
+    async def __anext__(self):
+        if self.value>=self.limit:
+            raise StopAsyncIteration
+        value=self.value
+        self.value+=1
+        return value
+async def transform(value):
+    return value*10
+async def collect():
+    values=[await transform(x) async for x in AsyncCompSource(4) if x%2]
+    awaited=[await transform(x) for x in [2,3]]
+    lambdas=[lambda value=await transform(x):value for x in [4,5]]
+    mapping={x:await transform(x) async for x in AsyncCompSource(3)}
+    nested=[x+y async for x in AsyncCompSource(2) for y in [10,20]]
+    return values,awaited,lambdas[0](),lambdas[1](),mapping,nested
+print(asyncio.run(collect()))
+stream=(await transform(x) async for x in AsyncCompSource(3))
+print(type(stream).__name__)
+async def consume(stream):
+    return [value async for value in stream]
+print(asyncio.run(consume(stream)))
+''',
 '''def annotated(x: int, *args: str, y: float = 1, **kwargs: dict) -> str:
     return str(x)
 def bare():
@@ -396,6 +426,7 @@ print(annotated(7))
 ''',
 ]
 ERRORS = [
+('result=[x async for x in source]', 'SyntaxError'),
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},x=print(2))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},**{True:2},x=print(2))', 'TypeError'),

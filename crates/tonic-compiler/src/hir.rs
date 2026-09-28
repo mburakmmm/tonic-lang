@@ -137,7 +137,15 @@ impl Scope {
                 }
                 Child::Comprehension(comprehension) => {
                     let (params, body) = comprehension_scope(comprehension);
-                    Self::resolve(&params, &body, false, &child_bound)?
+                    Self::resolve_kind(
+                        &params,
+                        &body,
+                        false,
+                        false,
+                        comprehension.coroutine,
+                        None,
+                        &child_bound,
+                    )?
                 }
             };
             for name in &child.free {
@@ -586,7 +594,11 @@ fn comprehension_scope(comprehension: &Comprehension) -> (Parameters, Vec<Stmt>)
             clause.iterable.clone()
         };
         body = vec![Stmt {
-            kind: StmtKind::For(clause.target.clone(), iterable, body, Vec::new()),
+            kind: if clause.is_async {
+                StmtKind::AsyncFor(clause.target.clone(), iterable, body, Vec::new())
+            } else {
+                StmtKind::For(clause.target.clone(), iterable, body, Vec::new())
+            },
             span: clause.iterable.span,
         }];
     }

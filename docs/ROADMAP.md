@@ -172,6 +172,11 @@ sonra alınır.
     suspended roots ve JIT
     generic-tier fallback'i.
   - [ ] Set ve async comprehensions.
+    - [x] Async list/dict comprehensions ve async generator expressions; async
+      clause ile expression/filter/later-iterable `await`, eager outer
+      `iter`/`aiter`, coroutine/async-generator hidden scope, mixed sync/async
+      clause'lar, precise suspended roots ve interpreter/JIT-caller stress-GC.
+    - [ ] Set storage, literal ve set comprehension.
   - [ ] Structural pattern matching (`match`/`case`).
   - [ ] F-string/format-spec lowering.
   - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.

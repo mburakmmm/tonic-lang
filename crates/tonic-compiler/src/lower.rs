@@ -1141,12 +1141,33 @@ impl Lower<'_> {
         } else {
             let iterable = self.expr(&clause.iterable)?;
             let iterator = self.alloc(1)?;
-            self.emit(Op::Iter, iterator, iterable, 0, span)?;
+            self.emit(
+                if clause.is_async {
+                    Op::GetAIter
+                } else {
+                    Op::Iter
+                },
+                iterator,
+                iterable,
+                0,
+                span,
+            )?;
             iterator
         };
         let item = self.alloc(1)?;
         let start = self.pc()?;
-        let exhausted = self.emit(Op::Next, item, iterator, 0, span)?;
+        let (exhausted, async_region) = if clause.is_async {
+            let exception = self.alloc(1)?;
+            let next = self.alloc(1)?;
+            let protected_start = self.pc()?;
+            self.emit(Op::GetANext, next, iterator, 0, span)?;
+            let value = self.await_value(next, span)?;
+            self.emit(Op::Move, item, value, 0, span)?;
+            let protected_end = self.pc()?;
+            (None, Some((protected_start, protected_end, exception)))
+        } else {
+            (Some(self.emit(Op::Next, item, iterator, 0, span)?), None)
+        };
         self.target(&clause.target, item, span)?;
         for filter in &clause.filters {
             let condition = self.expr(filter)?;
@@ -1175,13 +1196,35 @@ impl Lower<'_> {
                 ComprehensionKind::Generator => {
                     let value = self.expr(&comprehension.element)?;
                     let sent = self.alloc(1)?;
-                    self.emit(Op::Yield, sent, value, 0, span)?;
+                    self.emit(
+                        if self.scope.coroutine {
+                            Op::AsyncYield
+                        } else {
+                            Op::Yield
+                        },
+                        sent,
+                        value,
+                        0,
+                        span,
+                    )?;
                 }
             }
         }
         self.emit(Op::Jump, start, 0, 0, span)?;
-        let end = self.pc()?;
-        self.patch(exhausted, end);
+        if let Some((protected_start, protected_end, exception)) = async_region {
+            let handler = self.pc()?;
+            self.code.exception_regions.push(ExceptionRegion {
+                start: protected_start,
+                end: protected_end,
+                target: handler,
+                exception,
+            });
+            let exhausted = self.emit(Op::EndAsyncFor, exception, 0, 0, span)?;
+            let end = self.pc()?;
+            self.patch(exhausted, end);
+        } else {
+            self.patch(exhausted.expect("sync comprehension exit"), self.pc()?);
+        }
         Ok(())
     }
     fn window(&mut self, values: &[Expr]) -> Result<(u16, u16)> {
@@ -1271,7 +1314,17 @@ impl Lower<'_> {
             ExprKind::Comprehension(comprehension) => {
                 let source = self.expr(&comprehension.clauses[0].iterable)?;
                 let iterator = self.alloc(1)?;
-                self.emit(Op::Iter, iterator, source, 0, s)?;
+                self.emit(
+                    if comprehension.clauses[0].is_async {
+                        Op::GetAIter
+                    } else {
+                        Op::Iter
+                    },
+                    iterator,
+                    source,
+                    0,
+                    s,
+                )?;
                 let child = self.scope.take_child(s.start);
                 let captures = child
                     .free
@@ -1306,8 +1359,11 @@ impl Lower<'_> {
                     count: 1,
                     keywords: Vec::new(),
                 });
-                let result = self.alloc(1)?;
+                let mut result = self.alloc(1)?;
                 self.emit(Op::Call, result, function, call_site, s)?;
+                if comprehension.coroutine && comprehension.kind != ComprehensionKind::Generator {
+                    result = self.await_value(result, s)?;
+                }
                 Ok(result)
             }
             ExprKind::Binary(a, op, b) => {

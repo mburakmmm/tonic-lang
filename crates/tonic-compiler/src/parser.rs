@@ -719,9 +719,6 @@ impl Adapter {
             )
             .at(s));
         }
-        if generators.iter().any(|generator| generator.is_async) {
-            return Err(unsupported(s, "async comprehensions"));
-        }
 
         let mut generators = generators.into_iter();
         let first = generators.next().expect("checked nonempty comprehension");
@@ -729,7 +726,9 @@ impl Adapter {
         // scope. Every target, filter, later iterable and result expression is
         // owned by the hidden comprehension scope.
         let first_iterable = self.expr(first.iter)?;
-        let previous_async = std::mem::replace(&mut self.async_function, false);
+        let enclosing_async = self.async_function;
+        let hidden_may_suspend = enclosing_async || kind == ComprehensionKind::Generator;
+        let previous_async = std::mem::replace(&mut self.async_function, hidden_may_suspend);
         self.depth += 1;
         let mut clauses = vec![ComprehensionClause {
             target: self.target(first.target)?,
@@ -739,6 +738,7 @@ impl Adapter {
                 .into_iter()
                 .map(|filter| self.expr(filter))
                 .collect::<Result<_>>()?,
+            is_async: first.is_async,
         }];
         for generator in generators {
             clauses.push(ComprehensionClause {
@@ -749,6 +749,7 @@ impl Adapter {
                     .into_iter()
                     .map(|filter| self.expr(filter))
                     .collect::<Result<_>>()?,
+                is_async: generator.is_async,
             });
         }
         let element = self.expr(element).map(Box::new);
@@ -758,14 +759,105 @@ impl Adapter {
         self.depth -= 1;
         self.async_function = previous_async;
 
+        let element = element?;
+        let value = value?;
+        let coroutine = clauses.iter().any(|clause| clause.is_async)
+            || Self::expression_suspends(&element)
+            || value.as_deref().is_some_and(Self::expression_suspends)
+            || clauses.iter().enumerate().any(|(index, clause)| {
+                (index != 0 && Self::expression_suspends(&clause.iterable))
+                    || clause.filters.iter().any(Self::expression_suspends)
+            });
+        if coroutine && kind != ComprehensionKind::Generator && !enclosing_async {
+            return Err(Diagnostic::new(
+                "SyntaxError",
+                "asynchronous comprehension outside of an asynchronous function",
+            )
+            .at(s));
+        }
+
         Ok(ExprKind::Comprehension(Comprehension {
             kind,
+            coroutine,
             iterator_parameter: self.symbol(".0")?,
             accumulator: self.symbol(".result")?,
-            element: element?,
-            value: value?,
+            element,
+            value,
             clauses,
         }))
+    }
+    fn expression_suspends(expression: &Expr) -> bool {
+        match &expression.kind {
+            ExprKind::Await(_) => true,
+            ExprKind::Tuple(values) | ExprKind::List(values) | ExprKind::Bool(_, values) => {
+                values.iter().any(Self::expression_suspends)
+            }
+            ExprKind::Binary(left, _, right) | ExprKind::Subscript(left, right) => {
+                Self::expression_suspends(left) || Self::expression_suspends(right)
+            }
+            ExprKind::Unary(_, value)
+            | ExprKind::Attribute(value, _)
+            | ExprKind::YieldFrom(value) => Self::expression_suspends(value),
+            ExprKind::Compare(left, comparisons) => {
+                Self::expression_suspends(left)
+                    || comparisons
+                        .iter()
+                        .any(|(_, value)| Self::expression_suspends(value))
+            }
+            ExprKind::Call(callee, arguments) => {
+                Self::expression_suspends(callee)
+                    || arguments
+                        .positional
+                        .iter()
+                        .any(|(_, value)| Self::expression_suspends(value))
+                    || arguments
+                        .keywords
+                        .iter()
+                        .any(|(_, value)| Self::expression_suspends(value))
+            }
+            ExprKind::Dict(entries) => entries.iter().any(|(key, value)| {
+                key.as_ref().is_some_and(Self::expression_suspends)
+                    || Self::expression_suspends(value)
+            }),
+            ExprKind::Slice { start, stop, step } => [start, stop, step]
+                .into_iter()
+                .flatten()
+                .any(|value| Self::expression_suspends(value)),
+            ExprKind::Conditional(condition, then_value, else_value) => {
+                Self::expression_suspends(condition)
+                    || Self::expression_suspends(then_value)
+                    || Self::expression_suspends(else_value)
+            }
+            ExprKind::Yield(value) => value.as_deref().is_some_and(Self::expression_suspends),
+            ExprKind::Comprehension(comprehension) => {
+                comprehension.coroutine && comprehension.kind != ComprehensionKind::Generator
+            }
+            ExprKind::Lambda { params, .. } => {
+                params
+                    .positional
+                    .iter()
+                    .chain(&params.keyword_only)
+                    .any(|parameter| {
+                        parameter
+                            .default
+                            .as_ref()
+                            .is_some_and(Self::expression_suspends)
+                            || parameter
+                                .annotation
+                                .as_ref()
+                                .is_some_and(Self::expression_suspends)
+                    })
+                    || params
+                        .vararg_annotation
+                        .as_deref()
+                        .is_some_and(Self::expression_suspends)
+                    || params
+                        .kwarg_annotation
+                        .as_deref()
+                        .is_some_and(Self::expression_suspends)
+            }
+            ExprKind::Constant(_) | ExprKind::Name(_) => false,
+        }
     }
     fn binary(op: py::Operator, s: Span) -> Result<BinaryOp> {
         Ok(match op {

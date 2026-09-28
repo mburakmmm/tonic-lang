@@ -36,8 +36,9 @@ The current implementation includes:
 - canonical builtin constructors, native builtin subclasses, and suspending numeric/index conversion protocols;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
   coroutines, exact/custom-awaitable `await` delegation, `async for`, `async with`,
-  async generators with `asend`/`athrow`/`aclose`, and a Tonic-owned single-threaded
-  `asyncio` event loop with Future/Task scheduling and cancellation;
+  async list/dict comprehensions and generator expressions, async generators with
+  `asend`/`athrow`/`aclose`, and a Tonic-owned single-threaded `asyncio` event loop
+  with Future/Task scheduling and cancellation;
 - source modules and packages with versioned globals, circular-import state, and rollback;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
@@ -52,10 +53,10 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Set/async comprehensions,
-variable annotations and type parameters, OS-backed async I/O, structural
-matching, f-strings, a full standard library, and several remaining protocols are still tracked in the
-[roadmap](docs/ROADMAP.md).
+The unsupported surface is reported explicitly. Set comprehensions, variable
+annotations and type parameters, OS-backed async I/O, structural matching,
+f-strings, a full standard library, and several remaining protocols are still
+tracked in the [roadmap](docs/ROADMAP.md).
 
 ## Architecture
 
@@ -146,8 +147,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 336 Rust tests and a differential corpus of
-313 output cases plus 166 exception cases. The documented local matrix covers
+The repository currently contains 338 Rust tests and a differential corpus of
+314 output cases plus 167 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

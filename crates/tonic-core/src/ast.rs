@@ -137,6 +137,9 @@ pub enum ExprKind {
 #[derive(Clone, Debug)]
 pub struct Comprehension {
     pub kind: ComprehensionKind,
+    /// The hidden comprehension code suspends through `await` and/or an
+    /// asynchronous `for` clause.
+    pub coroutine: bool,
     /// Hidden positional parameter receiving the already-created outer iterator.
     pub iterator_parameter: SymbolId,
     /// Hidden accumulator local used by eager list/dict comprehensions.
@@ -152,6 +155,7 @@ pub struct ComprehensionClause {
     pub target: Target,
     pub iterable: Expr,
     pub filters: Vec<Expr>,
+    pub is_async: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComprehensionKind {
