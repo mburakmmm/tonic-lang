@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 23;
+pub const BYTECODE_VERSION: u16 = 29;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -103,6 +103,14 @@ pub enum Op {
     ListAppend = 108,
     Set = 109,
     SetAdd = 110,
+    MatchSequence = 111,
+    MatchMapping = 112,
+    MatchKey = 113,
+    MatchClass = 114,
+    MatchAttr = 115,
+    MatchArgs = 116,
+    MatchClassItem = 117,
+    MatchUnique = 118,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -203,6 +211,14 @@ impl TryFrom<u16> for Op {
             108 => Self::ListAppend,
             109 => Self::Set,
             110 => Self::SetAdd,
+            111 => Self::MatchSequence,
+            112 => Self::MatchMapping,
+            113 => Self::MatchKey,
+            114 => Self::MatchClass,
+            115 => Self::MatchAttr,
+            116 => Self::MatchArgs,
+            117 => Self::MatchClassItem,
+            118 => Self::MatchUnique,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -610,6 +626,21 @@ impl Program {
                             return Err(bad("nonzero reserved operand"));
                         }
                     }
+                    Op::MatchUnique => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if i.c > 1 {
+                            return Err(bad("invalid match uniqueness mode"));
+                        }
+                    }
+                    Op::MatchMapping => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                    }
+                    Op::MatchSequence => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                    }
                     Op::LoadGlobal | Op::StoreGlobal | Op::Import => {
                         reg(i.a)?;
                         sym(i.b)?;
@@ -671,7 +702,12 @@ impl Program {
                     | Op::InplaceLeftShift
                     | Op::InplaceRightShift
                     | Op::Item
-                    | Op::SetItem => {
+                    | Op::SetItem
+                    | Op::MatchKey
+                    | Op::MatchClass
+                    | Op::MatchAttr
+                    | Op::MatchArgs
+                    | Op::MatchClassItem => {
                         reg(i.a)?;
                         reg(i.b)?;
                         reg(i.c)?;

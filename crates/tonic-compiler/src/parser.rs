@@ -398,6 +398,22 @@ impl Adapter {
                     self.block(f.orelse)?,
                 )
             }
+            py::Stmt::Match(m) => StmtKind::Match {
+                subject: self.expr(*m.subject)?,
+                cases: m
+                    .cases
+                    .into_iter()
+                    .map(|case| {
+                        let case_span = span(&case.pattern);
+                        Ok(MatchCase {
+                            pattern: self.pattern(case.pattern)?,
+                            guard: case.guard.map(|guard| self.expr(*guard)).transpose()?,
+                            body: self.block(case.body)?,
+                            span: case_span,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            },
             py::Stmt::Import(i) => {
                 let mut names = Vec::new();
                 for alias in i.names {
@@ -454,6 +470,83 @@ impl Adapter {
             _ => return Err(unsupported(s, "statement")),
         };
         Ok(Stmt { kind, span: s })
+    }
+    fn pattern(&mut self, node: py::Pattern) -> Result<Pattern> {
+        let s = span(&node);
+        let kind = match node {
+            py::Pattern::MatchValue(value) => PatternKind::Value(self.expr(*value.value)?),
+            py::Pattern::MatchSingleton(singleton) => {
+                let value = match singleton.value {
+                    py::Constant::None => Constant::None,
+                    py::Constant::Bool(value) => Constant::Bool(value),
+                    _ => return Err(unsupported(s, "match singleton")),
+                };
+                PatternKind::Singleton(value)
+            }
+            py::Pattern::MatchSequence(sequence) => PatternKind::Sequence(
+                sequence
+                    .patterns
+                    .into_iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Result<_>>()?,
+            ),
+            py::Pattern::MatchMapping(mapping) => PatternKind::Mapping {
+                keys: mapping
+                    .keys
+                    .into_iter()
+                    .map(|key| self.expr(key))
+                    .collect::<Result<_>>()?,
+                patterns: mapping
+                    .patterns
+                    .into_iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Result<_>>()?,
+                rest: mapping
+                    .rest
+                    .map(|name| self.symbol(name.as_str()))
+                    .transpose()?,
+            },
+            py::Pattern::MatchClass(class) => PatternKind::Class {
+                class: self.expr(*class.cls)?,
+                positional: class
+                    .patterns
+                    .into_iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Result<_>>()?,
+                keyword_names: class
+                    .kwd_attrs
+                    .into_iter()
+                    .map(|name| self.symbol(name.as_str()))
+                    .collect::<Result<_>>()?,
+                keyword_patterns: class
+                    .kwd_patterns
+                    .into_iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Result<_>>()?,
+            },
+            py::Pattern::MatchStar(star) => PatternKind::Star(
+                star.name
+                    .map(|name| self.symbol(name.as_str()))
+                    .transpose()?,
+            ),
+            py::Pattern::MatchAs(as_) => PatternKind::As {
+                pattern: as_
+                    .pattern
+                    .map(|pattern| self.pattern(*pattern).map(Box::new))
+                    .transpose()?,
+                name: as_
+                    .name
+                    .map(|name| self.symbol(name.as_str()))
+                    .transpose()?,
+            },
+            py::Pattern::MatchOr(or) => PatternKind::Or(
+                or.patterns
+                    .into_iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Result<_>>()?,
+            ),
+        };
+        Ok(Pattern { kind, span: s })
     }
     fn module_prefixes(&mut self, name: &str) -> Result<Vec<SymbolId>> {
         let mut prefixes = Vec::new();

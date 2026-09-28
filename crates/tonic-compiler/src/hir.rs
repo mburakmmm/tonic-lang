@@ -237,6 +237,56 @@ impl<'a> Scan<'a> {
             }
         }
     }
+    fn pattern(&mut self, pattern: &'a Pattern) {
+        match &pattern.kind {
+            PatternKind::Value(value) => self.expr(value),
+            PatternKind::Singleton(_) => {}
+            PatternKind::Sequence(patterns) | PatternKind::Or(patterns) => {
+                for pattern in patterns {
+                    self.pattern(pattern);
+                }
+            }
+            PatternKind::Mapping {
+                keys,
+                patterns,
+                rest,
+            } => {
+                for key in keys {
+                    self.expr(key);
+                }
+                for pattern in patterns {
+                    self.pattern(pattern);
+                }
+                if let Some(name) = rest {
+                    self.bind(*name);
+                }
+            }
+            PatternKind::Class {
+                class,
+                positional,
+                keyword_patterns,
+                ..
+            } => {
+                self.expr(class);
+                for pattern in positional.iter().chain(keyword_patterns) {
+                    self.pattern(pattern);
+                }
+            }
+            PatternKind::Star(name) => {
+                if let Some(name) = name {
+                    self.bind(*name);
+                }
+            }
+            PatternKind::As { pattern, name } => {
+                if let Some(pattern) = pattern {
+                    self.pattern(pattern);
+                }
+                if let Some(name) = name {
+                    self.bind(*name);
+                }
+            }
+        }
+    }
     fn expr(&mut self, e: &'a Expr) {
         match &e.kind {
             ExprKind::Name(n) => self.read(*n),
@@ -389,6 +439,16 @@ impl<'a> Scan<'a> {
                     self.block(a)?;
                     self.block(b)?;
                 }
+                StmtKind::Match { subject, cases } => {
+                    self.expr(subject);
+                    for case in cases {
+                        self.pattern(&case.pattern);
+                        if let Some(guard) = &case.guard {
+                            self.expr(guard);
+                        }
+                        self.block(&case.body)?;
+                    }
+                }
                 StmtKind::Function {
                     name,
                     is_async,
@@ -534,6 +594,13 @@ impl<'a> Scan<'a> {
                 StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
                     if let Some(span) = Self::declaration_span(body, name) {
                         return Some(span);
+                    }
+                }
+                StmtKind::Match { cases, .. } => {
+                    for case in cases {
+                        if let Some(span) = Self::declaration_span(&case.body, name) {
+                            return Some(span);
+                        }
                     }
                 }
                 _ => {}

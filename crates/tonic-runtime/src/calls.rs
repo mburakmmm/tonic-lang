@@ -4420,7 +4420,10 @@ impl Vm {
             self.registers[destination] = Value::bool(text.contains(fragment) != negate);
             return Ok(());
         }
-        if matches!(self.heap.get(native_container), Ok(Object::Set(_))) {
+        if matches!(
+            self.heap.get(native_container),
+            Ok(Object::Dict(_) | Object::Set(_))
+        ) {
             return self.invoke_dict_operation(
                 p,
                 native_container,
@@ -5170,6 +5173,33 @@ impl Vm {
                     )
                 })?;
                 self.registers[destination] = self.heap.hash_entry_at(state.start.owner, index)?.1;
+            }
+            super::DictOperationKind::MatchKey => {
+                let (found, value) = if let Some(index) = matched {
+                    (
+                        Value::bool(true),
+                        self.heap.hash_entry_at(state.start.owner, index)?.1,
+                    )
+                } else {
+                    (Value::bool(false), Value::NONE)
+                };
+                self.registers[destination] = self.heap.alloc(Object::Tuple(vec![found, value]))?;
+            }
+            super::DictOperationKind::MatchUnique { class } => {
+                if matched.is_some() {
+                    return Err(Diagnostic::new(
+                        if class { "TypeError" } else { "ValueError" },
+                        "pattern contains a duplicate key or attribute",
+                    ));
+                }
+                self.heap.hash_set_hashed(
+                    state.start.owner,
+                    state.start.key,
+                    Value::NONE,
+                    state.hash,
+                    None,
+                )?;
+                self.registers[destination] = state.start.owner;
             }
             super::DictOperationKind::Set(value) => {
                 self.heap.hash_set_hashed(

@@ -808,6 +808,10 @@ pub(super) enum HashAction {
 #[derive(Clone)]
 pub(super) enum DictOperationKind {
     Get,
+    MatchKey,
+    MatchUnique {
+        class: bool,
+    },
     Set(Value),
     SetAdd,
     Contains {
@@ -1403,6 +1407,8 @@ impl DictOperationStart {
         visit(self.key);
         match &self.kind {
             DictOperationKind::Get
+            | DictOperationKind::MatchKey
+            | DictOperationKind::MatchUnique { .. }
             | DictOperationKind::SetAdd
             | DictOperationKind::Contains { .. }
             | DictOperationKind::Delete => {}
@@ -6063,6 +6069,210 @@ impl Vm {
                             DictOperationKind::SetAdd,
                             output,
                         )?;
+                    }
+                    Op::MatchSequence => {
+                        let source = self.read(b)?;
+                        let storage = self.heap.native_value(source);
+                        let (mut values, range) = match self.heap.get(storage)? {
+                            Object::Tuple(values) | Object::List(values) => {
+                                (Some(values.clone()), None)
+                            }
+                            Object::Range { start, stop, step } => {
+                                (None, Some((*start, *stop, *step)))
+                            }
+                            _ => (None, None),
+                        };
+                        if let Some((mut next, stop, step)) = range {
+                            let mut items = Vec::new();
+                            while (step > 0 && next < stop) || (step < 0 && next > stop) {
+                                items.push(self.heap.i64(next)?);
+                                next = next.checked_add(step).ok_or_else(|| {
+                                    Diagnostic::new("OverflowError", "range pattern overflow")
+                                })?;
+                            }
+                            values = Some(items);
+                        }
+                        let minimum = usize::from(i.c & 0x7fff);
+                        let starred = i.c & 0x8000 != 0;
+                        if values.as_ref().is_some_and(|values| {
+                            if starred {
+                                values.len() >= minimum
+                            } else {
+                                values.len() == minimum
+                            }
+                        }) {
+                            self.registers[a] = self
+                                .heap
+                                .alloc(Object::List(values.take().expect("matched sequence")))?;
+                        } else {
+                            self.registers[a] = Value::NONE;
+                        }
+                    }
+                    Op::MatchMapping => {
+                        let source = self.read(b)?;
+                        self.registers[a] = Value::bool(matches!(
+                            self.heap.get(self.heap.native_value(source))?,
+                            Object::Dict(dict) if dict.entries.len() >= usize::from(i.c)
+                        ));
+                    }
+                    Op::MatchKey => {
+                        let owner = self.read(b)?;
+                        let key = self.read(c)?;
+                        self.invoke_dict_operation(
+                            p,
+                            owner,
+                            key,
+                            a,
+                            DictOperationKind::MatchKey,
+                            output,
+                        )?;
+                    }
+                    Op::MatchUnique => {
+                        let owner = self.read(a)?;
+                        let key = self.read(b)?;
+                        self.invoke_dict_operation(
+                            p,
+                            owner,
+                            key,
+                            a,
+                            DictOperationKind::MatchUnique { class: i.c == 1 },
+                            output,
+                        )?;
+                    }
+                    Op::MatchClass => {
+                        let subject = self.read(b)?;
+                        let class = self.read(c)?;
+                        self.registers[a] =
+                            Value::bool(self.instance_check(subject, class, false, 0)?);
+                    }
+                    Op::MatchAttr => {
+                        let missing = self.read(a)?;
+                        let owner = self.read(b)?;
+                        let name = self.read(c)?;
+                        let name = match self.heap.get(self.heap.native_value(name))? {
+                            Object::Str(name) => name.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "BytecodeError",
+                                    "MATCH_ATTR name must be a string",
+                                ))
+                            }
+                        };
+                        self.invoke_attribute_get(
+                            p,
+                            owner,
+                            &name,
+                            a,
+                            AttributeMissing::Default(missing),
+                            output,
+                        )?;
+                    }
+                    Op::MatchArgs => {
+                        let metadata = self.read(a)?;
+                        let class = self.read(b)?;
+                        let arguments = self.read(c)?;
+                        let metadata = match self.heap.get(metadata)? {
+                            Object::List(values) => values.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "BytecodeError",
+                                    "MATCH_ARGS metadata must be a list",
+                                ))
+                            }
+                        };
+                        let count = metadata
+                            .first()
+                            .and_then(|value| value.as_int())
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    "BytecodeError",
+                                    "MATCH_ARGS count must be an immediate integer",
+                                )
+                            })?;
+                        let missing = matches!(self.heap.get(arguments)?, Object::List(values) if values.is_empty());
+                        let descriptors = if missing {
+                            let self_match = [
+                                self.runtime_types.bool_,
+                                self.runtime_types.int,
+                                self.runtime_types.float,
+                                self.runtime_types.str_,
+                                self.runtime_types.list,
+                                self.runtime_types.tuple,
+                                self.runtime_types.dict,
+                                self.runtime_types.set,
+                            ]
+                            .contains(&class)
+                                || matches!(
+                                    self.builtin_subclass_kind(class),
+                                    Some(
+                                        RuntimeTypeKind::Int
+                                            | RuntimeTypeKind::Float
+                                            | RuntimeTypeKind::Str
+                                            | RuntimeTypeKind::List
+                                            | RuntimeTypeKind::Tuple
+                                            | RuntimeTypeKind::Dict
+                                    )
+                                );
+                            if count == 1 && self_match {
+                                vec![Value::NONE]
+                            } else {
+                                return Err(Diagnostic::new(
+                                    "TypeError",
+                                    format!(
+                                        "class pattern accepts {} positional sub-patterns ({count} given)",
+                                        usize::from(self_match)
+                                    ),
+                                ));
+                            }
+                        } else {
+                            let values = match self.heap.get(self.heap.native_value(arguments))? {
+                                Object::Tuple(values) => values.clone(),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "TypeError",
+                                        "__match_args__ must be a tuple",
+                                    ))
+                                }
+                            };
+                            if values.len() < count {
+                                return Err(Diagnostic::new(
+                                    "TypeError",
+                                    format!(
+                                        "class pattern accepts {} positional sub-patterns ({count} given)",
+                                        values.len()
+                                    ),
+                                ));
+                            }
+                            values[..count].to_vec()
+                        };
+                        self.registers[a] = self.heap.alloc(Object::List(descriptors))?;
+                    }
+                    Op::MatchClassItem => {
+                        let missing = self.read(a)?;
+                        let subject = self.read(b)?;
+                        let descriptor = self.read(c)?;
+                        if descriptor == Value::NONE {
+                            self.registers[a] = subject;
+                        } else {
+                            let name = match self.heap.get(self.heap.native_value(descriptor))? {
+                                Object::Str(name) => name.clone(),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "BytecodeError",
+                                        "MATCH_CLASS_ITEM descriptor must be a string or None",
+                                    ))
+                                }
+                            };
+                            self.invoke_attribute_get(
+                                p,
+                                subject,
+                                &name,
+                                a,
+                                AttributeMissing::Default(missing),
+                                output,
+                            )?;
+                        }
                     }
                     Op::SetItem => {
                         let owner = self.read(a)?;

@@ -442,10 +442,120 @@ print(bare.__annotations__)
 print(Holder().method.__annotations__)
 print(annotated(7))
 ''',
+'''def subject():
+    print('subject')
+    return 2
+def reject(value):
+    print('guard',value)
+    return False
+match subject():
+    case 1:
+        print('one')
+    case 2 as guarded if reject(guarded):
+        print('guarded')
+    case 2 | 3 as selected:
+        print('selected',selected,guarded)
+match 1:
+    case True:
+        print('bool')
+    case 1:
+        print('int')
+class Codes:
+    hit=7
+match 7:
+    case Codes.hit:
+        print('qualified')
+match [1,2,3,4]:
+    case [first,*middle,last]:
+        print(first,middle,last)
+match (1,[2,3]):
+    case [one,[two,three]]:
+        print('nested',one,two,three)
+match range(3):
+    case [zero,*rest]:
+        print('range',zero,rest)
+match 'ab':
+    case [left,right]:
+        print('string-sequence')
+    case other:
+        print('string',other)
+class Numbers(list):
+    pass
+match Numbers([5,6]):
+    case [five,six]:
+        print('subclass',five,six)
+match {'a':[1,2,3],'b':4}:
+    case {'a':[head,*tail],**remaining}:
+        print('mapping',head,tail,remaining)
+match {'other':1}:
+    case {'missing':value}:
+        print('unexpected')
+    case fallback:
+        print('missing',fallback)
+class Mapping(dict):
+    pass
+match Mapping({'x':5}):
+    case {'x':mapped}:
+        print('dict-subclass',mapped)
+class Key:
+    def __init__(self,value):
+        self.value=value
+    def __hash__(self):
+        return 7
+    def __eq__(self,other):
+        return isinstance(other,Key) and self.value==other.value
+class Keys:
+    target=Key('target')
+match {Key('target'):9,'kept':10}:
+    case {Keys.target:found,**rest}:
+        print('custom-key',found,rest)
+class Point:
+    __match_args__=('x','y')
+    def __init__(self,x,y):
+        self.x=x
+        self.y=y
+class Colored(Point):
+    pass
+match Colored(3,4):
+    case Point(x,4):
+        print('class',x)
+match 7:
+    case int(value):
+        print('builtin-class',value)
+match Point(1,2):
+    case Point(missing=value):
+        print('unexpected-attribute')
+    case other:
+        print('missing-attribute',type(other).__name__)
+class Probe:
+    @property
+    def value(self):
+        print('get-value')
+        return 8
+match Probe():
+    case Probe(value=8):
+        print('descriptor')
+def choose(value):
+    match value:
+        case None:
+            return lambda:'none'
+        case 4 as kept:
+            def read():
+                return kept
+            return read
+        case other:
+            return lambda:other
+print(choose(None)(),choose(4)(),choose(9)())
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
 ('{{1}}', 'TypeError'),
+('class C:\n    __match_args__=["x"]\nmatch C():\n    case C(value):\n        pass', 'TypeError'),
+('class C:\n    __match_args__=(1,)\nmatch C():\n    case C(value):\n        pass', 'TypeError'),
+('class C:\n    __match_args__=("x",)\nmatch C():\n    case C(first,second):\n        pass', 'TypeError'),
+('class C:\n    __match_args__=("x",)\n    x=1\nmatch C():\n    case C(first,x=second):\n        pass', 'TypeError'),
+('class Keys:\n    first=1\n    second=True\nmatch {1:"x",2:"y"}:\n    case {Keys.first:left,Keys.second:right}:\n        pass', 'ValueError'),
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},x=print(2))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},**{True:2},x=print(2))', 'TypeError'),

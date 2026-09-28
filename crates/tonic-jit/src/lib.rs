@@ -1749,6 +1749,21 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
+            Op::MatchUnique => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                if instruction.c > 1 {
+                    return Err(invalid(Some(pc), "invalid match uniqueness mode"));
+                }
+            }
+            Op::MatchSequence => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+            }
+            Op::MatchMapping => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+            }
             Op::Set => {
                 register(pc, instruction.a)?;
                 if instruction.b != 0 || instruction.c != 0 {
@@ -1777,7 +1792,12 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
             | Op::Is
             | Op::IsNot
             | Op::Contains
-            | Op::NotContains => {
+            | Op::NotContains
+            | Op::MatchKey
+            | Op::MatchClass
+            | Op::MatchAttr
+            | Op::MatchArgs
+            | Op::MatchClassItem => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 register(pc, instruction.c)?;
@@ -3734,6 +3754,21 @@ mod tests {
                 .unwrap();
             assert!(matches!(compile(code), Err(Error::Unsupported(_))));
         }
+    }
+
+    #[test]
+    fn structural_match_stays_in_the_generic_runtime() {
+        let program = function(
+            "def classify(value):\n    match value:\n        case [first,*rest]:\n            return first\n        case {'x': item}:\n            return item\n        case _:\n            return None",
+        );
+        let code = &program.program().code[1];
+        assert!(matches!(
+            compile(code),
+            Err(Error::Unsupported(Unsupported {
+                opcode: Some(Op::MatchSequence),
+                ..
+            }))
+        ));
     }
 
     #[test]

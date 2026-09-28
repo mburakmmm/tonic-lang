@@ -1,6 +1,6 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
-    ast::{CompareOp, ComprehensionKind, ExprKind, StmtKind},
+    ast::{CompareOp, ComprehensionKind, ExprKind, PatternKind, StmtKind},
     bytecode::Op,
 };
 #[test]
@@ -277,7 +277,6 @@ fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
         "print(f'{1}')",
-        "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",
         "del x",
         "from . import sibling",
@@ -287,6 +286,53 @@ fn unsupported_syntax_is_explicit() {
         assert_eq!(e.kind, "UnsupportedSyntax", "{src}");
         assert!(e.span.is_some());
     }
+}
+
+#[test]
+fn basic_match_patterns_are_owned_and_lowered() {
+    let source = "match subject:\n    case [head, *middle, tail] if allowed(head):\n        result=middle\n    case {'value': value, **rest}:\n        result=(value,rest)\n    case Point(x, y=2):\n        result=x\n    case 1 | 2 as selected:\n        result=selected\n    case None:\n        result=0\n    case other:\n        result=other\n";
+    let ast = parse(source, "match-basic").unwrap();
+    let StmtKind::Match { cases, .. } = &ast.body[0].kind else {
+        panic!("match statement")
+    };
+    assert_eq!(cases.len(), 6);
+    let PatternKind::Sequence(sequence) = &cases[0].pattern.kind else {
+        panic!("sequence pattern")
+    };
+    assert_eq!(sequence.len(), 3);
+    assert!(matches!(sequence[1].kind, PatternKind::Star(_)));
+    assert!(cases[0].guard.is_some());
+    let PatternKind::Mapping { rest, .. } = &cases[1].pattern.kind else {
+        panic!("mapping pattern")
+    };
+    assert!(rest.is_some());
+    assert!(matches!(cases[2].pattern.kind, PatternKind::Class { .. }));
+    let PatternKind::As {
+        pattern: Some(pattern),
+        name: Some(_),
+    } = &cases[3].pattern.kind
+    else {
+        panic!("as pattern")
+    };
+    assert!(matches!(pattern.kind, PatternKind::Or(_)));
+    assert!(matches!(cases[4].pattern.kind, PatternKind::Singleton(_)));
+
+    let program = compile(source, "match-basic").unwrap();
+    let operations = program.program().code[0]
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    assert!(operations.contains(&Op::Eq));
+    assert!(operations.contains(&Op::Is));
+    assert!(operations.contains(&Op::JumpFalse));
+    assert!(operations.contains(&Op::MatchSequence));
+    assert!(operations.contains(&Op::MatchMapping));
+    assert!(operations.contains(&Op::MatchKey));
+    assert!(operations.contains(&Op::MatchClass));
+    assert!(operations.contains(&Op::MatchAttr));
+    assert!(operations.contains(&Op::MatchArgs));
+    assert!(operations.contains(&Op::MatchClassItem));
 }
 
 #[test]

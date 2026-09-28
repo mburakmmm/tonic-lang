@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 23, core verifier 16, Cranelift JIT 18, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 24, core verifier 17, Cranelift JIT 19, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 106, CPython bridge 15 ve HPy manifest 5; toplam 340 test.
+native handles 5, language/runtime 108, CPython bridge 15 ve HPy manifest 5; toplam 345 test.
 
-Differential corpus: 315 stdout vakası ve 168 exception türü vakası. Seed 42.
-Async-generator diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 316 stdout vakası ve 173 exception türü vakası. Seed 42.
+Structural matching diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -473,6 +473,16 @@ eleme ve collision'lı kullanıcı `__hash__`/`__eq__` çağrılarını, hash-aw
 kapsar. Runtime testi interpreter/JIT-caller × allocation-stress GC altında
 precise eleman köklerini; differential çıktı/hata vakaları Python 3.14.6 ile
 gözlenebilir sonuçları ve unhashable set elemanı hatasını karşılaştırır.
+
+Structural matching dilimi bytecode v29 `MATCH_SEQUENCE`, `MATCH_MAPPING`,
+`MATCH_KEY`, `MATCH_CLASS`, `MATCH_ATTR`, `MATCH_ARGS`, `MATCH_CLASS_ITEM` ve
+`MATCH_UNIQUE` sınırlarını doğrular. Compiler/runtime testleri subject'in tek
+değerlendirilmesini, staged capture'ları, guard fallthrough'unu, OR birleşimini,
+fixed/starred ve nested sequence'leri, mapping `**rest` ile collision-aware
+dinamik duplicate key denetimini, positional/keyword class desenlerini,
+`__match_args__`, builtin self-pattern'ı ve descriptor'ın tek okunmasını kapsar.
+Eksik attribute case başarısızlığına dönüşürken diğer protokol hataları korunur;
+Cranelift bu doğrulanmış opkodlarda açık generic-tier fallback uygular.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.

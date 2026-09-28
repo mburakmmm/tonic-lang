@@ -429,6 +429,25 @@ edilir ve mutation tek write-barrier sınırından geçer. `SET`/`SET_ADD` Crane
 destek kümesinin dışında doğrulanıp generic runtime'a düşer. Ayrıntılar
 [ADR 0081](adr/0081-native-sets.md) dosyasındadır.
 
+Bytecode v29 structural `match`/`case` lowering'ini Tonic-owned `Pattern`
+ağacından doğrulanmış register kontrol akışına taşır. Capture'lar bütün desen
+başarılı olana kadar geçici register'larda tutulur; OR kolları aynı binding
+kümesini ortak destination'lara birleştirir ve guard yalnız tamamlanmış
+binding'lerden sonra çalışır. Sequence guard'ı list/tuple/range ile bunların
+native alt sınıf storage'ını materialize eder; string'i sequence saymaz.
+
+Mapping ve class desenleri ikinci bir protokol motoru kurmaz. Mapping anahtarları
+dict'in suspending hash/equality continuation'ını, `**rest` mevcut merge/delete
+yollarını kullanır. Dinamik duplicate anahtar/ad denetimi aynı collision-aware
+tablo üzerinden ve Python'ın kısa devre sırasıyla çalışır. Class guard'ı C3 MRO
+instance kontrolünü; attribute çıkarımı descriptor/`__getattribute__`/`__getattr__`
+durum makinesini kullanır. Fresh managed sentinel yalnız nihai
+`AttributeError`'ı case başarısızlığına çevirir. Positional desenler doğrulanmış
+`__match_args__` tuple'ını ve builtin self-pattern'ı destekler. Bütün geçici
+container ve continuation değerleri precise GC edge'idir; opkodlar Cranelift
+destek kümesi dışında açık generic runtime fallback'inde kalır. Ayrıntılar
+[ADR 0082](adr/0082-structural-pattern-matching.md) dosyasındadır.
+
 Fonksiyon parametre ve dönüş annotation'ları parser adapter'dan Tonic-owned
 AST/HIR'e alınır ve defining scope içinde register değerlerine indirilir.
 Function-site metadata yalnız `SymbolId` ve doğrulanmış register index'i taşır;

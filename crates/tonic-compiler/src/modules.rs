@@ -91,6 +91,11 @@ fn collect_imports(statements: &[Stmt], module: &Module, imports: &mut Vec<Strin
                 collect_imports(body, module, imports);
                 collect_imports(otherwise, module, imports);
             }
+            StmtKind::Match { cases, .. } => {
+                for case in cases {
+                    collect_imports(&case.body, module, imports);
+                }
+            }
             _ => {}
         }
     }

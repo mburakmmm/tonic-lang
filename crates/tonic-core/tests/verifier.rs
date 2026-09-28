@@ -111,6 +111,62 @@ fn set_construction_operands_are_verified() {
 }
 
 #[test]
+fn structural_match_operands_are_verified() {
+    for op in [
+        Op::MatchKey,
+        Op::MatchClass,
+        Op::MatchAttr,
+        Op::MatchArgs,
+        Op::MatchClassItem,
+    ] {
+        let mut valid = program();
+        valid.code[0]
+            .instructions
+            .insert(1, Instr::new(op, 0, 1, 0));
+        valid.code[0].spans.insert(1, Span::default());
+        valid.clone().verify().unwrap();
+        for operand in 0..3 {
+            let mut invalid = valid.clone();
+            let registers = invalid.code[0].registers;
+            let instruction = &mut invalid.code[0].instructions[1];
+            match operand {
+                0 => instruction.a = registers,
+                1 => instruction.b = registers,
+                _ => instruction.c = registers,
+            }
+            assert!(invalid.verify().is_err(), "{op:?} operand {operand}");
+        }
+    }
+
+    let mut sequence = program();
+    sequence.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::MatchSequence, 0, 1, 0x8001));
+    sequence.code[0].spans.insert(1, Span::default());
+    sequence.clone().verify().unwrap();
+    sequence.code[0].instructions[1].b = sequence.code[0].registers;
+    assert!(sequence.verify().is_err());
+
+    let mut unique = program();
+    unique.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::MatchUnique, 0, 1, 0));
+    unique.code[0].spans.insert(1, Span::default());
+    unique.clone().verify().unwrap();
+    unique.code[0].instructions[1].c = 2;
+    assert!(unique.verify().is_err());
+
+    let mut mapping = program();
+    mapping.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::MatchMapping, 0, 1, u16::MAX));
+    mapping.code[0].spans.insert(1, Span::default());
+    mapping.clone().verify().unwrap();
+    mapping.code[0].instructions[1].b = mapping.code[0].registers;
+    assert!(mapping.verify().is_err());
+}
+
+#[test]
 fn yield_requires_generator_function_metadata() {
     let mut generator = program();
     generator.modules[0].code_count = 2;

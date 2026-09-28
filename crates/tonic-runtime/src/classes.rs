@@ -197,6 +197,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__qualname__"
                 | "__doc__"
                 | "__name__"
+                | "__match_args__"
         )
     {
         return Err(Diagnostic::new(

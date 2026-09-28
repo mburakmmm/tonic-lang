@@ -684,6 +684,351 @@ impl Lower<'_> {
         }
         Ok(())
     }
+    fn lower_pattern(
+        &mut self,
+        subject: u16,
+        pattern: &Pattern,
+        failures: &mut Vec<usize>,
+    ) -> Result<Vec<(SymbolId, u16)>> {
+        match &pattern.kind {
+            PatternKind::Value(value) => {
+                let expected = self.expr(value)?;
+                let matched = self.alloc(1)?;
+                self.emit(Op::Eq, matched, subject, expected, pattern.span)?;
+                failures.push(self.emit(Op::JumpFalse, matched, 0, 0, pattern.span)?);
+                Ok(Vec::new())
+            }
+            PatternKind::Singleton(value) => {
+                let expected = self.constant(value.clone(), pattern.span)?;
+                let matched = self.alloc(1)?;
+                self.emit(Op::Is, matched, subject, expected, pattern.span)?;
+                failures.push(self.emit(Op::JumpFalse, matched, 0, 0, pattern.span)?);
+                Ok(Vec::new())
+            }
+            PatternKind::As {
+                pattern: inner,
+                name,
+            } => {
+                let mut bindings = if let Some(inner) = inner {
+                    self.lower_pattern(subject, inner, failures)?
+                } else {
+                    Vec::new()
+                };
+                if let Some(name) = name {
+                    if bindings.iter().any(|(bound, _)| bound == name) {
+                        return Err(Diagnostic::new(
+                            "SyntaxError",
+                            "multiple assignments to name in pattern",
+                        )
+                        .at(pattern.span));
+                    }
+                    bindings.push((*name, subject));
+                }
+                Ok(bindings)
+            }
+            PatternKind::Or(alternatives) => {
+                let mut merged: Option<Vec<(SymbolId, u16)>> = None;
+                let mut successes = Vec::new();
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    let last = index + 1 == alternatives.len();
+                    let mut alternative_failures = Vec::new();
+                    let bindings =
+                        self.lower_pattern(subject, alternative, &mut alternative_failures)?;
+                    if let Some(destinations) = &merged {
+                        if destinations.len() != bindings.len()
+                            || destinations
+                                .iter()
+                                .any(|(name, _)| !bindings.iter().any(|(other, _)| other == name))
+                        {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "alternative patterns bind different names",
+                            )
+                            .at(pattern.span));
+                        }
+                        for (name, destination) in destinations {
+                            let source = bindings
+                                .iter()
+                                .find(|(other, _)| other == name)
+                                .expect("binding set checked")
+                                .1;
+                            self.emit(Op::Move, *destination, source, 0, alternative.span)?;
+                        }
+                    } else {
+                        merged = Some(bindings);
+                    }
+                    if !last {
+                        successes.push(self.emit(Op::Jump, 0, 0, 0, alternative.span)?);
+                        let next = self.pc()?;
+                        for failure in alternative_failures {
+                            self.patch(failure, next);
+                        }
+                    } else {
+                        failures.extend(alternative_failures);
+                    }
+                }
+                let join = self.pc()?;
+                for success in successes {
+                    self.patch(success, join);
+                }
+                Ok(merged.unwrap_or_default())
+            }
+            PatternKind::Sequence(patterns) => {
+                let star = patterns
+                    .iter()
+                    .position(|pattern| matches!(pattern.kind, PatternKind::Star(_)));
+                let minimum = patterns.len() - usize::from(star.is_some());
+                if minimum > 0x7fff {
+                    return Err(limit().at(pattern.span));
+                }
+                let materialized = self.alloc(1)?;
+                let specification = minimum as u16 | if star.is_some() { 0x8000 } else { 0 };
+                self.emit(
+                    Op::MatchSequence,
+                    materialized,
+                    subject,
+                    specification,
+                    pattern.span,
+                )?;
+                let none = self.constant(Constant::None, pattern.span)?;
+                let matched = self.alloc(1)?;
+                self.emit(Op::IsNot, matched, materialized, none, pattern.span)?;
+                failures.push(self.emit(Op::JumpFalse, matched, 0, 0, pattern.span)?);
+
+                let mut bindings = Vec::new();
+                for (position, child) in patterns.iter().enumerate() {
+                    if let PatternKind::Star(name) = &child.kind {
+                        if let Some(name) = name {
+                            let start =
+                                self.constant(Constant::Int(position.to_string()), child.span)?;
+                            let suffix = patterns.len() - position - 1;
+                            let stop = if suffix == 0 {
+                                self.constant(Constant::None, child.span)?
+                            } else {
+                                self.constant(Constant::Int(format!("-{suffix}")), child.span)?
+                            };
+                            let step = self.constant(Constant::None, child.span)?;
+                            let components = self.alloc(3)?;
+                            self.emit(Op::Move, components, start, 0, child.span)?;
+                            self.emit(Op::Move, components + 1, stop, 0, child.span)?;
+                            self.emit(Op::Move, components + 2, step, 0, child.span)?;
+                            let slice = self.alloc(1)?;
+                            self.emit(Op::Slice, slice, components, 0, child.span)?;
+                            let value = self.alloc(1)?;
+                            self.emit(Op::Item, value, materialized, slice, child.span)?;
+                            bindings.push((*name, value));
+                        }
+                        continue;
+                    }
+                    let index = if let Some(star) = star {
+                        if position > star {
+                            -((patterns.len() - position) as i64)
+                        } else {
+                            position as i64
+                        }
+                    } else {
+                        position as i64
+                    };
+                    let index = self.constant(Constant::Int(index.to_string()), child.span)?;
+                    let value = self.alloc(1)?;
+                    self.emit(Op::Item, value, materialized, index, child.span)?;
+                    let child_bindings = self.lower_pattern(value, child, failures)?;
+                    for binding in child_bindings {
+                        if bindings.iter().any(|(name, _)| *name == binding.0) {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "multiple assignments to name in pattern",
+                            )
+                            .at(child.span));
+                        }
+                        bindings.push(binding);
+                    }
+                }
+                Ok(bindings)
+            }
+            PatternKind::Mapping {
+                keys,
+                patterns,
+                rest,
+            } => {
+                let matched = self.alloc(1)?;
+                self.emit(
+                    Op::MatchMapping,
+                    matched,
+                    subject,
+                    index(keys.len())?,
+                    pattern.span,
+                )?;
+                failures.push(self.emit(Op::JumpFalse, matched, 0, 0, pattern.span)?);
+                let mut bindings = Vec::new();
+                let mut evaluated_keys = Vec::with_capacity(keys.len());
+                let unique = self.alloc(1)?;
+                self.emit(Op::Dict, unique, 0, 0, pattern.span)?;
+                for (key, child) in keys.iter().zip(patterns) {
+                    let key = self.expr(key)?;
+                    evaluated_keys.push(key);
+                    self.emit(Op::MatchUnique, unique, key, 0, child.span)?;
+                    let probe = self.alloc(1)?;
+                    self.emit(Op::MatchKey, probe, subject, key, child.span)?;
+                    let found_index = self.constant(Constant::Int("0".into()), child.span)?;
+                    let found = self.alloc(1)?;
+                    self.emit(Op::Item, found, probe, found_index, child.span)?;
+                    failures.push(self.emit(Op::JumpFalse, found, 0, 0, child.span)?);
+                    let value_index = self.constant(Constant::Int("1".into()), child.span)?;
+                    let value = self.alloc(1)?;
+                    self.emit(Op::Item, value, probe, value_index, child.span)?;
+                    let child_bindings = self.lower_pattern(value, child, failures)?;
+                    for binding in child_bindings {
+                        if bindings.iter().any(|(name, _)| *name == binding.0) {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "multiple assignments to name in pattern",
+                            )
+                            .at(child.span));
+                        }
+                        bindings.push(binding);
+                    }
+                }
+                if let Some(name) = rest {
+                    let remainder = self.alloc(1)?;
+                    self.emit(Op::Dict, remainder, 0, 0, pattern.span)?;
+                    self.emit(Op::DictMerge, remainder, subject, 0, pattern.span)?;
+                    for key in evaluated_keys {
+                        let operation = self.alloc(1)?;
+                        self.emit(Op::Move, operation, remainder, 0, pattern.span)?;
+                        self.emit(Op::DelItem, operation, key, 0, pattern.span)?;
+                    }
+                    if bindings.iter().any(|(bound, _)| bound == name) {
+                        return Err(Diagnostic::new(
+                            "SyntaxError",
+                            "multiple assignments to name in pattern",
+                        )
+                        .at(pattern.span));
+                    }
+                    bindings.push((*name, remainder));
+                }
+                Ok(bindings)
+            }
+            PatternKind::Class {
+                class,
+                positional,
+                keyword_names,
+                keyword_patterns,
+            } => {
+                let class = self.expr(class)?;
+                let matched = self.alloc(1)?;
+                self.emit(Op::MatchClass, matched, subject, class, pattern.span)?;
+                failures.push(self.emit(Op::JumpFalse, matched, 0, 0, pattern.span)?);
+                let keyword_name_values = keyword_names
+                    .iter()
+                    .map(|name| {
+                        let name = self.program.symbols[usize::from(name.0)].clone();
+                        self.constant(Constant::Str(name), pattern.span)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut bindings = Vec::new();
+                let marker = if positional.is_empty() && keyword_patterns.is_empty() {
+                    None
+                } else {
+                    let marker = self.alloc(1)?;
+                    self.emit(Op::List, marker, 0, 0, pattern.span)?;
+                    Some(marker)
+                };
+                let unique = if positional.is_empty() && keyword_patterns.is_empty() {
+                    None
+                } else {
+                    let unique = self.alloc(1)?;
+                    self.emit(Op::Dict, unique, 0, 0, pattern.span)?;
+                    Some(unique)
+                };
+                if !positional.is_empty() {
+                    let marker = marker.expect("class item marker");
+                    let match_args_name =
+                        self.constant(Constant::Str("__match_args__".into()), pattern.span)?;
+                    let arguments = self.alloc(1)?;
+                    self.emit(Op::Move, arguments, marker, 0, pattern.span)?;
+                    self.emit(
+                        Op::MatchAttr,
+                        arguments,
+                        class,
+                        match_args_name,
+                        pattern.span,
+                    )?;
+                    let width = 1;
+                    let first = self.alloc(width)?;
+                    let count =
+                        self.constant(Constant::Int(positional.len().to_string()), pattern.span)?;
+                    self.emit(Op::Move, first, count, 0, pattern.span)?;
+                    let descriptors = self.alloc(1)?;
+                    self.emit(Op::List, descriptors, first, width, pattern.span)?;
+                    self.emit(Op::MatchArgs, descriptors, class, arguments, pattern.span)?;
+                    for (position, child) in positional.iter().enumerate() {
+                        let index =
+                            self.constant(Constant::Int(position.to_string()), child.span)?;
+                        let descriptor = self.alloc(1)?;
+                        self.emit(Op::Item, descriptor, descriptors, index, child.span)?;
+                        self.emit(
+                            Op::MatchUnique,
+                            unique.expect("class attribute set"),
+                            descriptor,
+                            1,
+                            child.span,
+                        )?;
+                        let value = self.alloc(1)?;
+                        self.emit(Op::Move, value, marker, 0, child.span)?;
+                        self.emit(Op::MatchClassItem, value, subject, descriptor, child.span)?;
+                        let found = self.alloc(1)?;
+                        self.emit(Op::IsNot, found, value, marker, child.span)?;
+                        failures.push(self.emit(Op::JumpFalse, found, 0, 0, child.span)?);
+                        let child_bindings = self.lower_pattern(value, child, failures)?;
+                        for binding in child_bindings {
+                            if bindings.iter().any(|(name, _)| *name == binding.0) {
+                                return Err(Diagnostic::new(
+                                    "SyntaxError",
+                                    "multiple assignments to name in pattern",
+                                )
+                                .at(child.span));
+                            }
+                            bindings.push(binding);
+                        }
+                    }
+                }
+                for (name, child) in keyword_name_values.iter().zip(keyword_patterns) {
+                    let marker = marker.expect("class item marker");
+                    self.emit(
+                        Op::MatchUnique,
+                        unique.expect("class attribute set"),
+                        *name,
+                        1,
+                        child.span,
+                    )?;
+                    let value = self.alloc(1)?;
+                    self.emit(Op::Move, value, marker, 0, child.span)?;
+                    self.emit(Op::MatchAttr, value, subject, *name, child.span)?;
+                    let found = self.alloc(1)?;
+                    self.emit(Op::IsNot, found, value, marker, child.span)?;
+                    failures.push(self.emit(Op::JumpFalse, found, 0, 0, child.span)?);
+                    let child_bindings = self.lower_pattern(value, child, failures)?;
+                    for binding in child_bindings {
+                        if bindings.iter().any(|(name, _)| *name == binding.0) {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "multiple assignments to name in pattern",
+                            )
+                            .at(child.span));
+                        }
+                        bindings.push(binding);
+                    }
+                }
+                Ok(bindings)
+            }
+            PatternKind::Star(_) => Err(Diagnostic::new(
+                "UnsupportedSyntax",
+                "star pattern outside a sequence is not implemented",
+            )
+            .at(pattern.span)),
+        }
+    }
     fn block(&mut self, body: &[Stmt]) -> Result<()> {
         for s in body {
             let mark = self.next;
@@ -1071,6 +1416,31 @@ impl Lower<'_> {
                 let end = self.pc()?;
                 for b in lp.breaks {
                     self.patch(b, end);
+                }
+            }
+            StmtKind::Match { subject, cases } => {
+                let subject = self.expr(subject)?;
+                let mut ends = Vec::new();
+                for case in cases {
+                    let mut failures = Vec::new();
+                    let bindings = self.lower_pattern(subject, &case.pattern, &mut failures)?;
+                    for (name, value) in bindings {
+                        self.store(name, value, case.span)?;
+                    }
+                    if let Some(guard) = &case.guard {
+                        let guard = self.expr(guard)?;
+                        failures.push(self.emit(Op::JumpFalse, guard, 0, 0, case.span)?);
+                    }
+                    self.block(&case.body)?;
+                    ends.push(self.emit(Op::Jump, 0, 0, 0, case.span)?);
+                    let next = self.pc()?;
+                    for failure in failures {
+                        self.patch(failure, next);
+                    }
+                }
+                let end = self.pc()?;
+                for jump in ends {
+                    self.patch(jump, end);
                 }
             }
             StmtKind::Break => {

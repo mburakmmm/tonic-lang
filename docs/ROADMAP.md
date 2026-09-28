@@ -179,7 +179,11 @@ sonra alınır.
     - [x] Bytecode v23 native set storage, set literal ve sync/async set
       comprehension; ortak hash/collision tablosu, suspending `__hash__`/`__eq__`,
       membership/equality/iteration, precise GC ve generic-tier JIT fallback'i.
-  - [ ] Structural pattern matching (`match`/`case`).
+  - [x] Bytecode v29 structural pattern matching (`match`/`case`); value,
+    singleton, wildcard/capture, `as`, OR ve guard; fixed/starred nested sequence,
+    mapping/`**rest`, dynamic duplicate-key; keyword/positional class,
+    `__match_args__`, builtin self-pattern, descriptor-aware missing attribute,
+    precise continuation roots ve Cranelift generic-tier fallback'i.
   - [ ] F-string/format-spec lowering.
   - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
     - [x] Positional-only, positional, variadic, keyword-only ve mapping

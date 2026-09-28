@@ -69,6 +69,10 @@ pub enum StmtKind {
     While(Expr, Vec<Stmt>, Vec<Stmt>),
     For(Target, Expr, Vec<Stmt>, Vec<Stmt>),
     AsyncFor(Target, Expr, Vec<Stmt>, Vec<Stmt>),
+    Match {
+        subject: Expr,
+        cases: Vec<MatchCase>,
+    },
     Import(Vec<ImportAlias>),
     ImportFrom {
         /// Increasing absolute module prefixes, ending in the source module.
@@ -80,6 +84,41 @@ pub enum StmtKind {
     Break,
     Continue,
     Pass,
+}
+#[derive(Clone, Debug)]
+pub struct MatchCase {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+#[derive(Clone, Debug)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+#[derive(Clone, Debug)]
+pub enum PatternKind {
+    Value(Expr),
+    Singleton(Constant),
+    Sequence(Vec<Pattern>),
+    Mapping {
+        keys: Vec<Expr>,
+        patterns: Vec<Pattern>,
+        rest: Option<SymbolId>,
+    },
+    Class {
+        class: Expr,
+        positional: Vec<Pattern>,
+        keyword_names: Vec<SymbolId>,
+        keyword_patterns: Vec<Pattern>,
+    },
+    Star(Option<SymbolId>),
+    As {
+        pattern: Option<Box<Pattern>>,
+        name: Option<SymbolId>,
+    },
+    Or(Vec<Pattern>),
 }
 #[derive(Clone, Debug)]
 pub struct ExceptHandler {
