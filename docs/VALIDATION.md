@@ -43,7 +43,7 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 19, core verifier 13, Cranelift JIT 16, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 96, CPython bridge 15 ve HPy manifest 5; toplam 321 test.
+native handles 5, language/runtime 103, CPython bridge 15 ve HPy manifest 5; toplam 334 test.
 
 Differential corpus: 309 stdout vakası ve 162 exception türü vakası. Seed 42.
 Async-generator diliminden sonra debug/release × interpreter/JIT ×
@@ -76,7 +76,10 @@ Rust testleri bunlara ek olarak closure/cell ve aktif exception state'inin
 normal/stress GC altında hareketini; list/tuple/dict/for/unpack/`*args`
 tüketicilerini, generator kodunun JIT dışı kalmasını, ulaşılamayan askıdaki
 generator'ların collector-dışı logical close'unu, delege kapanma sırasını,
-unraisable hata yalıtımını ve shutdown finalization'ını doğrular.
+unraisable hata yalıtımını ve shutdown finalization'ını doğrular. User
+`__del__` testleri erişilemez nesne kuyruğunu, resurrection'ı, exactly-once
+çağrıyı ve finalizer hatasının programdan yalıtılmasını interpreter/JIT-caller
+ile doğrular.
 Coroutine corpus'u tembel `async def` çağrısını, nested exact-coroutine `await`
 delegasyonunu, özel `__await__` iterator'larını, `coroutine_wrapper` protokolünü,
 `send`/`throw`/`close`, geçersiz awaitable hata türlerini ve askıdaki coroutine'in
@@ -431,7 +434,7 @@ logical `Value` karşılaştırmasıyla üretir; genel üyelik açık desteklenm
 sınırından interpreter'a düşer. Debug/release × interpreter/JIT × normal/stress-GC
 differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
 
-Senkron comprehension aşamasında toplam 333 Rust testi ile 312 stdout ve 166
+Senkron comprehension aşamasında toplam 334 Rust testi ile 312 stdout ve 166
 exception differential vakasına ulaşıldı. List/dict comprehension ve generator
 expression testleri gizli lexical scope'u, dış scope'ta eager outer `iter()`
 zamanlamasını, iç içe clause/filtreleri, unpack target'ı, closure cell'lerini,
@@ -441,6 +444,10 @@ append yolunu;
 public JIT testi ise comprehension code'unun açık generic-runtime fallback'ini
 doğrular. Debug/release × interpreter/JIT × normal/stress-GC differential
 matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+
+User finalizer testi erişilemeyen `__del__` sahibi nesnelerin collector dışında
+bounded kuyrukla çalıştırılmasını, resurrection'ı, exactly-once çağrıyı ve
+unraisable hataların yalıtılmasını interpreter/JIT-caller altında doğrular.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.

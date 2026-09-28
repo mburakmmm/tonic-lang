@@ -188,6 +188,12 @@ sonra alınır.
     bounded logical close; fiziksel reclamation sonraki collection'a ayrılır.
   - [ ] Kullanıcı `__del__`, resurrection, unraisable hook ve genel nesne
     finalization sırası.
+    - [x] Erişilemez user instance/exception nesneleri için collector-dışı
+      `__del__` kuyruğu, precise finalizer roots, bounded safepoint drain,
+      resurrection ve exactly-once çağrı; finalizer hataları ölçülerek
+      unraisable biçimde yalıtılır.
+    - [ ] Kullanıcı unraisable hook ve tüm nesne türleri için belgelenmiş
+      finalization ordering.
 - [x] Sabitlenmiş Cranelift 0.119 backend; immediate integer leaf numeric-loop bytecode'u, `--jit`, guard ve register-materialized deopt.
 - [x] Leaf JIT differential korpusu; guard/fallback, entry hotness ve ölçümlü küçük-fonksiyon kârlılık eşiği, bounded de-specialization, compile-time/code-size sayaçları.
 - [x] Opak runtime helper ABI; allocation üreten true division, kesin hata türü/PC dönüşü ve panic'in FFI sınırını aşmasını engelleyen trampoline.

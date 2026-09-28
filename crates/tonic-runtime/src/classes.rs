@@ -117,6 +117,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
             name,
             "__init__"
                 | "__new__"
+                | "__del__"
                 | "__call__"
                 | "__len__"
                 | "__bool__"

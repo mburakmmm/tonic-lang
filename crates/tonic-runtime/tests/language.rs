@@ -193,6 +193,29 @@ fn generator_finalization_closes_delegates_and_contains_unraisable_errors() {
 }
 
 #[test]
+fn user_finalizers_run_once_support_resurrection_and_keep_gc_errors_unraisable() {
+    let source = "survivor=None\nclass Rescue:\n    def __del__(self):\n        global survivor\n        print('rescue-finalizer')\n        survivor=self\nclass Broken:\n    def __del__(self):\n        print('broken-finalizer')\n        raise ValueError('ignored')\nrescue=Rescue()\nbroken=Broken()\nrescue=None\nbroken=None\nprint(survivor is None)";
+    let program = compile(source, "object-finalization").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"True\n");
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(out, b"True\nbroken-finalizer\nrescue-finalizer\n");
+        assert_eq!(vm.stats.object_finalizers, 2);
+        assert_eq!(vm.stats.object_finalizer_errors, 1);
+
+        // The surviving object was resurrected, but its finalizer is never
+        // scheduled a second time while that root remains live.
+        vm.collect_garbage().unwrap();
+        assert_eq!(vm.stats.object_finalizers, 2);
+    }
+}
+
+#[test]
 fn coroutines_are_lazy_and_await_nested_tonic_coroutines() {
     let source = "async def inner(value):\n    print('inner',value)\n    return value+1\nasync def outer():\n    print('outer-start')\n    value=await inner(41)\n    print('outer-result',value)\n    return [value]\nprobe=outer()\nwrapper=probe.__await__()\nprint(type(probe).__name__,type(wrapper).__name__,iter(wrapper)==wrapper)\nprint('probe-close',wrapper.close())\nasync def instant():\n    return ['wrapped']\nwrapped=instant().__await__()\ntry:\n    next(wrapped)\nexcept StopIteration as error:\n    print('wrapped',error.value,error.args)\ntry:\n    next(wrapped)\nexcept RuntimeError as error:\n    print(str(error))\ncoroutine=outer()\ntry:\n    iter(coroutine)\nexcept TypeError:\n    print('not-iterable')\ntry:\n    coroutine.send('early')\nexcept TypeError:\n    print('send-before-start')\ntry:\n    coroutine.send(None)\nexcept StopIteration as error:\n    print('result',error.value,error.args)\ntry:\n    coroutine.send(None)\nexcept RuntimeError as error:\n    print(str(error))";
     assert_output_under_stress_gc_and_jit(

@@ -51,9 +51,10 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Comprehensions, OS-backed async
-I/O, structural matching, f-strings, a full standard library, and several remaining protocols
-are still tracked in the [roadmap](docs/ROADMAP.md).
+The unsupported surface is reported explicitly. Set/async comprehensions,
+OS-backed async I/O, structural matching, f-strings, a full standard library,
+and several remaining protocols are still tracked in the
+[roadmap](docs/ROADMAP.md).
 
 ## Architecture
 
@@ -144,7 +145,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 333 Rust tests and a differential corpus of
+The repository currently contains 334 Rust tests and a differential corpus of
 312 output cases plus 166 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
@@ -194,7 +195,9 @@ and production hardening are incomplete. In particular:
 - CPython ABI compatibility is intentionally outside the core runtime;
 - HPy Universal loading and aHPy-generated extension execution are planned and
   not implemented yet;
-- GC pauses are not yet bounded and user-language finalizer semantics are open;
+- GC pauses are not yet bounded; user `__del__` finalization now has a bounded
+  queue, resurrection and exactly-once execution, while ordering/unraisable
+  hook policy remains open;
 - JIT coverage is focused on profiled numeric loops and guarded call paths;
 - the native C ABI remains versioned but pre-stable;
 - this release does not provide a resource-isolation sandbox.

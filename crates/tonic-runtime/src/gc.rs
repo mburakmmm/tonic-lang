@@ -21,6 +21,7 @@ impl Heap {
         let mut marked = vec![false; self.objects.len()];
         let mut work: Vec<Value> = roots.into_iter().collect();
         work.extend(self.pending_generators.iter().copied());
+        work.extend(self.pending_finalizers.iter().copied());
         // Validate and mark completely before modifying slots; failure is atomic.
         while let Some(value) = work.pop() {
             if value.heap_index().is_none() {
@@ -36,6 +37,7 @@ impl Heap {
                 .trace(|value| work.push(value));
         }
         self.queue_unreachable_generators(&mut marked, false)?;
+        self.queue_unreachable_object_finalizers(&mut marked, false)?;
         Ok(self.sweep(marked, false))
     }
 
@@ -46,6 +48,7 @@ impl Heap {
         let mut marked = vec![false; self.objects.len()];
         let mut work: Vec<Value> = roots.into_iter().collect();
         work.extend(self.pending_generators.iter().copied());
+        work.extend(self.pending_finalizers.iter().copied());
         for slot_index in self.remembered.iter().copied() {
             let Some(location) = self
                 .slots
@@ -74,7 +77,54 @@ impl Heap {
                 .trace(|value| work.push(value));
         }
         self.queue_unreachable_generators(&mut marked, true)?;
+        self.queue_unreachable_object_finalizers(&mut marked, true)?;
         Ok(self.sweep(marked, true))
+    }
+
+    fn queue_unreachable_object_finalizers(
+        &mut self,
+        marked: &mut [bool],
+        young_only: bool,
+    ) -> Result<()> {
+        let candidates = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(location, entry)| {
+                if marked[location]
+                    || (young_only && !entry.young)
+                    || !matches!(
+                        &entry.object,
+                        super::Object::Instance { .. } | super::Object::Exception { .. }
+                    )
+                {
+                    return None;
+                }
+                Some(Value::heap(
+                    entry.slot,
+                    self.slots[entry.slot as usize].generation,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for value in candidates {
+            self.location(value).ok_or_else(|| invalid_value(value))?;
+            if self.queue_object_finalizer(value)? {
+                let mut work = vec![value];
+                while let Some(value) = work.pop() {
+                    if value.heap_index().is_none() {
+                        continue;
+                    }
+                    let location = self.location(value).ok_or_else(|| invalid_value(value))?;
+                    if marked[location] {
+                        continue;
+                    }
+                    marked[location] = true;
+                    self.objects[location].object.trace(|edge| work.push(edge));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn queue_unreachable_generators(
@@ -158,6 +208,15 @@ impl Heap {
             }
             old_location += 1;
             live
+        });
+        let slots = &self.slots;
+        self.finalized_objects.retain(|value| {
+            value
+                .heap_index()
+                .and_then(|index| slots.get(index))
+                .is_some_and(|slot| {
+                    slot.generation == value.generation() && slot.location.is_some()
+                })
         });
         self.bytes = stats.live_bytes;
         self.last_collection_allocations = self.allocations;

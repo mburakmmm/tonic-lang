@@ -59,6 +59,8 @@ pub struct Stats {
     pub foreign_destructor_panics: u64,
     pub generator_finalizers: u64,
     pub generator_finalizer_errors: u64,
+    pub object_finalizers: u64,
+    pub object_finalizer_errors: u64,
     pub backedges: u64,
     pub heap_allocations: u64,
     pub estimated_heap_bytes: usize,
@@ -604,6 +606,7 @@ const DEFAULT_JIT_MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
 const QUICKEN_THRESHOLD: u8 = 8;
 const MINORS_PER_MAJOR: u8 = 32;
 const GENERATOR_FINALIZERS_PER_SAFEPOINT: usize = 8;
+const OBJECT_FINALIZERS_PER_SAFEPOINT: usize = 8;
 #[derive(Clone, Copy, Default)]
 enum AdaptiveState {
     #[default]
@@ -1573,6 +1576,7 @@ pub struct Vm {
     event_loop: Option<EventLoopState>,
     next_event_loop_generation: u64,
     draining_generator_finalizers: bool,
+    draining_object_finalizers: bool,
     finalizer_roots: Vec<Value>,
     pub limits: Limits,
     pub stats: Stats,
@@ -1638,6 +1642,7 @@ impl Vm {
             event_loop: None,
             next_event_loop_generation: 1,
             draining_generator_finalizers: false,
+            draining_object_finalizers: false,
             finalizer_roots: Vec::new(),
             limits: Limits::default(),
             stats: Stats::default(),
@@ -2474,10 +2479,14 @@ impl Vm {
         }
         self.phase = RuntimePhase::Finalizing;
         self.heap.queue_all_suspended_generators();
+        self.heap.queue_all_object_finalizers()?;
         if let Some(program) = self.active_program.clone() {
             let mut output = std::io::sink();
             while self.heap.has_pending_generator_finalizers() {
                 self.drain_generator_finalizers(&program, &mut output, usize::MAX)?;
+            }
+            while self.heap.has_pending_object_finalizers() {
+                self.drain_object_finalizers(&program, &mut output, usize::MAX)?;
             }
         }
         self.frames.clear();
@@ -2626,6 +2635,9 @@ impl Vm {
             while self.heap.has_pending_generator_finalizers() {
                 self.drain_generator_finalizers(&program, output, usize::MAX)?;
             }
+            while self.heap.has_pending_object_finalizers() {
+                self.drain_object_finalizers(&program, output, usize::MAX)?;
+            }
         }
         Ok(stats)
     }
@@ -2648,6 +2660,16 @@ impl Vm {
         self.stats.foreign_destructor_panics += panics;
         self.drain_deferred_persistent_releases()?;
         record_collection(&mut self.stats, &self.heap, stats, start);
+        if let Some(program) = self.active_program.clone() {
+            if !self.draining_object_finalizers && self.heap.has_pending_object_finalizers() {
+                let mut output = std::io::sink();
+                self.drain_object_finalizers(
+                    &program,
+                    &mut output,
+                    OBJECT_FINALIZERS_PER_SAFEPOINT,
+                )?;
+            }
+        }
         Ok(stats)
     }
     pub fn register_native(
@@ -3824,6 +3846,72 @@ impl Vm {
         self.draining_generator_finalizers = false;
         result
     }
+
+    fn drain_object_finalizers(
+        &mut self,
+        program: &Program,
+        output: &mut dyn Write,
+        limit: usize,
+    ) -> Result<()> {
+        if self.draining_object_finalizers {
+            return Ok(());
+        }
+        self.draining_object_finalizers = true;
+        let result = (|| {
+            for _ in 0..limit {
+                let Some(object) = self.heap.pop_object_finalizer() else {
+                    break;
+                };
+                if self.heap.try_get(object).is_none() {
+                    continue;
+                }
+                let Some(call) = self.heap.special_method_call(object, "__del__")? else {
+                    continue;
+                };
+                self.stats.object_finalizers += 1;
+                let register_len = self.registers.len();
+                let cell_len = self.cells.len();
+                let argument_depth = self.arguments.len();
+                let frame_depth = self.frames.len();
+                let pending_class_depth = self.pending_classes.len();
+                let finalizer_root_depth = self.finalizer_roots.len();
+                let saved_exception = self.pending_exception.take();
+                self.finalizer_roots.push(object);
+                if let Some(exception) = saved_exception {
+                    self.finalizer_roots.push(exception);
+                }
+                self.registers.push(Value::UNBOUND);
+                let destination = register_len;
+                let result = self
+                    .invoke_target(
+                        program,
+                        call.callable,
+                        destination,
+                        Arguments::Inline {
+                            receiver: call.receiver,
+                            positional: [Value::UNBOUND; 3],
+                            count: 0,
+                        },
+                        output,
+                    )
+                    .and_then(|_| self.execute_until_depth(program, output, frame_depth));
+                self.frames.truncate(frame_depth);
+                self.registers.truncate(register_len);
+                self.cells.truncate(cell_len);
+                self.arguments.truncate(argument_depth);
+                self.pending_classes.truncate(pending_class_depth);
+                self.pending_exception = saved_exception;
+                self.finalizer_roots.truncate(finalizer_root_depth);
+                if result.is_err() {
+                    self.stats.object_finalizer_errors += 1;
+                }
+            }
+            Ok(())
+        })();
+        self.draining_object_finalizers = false;
+        result
+    }
+
     fn exception_from_diagnostic(&mut self, error: &Diagnostic) -> Result<Value> {
         let class = match error.kind.as_str() {
             "TypeError" => self.runtime_types.type_error,
@@ -4574,6 +4662,9 @@ impl Vm {
         while self.heap.has_pending_generator_finalizers() {
             self.drain_generator_finalizers(p, output, usize::MAX)?;
         }
+        while self.heap.has_pending_object_finalizers() {
+            self.drain_object_finalizers(p, output, usize::MAX)?;
+        }
         Ok(())
     }
     pub(crate) fn execute_until_depth(
@@ -4585,6 +4676,9 @@ impl Vm {
         while self.frames.len() > depth {
             if !self.draining_generator_finalizers && self.heap.has_pending_generator_finalizers() {
                 self.drain_generator_finalizers(p, output, GENERATOR_FINALIZERS_PER_SAFEPOINT)?;
+            }
+            if !self.draining_object_finalizers && self.heap.has_pending_object_finalizers() {
+                self.drain_object_finalizers(p, output, OBJECT_FINALIZERS_PER_SAFEPOINT)?;
             }
             if self.gc_interval.is_some_and(|interval| {
                 self.heap.allocations - self.heap.last_collection_allocations >= interval.max(1)

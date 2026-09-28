@@ -526,6 +526,8 @@ pub(crate) struct Heap {
     pub foreign_destructor_panics: u64,
     pending_foreign: Vec<crate::foreign::PendingForeign>,
     pending_generators: Vec<Value>,
+    pending_finalizers: Vec<Value>,
+    finalized_objects: Vec<Value>,
 }
 impl Heap {
     /// Return the exact builtin backing value for a builtin subclass instance.
@@ -618,6 +620,48 @@ impl Heap {
 
     pub(crate) fn pop_generator_finalizer(&mut self) -> Option<Value> {
         self.pending_generators.pop()
+    }
+
+    pub(crate) fn has_pending_object_finalizers(&self) -> bool {
+        !self.pending_finalizers.is_empty()
+    }
+
+    pub(crate) fn pop_object_finalizer(&mut self) -> Option<Value> {
+        self.pending_finalizers.pop()
+    }
+
+    /// Queue every currently allocated object with a user-visible `__del__`.
+    /// Shutdown has no guest roots, so this is intentionally explicit rather
+    /// than relying on reachability discovery during a later collection.
+    pub(crate) fn queue_all_object_finalizers(&mut self) -> Result<()> {
+        let candidates = self
+            .objects
+            .iter()
+            .filter_map(|entry| {
+                let value = Value::heap(entry.slot, self.slots[entry.slot as usize].generation);
+                matches!(
+                    entry.object,
+                    Object::Instance { .. } | Object::Exception { .. }
+                )
+                .then_some(value)
+            })
+            .collect::<Vec<_>>();
+        for value in candidates {
+            self.queue_object_finalizer(value)?;
+        }
+        Ok(())
+    }
+
+    fn queue_object_finalizer(&mut self, value: Value) -> Result<bool> {
+        if self.finalized_objects.contains(&value) || self.pending_finalizers.contains(&value) {
+            return Ok(false);
+        }
+        if self.special_method_call(value, "__del__")?.is_none() {
+            return Ok(false);
+        }
+        self.finalized_objects.push(value);
+        self.pending_finalizers.push(value);
+        Ok(true)
     }
 
     pub(crate) fn queue_all_suspended_generators(&mut self) {
