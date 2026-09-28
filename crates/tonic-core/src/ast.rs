@@ -111,6 +111,7 @@ pub enum ExprKind {
     Name(SymbolId),
     Tuple(Vec<Expr>),
     List(Vec<Expr>),
+    Set(Vec<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
     Bool(bool, Vec<Expr>),
@@ -160,6 +161,7 @@ pub struct ComprehensionClause {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComprehensionKind {
     List,
+    Set,
     Dict,
     Generator,
 }

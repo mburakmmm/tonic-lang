@@ -241,6 +241,7 @@ pub(crate) enum Object {
     List(Vec<Value>),
     Slice([Value; 3]),
     Dict(crate::dict::Dict),
+    Set(crate::dict::Dict),
     Exception {
         class: Value,
         message: String,
@@ -499,6 +500,7 @@ impl Object {
                     visit(*value);
                 }
             }
+            Self::Set(set) => set.entries.iter().for_each(|(value, _)| visit(*value)),
             Self::DictIterator { source, .. } => visit(*source),
             Self::Cell(value) => visit(*value),
             Self::Foreign(foreign) => foreign.trace(visit),
@@ -1560,7 +1562,7 @@ impl Heap {
             Object::Str(s) => !s.is_empty(),
             Object::Tuple(v) | Object::List(v) => !v.is_empty(),
             Object::Buffer(buffer) => buffer.len() != 0,
-            Object::Dict(dict) => !dict.entries.is_empty(),
+            Object::Dict(dict) | Object::Set(dict) => !dict.entries.is_empty(),
             Object::MappingProxy { class } => self.class(*class)?.dictionary_len() != 0,
             Object::Range { start, stop, step } => {
                 if *step > 0 {
@@ -1776,6 +1778,21 @@ impl Heap {
                 result.push('}');
                 result
             }
+            Object::Set(set) => {
+                if set.entries.is_empty() {
+                    "set()".into()
+                } else {
+                    let mut result = String::from("{");
+                    for (index, (value, _)) in set.entries.iter().enumerate() {
+                        if index > 0 {
+                            result.push_str(", ");
+                        }
+                        result.push_str(&self.format_depth(*value, true, path)?);
+                    }
+                    result.push('}');
+                    result
+                }
+            }
             Object::Cell(_) => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -1884,7 +1901,7 @@ impl Object {
                     (task.waiters.capacity() + task.callbacks.capacity())
                         * std::mem::size_of::<Value>()
                 }
-                Self::Dict(dict) => dict.estimated_bytes(),
+                Self::Dict(dict) | Self::Set(dict) => dict.estimated_bytes(),
                 _ => 0,
             }
     }

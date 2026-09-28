@@ -1323,6 +1323,43 @@ print(asyncio.run(consume(stream)))"#;
         b"aiter 4\naiter 3\naiter 2\n([10, 30], [20, 30], 40, 50, {0: 0, 1: 10, 2: 20}, [10, 20, 11, 21])\naiter 3\nasync_generator\n[0, 10, 20]\n",
     );
 }
+
+#[test]
+fn set_literals_comprehensions_and_hash_collisions_survive_jit_and_stress_gc() {
+    let source = r#"import asyncio
+class Key:
+    def __init__(self,value):
+        self.value=value
+    def __hash__(self):
+        return self.value%2
+    def __eq__(self,other):
+        return self.value==other.value
+values={Key(1),Key(3),Key(1)}
+print(len(values),Key(3) in values,Key(2) not in values)
+print(values=={Key(3),Key(1)})
+unique={value%3 for value in range(8)}
+print(len(unique),unique=={0,1,2})
+print({value for value in []})
+print(type(values).__name__,len(list(values)))
+class Source:
+    def __init__(self):
+        self.value=0
+    def __aiter__(self):
+        return self
+    async def __anext__(self):
+        if self.value>=4:
+            raise StopAsyncIteration
+        value=self.value
+        self.value+=1
+        return value
+async def collect():
+    return {value%2 async for value in Source()}
+print(asyncio.run(collect())=={0,1})"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"2 True True\nTrue\n3 True\nset()\nset 2\nTrue\n",
+    );
+}
 #[test]
 fn runtime_errors_have_spans() {
     let e = error("def f():\n    return 1//0\nf()\n");

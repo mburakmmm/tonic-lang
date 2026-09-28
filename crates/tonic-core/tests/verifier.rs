@@ -90,6 +90,27 @@ fn list_append_operands_are_verified() {
 }
 
 #[test]
+fn set_construction_operands_are_verified() {
+    let mut valid = program();
+    valid.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::Set, 0, 0, 0));
+    valid.code[0]
+        .instructions
+        .insert(2, Instr::new(Op::SetAdd, 0, 1, 0));
+    valid.code[0].spans.insert(1, Span::default());
+    valid.code[0].spans.insert(2, Span::default());
+    valid.clone().verify().unwrap();
+
+    let mut invalid = valid.clone();
+    invalid.code[0].instructions[1].b = 1;
+    assert!(invalid.verify().is_err());
+    let mut invalid = valid;
+    invalid.code[0].instructions[2].b = invalid.code[0].registers;
+    assert!(invalid.verify().is_err());
+}
+
+#[test]
 fn yield_requires_generator_function_metadata() {
     let mut generator = program();
     generator.modules[0].code_count = 2;

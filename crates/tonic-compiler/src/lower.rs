@@ -176,10 +176,11 @@ fn build_comprehension(
     if comprehension.kind != ComprehensionKind::Generator {
         let accumulator = lower.alloc(1)?;
         lower.emit(
-            if comprehension.kind == ComprehensionKind::List {
-                Op::List
-            } else {
-                Op::Dict
+            match comprehension.kind {
+                ComprehensionKind::List => Op::List,
+                ComprehensionKind::Set => Op::Set,
+                ComprehensionKind::Dict => Op::Dict,
+                ComprehensionKind::Generator => unreachable!("generator has no accumulator"),
             },
             accumulator,
             0,
@@ -1182,6 +1183,11 @@ impl Lower<'_> {
                     let accumulator = self.load(comprehension.accumulator, span)?;
                     self.emit(Op::ListAppend, accumulator, value, 0, span)?;
                 }
+                ComprehensionKind::Set => {
+                    let value = self.expr(&comprehension.element)?;
+                    let accumulator = self.load(comprehension.accumulator, span)?;
+                    self.emit(Op::SetAdd, accumulator, value, 0, span)?;
+                }
                 ComprehensionKind::Dict => {
                     let key = self.expr(&comprehension.element)?;
                     let value = self.expr(
@@ -1333,6 +1339,7 @@ impl Lower<'_> {
                     .collect();
                 let label = match comprehension.kind {
                     ComprehensionKind::List => "<listcomp>",
+                    ComprehensionKind::Set => "<setcomp>",
                     ComprehensionKind::Dict => "<dictcomp>",
                     ComprehensionKind::Generator => "<genexpr>",
                 };
@@ -1516,6 +1523,15 @@ impl Lower<'_> {
                     }
                 }
                 Ok(r)
+            }
+            ExprKind::Set(values) => {
+                let result = self.alloc(1)?;
+                self.emit(Op::Set, result, 0, 0, s)?;
+                for value in values {
+                    let value = self.expr(value)?;
+                    self.emit(Op::SetAdd, result, value, 0, s)?;
+                }
+                Ok(result)
             }
             ExprKind::Tuple(values) | ExprKind::List(values) => {
                 let (first, count) = self.window(values)?;

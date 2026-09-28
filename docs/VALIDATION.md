@@ -40,12 +40,12 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 23, core verifier 15, Cranelift JIT 18, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 23, core verifier 16, Cranelift JIT 18, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 105, CPython bridge 15 ve HPy manifest 5; toplam 338 test.
+native handles 5, language/runtime 106, CPython bridge 15 ve HPy manifest 5; toplam 340 test.
 
-Differential corpus: 314 stdout vakası ve 167 exception türü vakası. Seed 42.
+Differential corpus: 315 stdout vakası ve 168 exception türü vakası. Seed 42.
 Async-generator diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -466,6 +466,13 @@ Compiler testi async clause ile yalnız `await` içeren comprehension ayrımın�
 differential vakaları mixed sync/async clause'ları, eager outer `__aiter__`
 zamanlamasını, element `await`ini, modül düzeyinde async generator expression'ı
 ve tüketimini interpreter/JIT-caller × allocation-stress GC altında kapsar.
+
+Native set dilimi bytecode v23 `SET`/`SET_ADD` operand doğrulamasını, duplicate
+eleme ve collision'lı kullanıcı `__hash__`/`__eq__` çağrılarını, hash-aware
+üyelik/eşitlik, iteration, boş set gösterimi ile sync/async set comprehension'ı
+kapsar. Runtime testi interpreter/JIT-caller × allocation-stress GC altında
+precise eleman köklerini; differential çıktı/hata vakaları Python 3.14.6 ile
+gözlenebilir sonuçları ve unhashable set elemanı hatasını karşılaştırır.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.

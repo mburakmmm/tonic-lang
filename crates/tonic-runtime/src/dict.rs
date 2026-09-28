@@ -107,6 +107,13 @@ impl Heap {
         };
         Ok(dict.entries.clone())
     }
+    pub(crate) fn set_entries(&self, owner: Value) -> Result<Vec<(Value, Value)>> {
+        let owner = self.native_value(owner);
+        let Object::Set(set) = self.get(owner)? else {
+            return Err(Diagnostic::new("TypeError", "expected set"));
+        };
+        Ok(set.entries.clone())
+    }
     fn dict_key(&self, value: Value, depth: usize) -> Result<Key> {
         if depth > 100 {
             return Err(Diagnostic::new(
@@ -376,42 +383,46 @@ impl Heap {
         Ok(())
     }
 
-    pub(crate) fn dict_candidates(&self, owner: Value, hash: i64) -> Result<Vec<usize>> {
+    pub(crate) fn hash_candidates(&self, owner: Value, hash: i64) -> Result<Vec<usize>> {
         let owner = self.native_value(owner);
-        let Object::Dict(dict) = self.get(owner)? else {
-            return Err(Diagnostic::new("TypeError", "expected dict"));
+        let dict = match self.get(owner)? {
+            Object::Dict(dict) | Object::Set(dict) => dict,
+            _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         Ok(dict.index.get(&(hash as u64)).cloned().unwrap_or_default())
     }
 
-    pub(crate) fn dict_version(&self, owner: Value) -> Result<u64> {
+    pub(crate) fn hash_version(&self, owner: Value) -> Result<u64> {
         let owner = self.native_value(owner);
-        let Object::Dict(dict) = self.get(owner)? else {
-            return Err(Diagnostic::new("TypeError", "expected dict"));
+        let dict = match self.get(owner)? {
+            Object::Dict(dict) | Object::Set(dict) => dict,
+            _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         Ok(dict.version)
     }
 
-    pub(crate) fn dict_len(&self, owner: Value) -> Result<usize> {
+    pub(crate) fn hash_len(&self, owner: Value) -> Result<usize> {
         let owner = self.native_value(owner);
-        let Object::Dict(dict) = self.get(owner)? else {
-            return Err(Diagnostic::new("TypeError", "expected dict"));
+        let dict = match self.get(owner)? {
+            Object::Dict(dict) | Object::Set(dict) => dict,
+            _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         Ok(dict.entries.len())
     }
 
-    pub(crate) fn dict_entry_at(&self, owner: Value, index: usize) -> Result<(Value, Value)> {
+    pub(crate) fn hash_entry_at(&self, owner: Value, index: usize) -> Result<(Value, Value)> {
         let owner = self.native_value(owner);
-        let Object::Dict(dict) = self.get(owner)? else {
-            return Err(Diagnostic::new("TypeError", "expected dict"));
+        let dict = match self.get(owner)? {
+            Object::Dict(dict) | Object::Set(dict) => dict,
+            _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         dict.entries
             .get(index)
             .copied()
-            .ok_or_else(|| Diagnostic::new("RuntimeError", "stale dictionary candidate"))
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "stale hash candidate"))
     }
 
-    pub(crate) fn dict_set_hashed(
+    pub(crate) fn hash_set_hashed(
         &mut self,
         owner: Value,
         key: Value,
@@ -422,15 +433,16 @@ impl Heap {
         let owner = self.native_value(owner);
         let material = self.dict_key(key, 0)?;
         self.write_barrier_pair(owner, key, value);
-        let Object::Dict(dict) = self.get_mut(owner)? else {
-            return Err(Diagnostic::new("TypeError", "expected dict"));
+        let dict = match self.get_mut(owner)? {
+            Object::Dict(dict) | Object::Set(dict) => dict,
+            _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         let before = dict.estimated_bytes();
         if let Some(index) = matched {
             let entry = dict
                 .entries
                 .get_mut(index)
-                .ok_or_else(|| Diagnostic::new("RuntimeError", "stale dictionary candidate"))?;
+                .ok_or_else(|| Diagnostic::new("RuntimeError", "stale hash candidate"))?;
             entry.1 = value;
         } else {
             let version = dict

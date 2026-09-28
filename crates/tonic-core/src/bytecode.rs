@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 22;
+pub const BYTECODE_VERSION: u16 = 23;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -101,6 +101,8 @@ pub enum Op {
     Contains = 106,
     NotContains = 107,
     ListAppend = 108,
+    Set = 109,
+    SetAdd = 110,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -199,6 +201,8 @@ impl TryFrom<u16> for Op {
             106 => Self::Contains,
             107 => Self::NotContains,
             108 => Self::ListAppend,
+            109 => Self::Set,
+            110 => Self::SetAdd,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -557,7 +561,7 @@ impl Program {
                             return Err(bad("invalid star argument flags"));
                         }
                     }
-                    Op::ArgPos | Op::ArgMapping | Op::Dict => {
+                    Op::ArgPos | Op::ArgMapping | Op::Dict | Op::Set => {
                         reg(i.a)?;
                         if i.b != 0 || i.c != 0 {
                             return Err(bad("nonzero reserved operand"));
@@ -598,7 +602,8 @@ impl Program {
                     | Op::Invert
                     | Op::Not
                     | Op::Iter
-                    | Op::ListAppend => {
+                    | Op::ListAppend
+                    | Op::SetAdd => {
                         reg(i.a)?;
                         reg(i.b)?;
                         if i.c != 0 {

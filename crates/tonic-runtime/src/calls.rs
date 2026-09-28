@@ -4420,6 +4420,16 @@ impl Vm {
             self.registers[destination] = Value::bool(text.contains(fragment) != negate);
             return Ok(());
         }
+        if matches!(self.heap.get(native_container), Ok(Object::Set(_))) {
+            return self.invoke_dict_operation(
+                p,
+                native_container,
+                needle,
+                destination,
+                super::DictOperationKind::Contains { negate },
+                output,
+            );
+        }
         match self.heap.iterator(container) {
             Ok(iterator) => {
                 self.continue_membership(
@@ -4641,6 +4651,16 @@ impl Vm {
                     output,
                 );
             }
+            (Ok(Object::Set(_)), Ok(Object::Set(_))) => {
+                return self.begin_set_equality(
+                    p,
+                    destination,
+                    native_left,
+                    native_right,
+                    action,
+                    output,
+                );
+            }
             _ => EqualityFallback::Ready(false),
         };
         match fallback {
@@ -4819,7 +4839,7 @@ impl Vm {
                 }
             }
             super::EqualityAction::DictCandidate { state, index } => {
-                if self.heap.dict_version(state.start.owner)? != state.version {
+                if self.heap.hash_version(state.start.owner)? != state.version {
                     return Err(Diagnostic::new(
                         "RuntimeError",
                         "dictionary changed during key comparison",
@@ -4841,8 +4861,8 @@ impl Vm {
                 depth,
                 outer,
             } => {
-                if self.heap.dict_version(left)? != left_version
-                    || self.heap.dict_version(right)? != right_version
+                if self.heap.hash_version(left)? != left_version
+                    || self.heap.hash_version(right)? != right_version
                 {
                     return Err(Diagnostic::new(
                         "RuntimeError",
@@ -4920,12 +4940,59 @@ impl Vm {
                 "comparison nesting limit exceeded",
             ));
         }
-        if self.heap.dict_len(left)? != self.heap.dict_len(right)? {
+        if self.heap.hash_len(left)? != self.heap.hash_len(right)? {
             return self.complete_equality(p, destination, false, action, output);
         }
         let entries = self.heap.dict_entries(left)?;
-        let left_version = self.heap.dict_version(left)?;
-        let right_version = self.heap.dict_version(right)?;
+        let left_version = self.heap.hash_version(left)?;
+        let right_version = self.heap.hash_version(right)?;
+        let Some((key, expected)) = entries.first().copied() else {
+            return self.complete_equality(p, destination, true, action, output);
+        };
+        self.invoke_dict_operation(
+            p,
+            right,
+            key,
+            destination,
+            super::DictOperationKind::CompareValue {
+                expected,
+                action: Box::new(super::EqualityAction::DictEntries {
+                    left,
+                    right,
+                    entries,
+                    next: 1,
+                    left_version,
+                    right_version,
+                    depth,
+                    outer: Box::new(action),
+                }),
+            },
+            output,
+        )
+    }
+
+    fn begin_set_equality(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        left: Value,
+        right: Value,
+        action: super::EqualityAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let depth = action.comparison_depth() + 1;
+        if depth > PROTOCOL_NESTING_LIMIT {
+            return Err(Diagnostic::new(
+                "RecursionError",
+                "comparison nesting limit exceeded",
+            ));
+        }
+        if self.heap.hash_len(left)? != self.heap.hash_len(right)? {
+            return self.complete_equality(p, destination, false, action, output);
+        }
+        let entries = self.heap.set_entries(left)?;
+        let left_version = self.heap.hash_version(left)?;
+        let right_version = self.heap.hash_version(right)?;
         let Some((key, expected)) = entries.first().copied() else {
             return self.complete_equality(p, destination, true, action, output);
         };
@@ -5032,8 +5099,8 @@ impl Vm {
         hash: i64,
         output: &mut dyn Write,
     ) -> Result<()> {
-        let version = self.heap.dict_version(start.owner)?;
-        let candidates = self.heap.dict_candidates(start.owner, hash)?;
+        let version = self.heap.hash_version(start.owner)?;
+        let candidates = self.heap.hash_candidates(start.owner, hash)?;
         let comparison_depth = match &start.kind {
             super::DictOperationKind::CompareValue { action, .. } => action.comparison_depth(),
             _ => 0,
@@ -5060,7 +5127,7 @@ impl Vm {
         mut state: super::DictOperation,
         output: &mut dyn Write,
     ) -> Result<()> {
-        if self.heap.dict_version(state.start.owner)? != state.version {
+        if self.heap.hash_version(state.start.owner)? != state.version {
             return Err(Diagnostic::new(
                 "RuntimeError",
                 "dictionary changed during key comparison",
@@ -5068,7 +5135,7 @@ impl Vm {
         }
         if let Some(index) = state.candidates.get(state.next).copied() {
             state.next += 1;
-            let (candidate, _) = self.heap.dict_entry_at(state.start.owner, index)?;
+            let (candidate, _) = self.heap.hash_entry_at(state.start.owner, index)?;
             if candidate == state.start.key {
                 return self.finish_dict_operation(p, destination, state, Some(index), output);
             }
@@ -5102,10 +5169,10 @@ impl Vm {
                             .unwrap_or_else(|_| "missing key".into()),
                     )
                 })?;
-                self.registers[destination] = self.heap.dict_entry_at(state.start.owner, index)?.1;
+                self.registers[destination] = self.heap.hash_entry_at(state.start.owner, index)?.1;
             }
             super::DictOperationKind::Set(value) => {
-                self.heap.dict_set_hashed(
+                self.heap.hash_set_hashed(
                     state.start.owner,
                     state.start.key,
                     value,
@@ -5114,11 +5181,24 @@ impl Vm {
                 )?;
                 self.registers[destination] = state.start.owner;
             }
+            super::DictOperationKind::SetAdd => {
+                self.heap.hash_set_hashed(
+                    state.start.owner,
+                    state.start.key,
+                    Value::NONE,
+                    state.hash,
+                    matched,
+                )?;
+                self.registers[destination] = state.start.owner;
+            }
+            super::DictOperationKind::Contains { negate } => {
+                self.registers[destination] = Value::bool(matched.is_some() != negate);
+            }
             super::DictOperationKind::SetAndContinue {
                 value,
                 state: continuation,
             } => {
-                self.heap.dict_set_hashed(
+                self.heap.hash_set_hashed(
                     state.start.owner,
                     state.start.key,
                     value,
@@ -5131,7 +5211,7 @@ impl Vm {
                 value,
                 state: continuation,
             } => {
-                self.heap.dict_set_hashed(
+                self.heap.hash_set_hashed(
                     state.start.owner,
                     state.start.key,
                     value,
@@ -5156,7 +5236,7 @@ impl Vm {
                 let Some(index) = matched else {
                     return self.complete_equality(p, destination, false, *action, output);
                 };
-                let actual = self.heap.dict_entry_at(state.start.owner, index)?.1;
+                let actual = self.heap.hash_entry_at(state.start.owner, index)?.1;
                 return self.invoke_equality(p, actual, expected, destination, *action, output);
             }
         }

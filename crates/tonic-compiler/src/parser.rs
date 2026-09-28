@@ -565,6 +565,12 @@ impl Adapter {
                     .map(|e| self.expr(e))
                     .collect::<Result<_>>()?,
             ),
+            py::Expr::Set(set) => ExprKind::Set(
+                set.elts
+                    .into_iter()
+                    .map(|element| self.expr(element))
+                    .collect::<Result<_>>()?,
+            ),
             py::Expr::ListComp(c) => {
                 self.comprehension(ComprehensionKind::List, *c.elt, None, c.generators, s)?
             }
@@ -578,7 +584,9 @@ impl Adapter {
             py::Expr::GeneratorExp(c) => {
                 self.comprehension(ComprehensionKind::Generator, *c.elt, None, c.generators, s)?
             }
-            py::Expr::SetComp(_) => return Err(unsupported(s, "set comprehensions")),
+            py::Expr::SetComp(c) => {
+                self.comprehension(ComprehensionKind::Set, *c.elt, None, c.generators, s)?
+            }
             py::Expr::BinOp(b) => ExprKind::Binary(
                 Box::new(self.expr(*b.left)?),
                 Self::binary(b.op, s)?,
@@ -789,9 +797,10 @@ impl Adapter {
     fn expression_suspends(expression: &Expr) -> bool {
         match &expression.kind {
             ExprKind::Await(_) => true,
-            ExprKind::Tuple(values) | ExprKind::List(values) | ExprKind::Bool(_, values) => {
-                values.iter().any(Self::expression_suspends)
-            }
+            ExprKind::Tuple(values)
+            | ExprKind::List(values)
+            | ExprKind::Set(values)
+            | ExprKind::Bool(_, values) => values.iter().any(Self::expression_suspends),
             ExprKind::Binary(left, _, right) | ExprKind::Subscript(left, right) => {
                 Self::expression_suspends(left) || Self::expression_suspends(right)
             }

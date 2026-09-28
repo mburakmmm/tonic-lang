@@ -418,6 +418,17 @@ expression için `GET_AITER` verifier'da coroutine dışı code object'te güven
 `GET_ANEXT`, await ve exhaustion işlemleri coroutine sınırında kalır. Ayrıntılar
 [ADR 0080](adr/0080-async-comprehensions.md) dosyasındadır.
 
+Bytecode v23 `SET` ve `SET_ADD` ile native set literal/comprehension üretir.
+`Object::Set`, dict'in kanıtlanmış insertion-ordered hash malzemesi ve collision
+bucket altyapısını paylaşır; değer slotları set için yalnız internal sentinel'dir.
+Ekleme ve üyelik aynı suspending `__hash__`/`__eq__` continuation zincirinden
+geçtiği için özel nesneler ile hash çakışmaları ikinci bir semantik yol yaratmaz.
+Set eşitliği boyut guard'ından sonra karşı kümede hash-aware üyelik denetler;
+iterator storage version'ı ile boyut değişimini yakalar. Elemanlar precise trace
+edilir ve mutation tek write-barrier sınırından geçer. `SET`/`SET_ADD` Cranelift
+destek kümesinin dışında doğrulanıp generic runtime'a düşer. Ayrıntılar
+[ADR 0081](adr/0081-native-sets.md) dosyasındadır.
+
 Fonksiyon parametre ve dönüş annotation'ları parser adapter'dan Tonic-owned
 AST/HIR'e alınır ve defining scope içinde register değerlerine indirilir.
 Function-site metadata yalnız `SymbolId` ve doğrulanmış register index'i taşır;

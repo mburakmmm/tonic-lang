@@ -525,7 +525,7 @@ impl Heap {
             Object::Str(s) => BigInt::from(s.chars().count()),
             Object::Tuple(v) | Object::List(v) => BigInt::from(v.len()),
             Object::Buffer(buffer) => BigInt::from(buffer.len()),
-            Object::Dict(dict) => BigInt::from(dict.entries.len()),
+            Object::Dict(dict) | Object::Set(dict) => BigInt::from(dict.entries.len()),
             Object::MappingProxy { class } => BigInt::from(self.class(*class)?.dictionary_len()),
             Object::Range { start, stop, step } => BigInt::from(range_len(*start, *stop, *step)),
             _ => return Err(Diagnostic::new("TypeError", "object has no len()")),
@@ -653,7 +653,7 @@ impl Heap {
                 source: v,
                 index: 0,
             },
-            Object::Dict(dict) => Object::DictIterator {
+            Object::Dict(dict) | Object::Set(dict) => Object::DictIterator {
                 source: v,
                 index: 0,
                 version: dict.version,
@@ -695,13 +695,14 @@ impl Heap {
                 version,
             } => {
                 let (source, i, version) = (*source, *index, *version);
-                let Object::Dict(dict) = self.get(source)? else {
-                    unreachable!()
+                let dict = match self.get(source)? {
+                    Object::Dict(dict) | Object::Set(dict) => dict,
+                    _ => unreachable!(),
                 };
                 if dict.version != version {
                     return Err(Diagnostic::new(
                         "RuntimeError",
-                        "dictionary changed size during iteration",
+                        "container changed size during iteration",
                     ));
                 }
                 let value = dict.entries.get(i).map(|(key, _)| *key);

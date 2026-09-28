@@ -249,7 +249,10 @@ impl<'a> Scan<'a> {
                     self.expr(v);
                 }
             }
-            ExprKind::Tuple(es) | ExprKind::List(es) | ExprKind::Bool(_, es) => {
+            ExprKind::Tuple(es)
+            | ExprKind::List(es)
+            | ExprKind::Set(es)
+            | ExprKind::Bool(_, es) => {
                 for e in es {
                     self.expr(e);
                 }
@@ -551,7 +554,7 @@ fn comprehension_scope(comprehension: &Comprehension) -> (Parameters, Vec<Stmt>)
         ..Parameters::default()
     };
     let tail = match comprehension.kind {
-        ComprehensionKind::List => Stmt {
+        ComprehensionKind::List | ComprehensionKind::Set => Stmt {
             kind: StmtKind::Expr((*comprehension.element).clone()),
             span,
         },

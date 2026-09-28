@@ -809,6 +809,10 @@ pub(super) enum HashAction {
 pub(super) enum DictOperationKind {
     Get,
     Set(Value),
+    SetAdd,
+    Contains {
+        negate: bool,
+    },
     SetAndContinue {
         value: Value,
         state: Box<DictConstruction>,
@@ -1090,6 +1094,7 @@ struct RuntimeTypes {
     list: Value,
     tuple: Value,
     dict: Value,
+    set: Value,
     range: Value,
     function: Value,
     generator: Value,
@@ -1138,6 +1143,7 @@ impl RuntimeTypes {
             list: Value::UNBOUND,
             tuple: Value::UNBOUND,
             dict: Value::UNBOUND,
+            set: Value::UNBOUND,
             range: Value::UNBOUND,
             function: Value::UNBOUND,
             generator: Value::UNBOUND,
@@ -1174,6 +1180,7 @@ impl RuntimeTypes {
             self.list,
             self.tuple,
             self.dict,
+            self.set,
             self.range,
             self.function,
             self.generator,
@@ -1395,7 +1402,10 @@ impl DictOperationStart {
         visit(self.owner);
         visit(self.key);
         match &self.kind {
-            DictOperationKind::Get | DictOperationKind::Delete => {}
+            DictOperationKind::Get
+            | DictOperationKind::SetAdd
+            | DictOperationKind::Contains { .. }
+            | DictOperationKind::Delete => {}
             DictOperationKind::Set(value) => visit(*value),
             DictOperationKind::SetAndContinue { value, state } => {
                 visit(*value);
@@ -1863,6 +1873,9 @@ impl Vm {
             dict: vm
                 .heap
                 .builtin_class("dict", vec![vm.object_class], vm.type_class)?,
+            set: vm
+                .heap
+                .builtin_class("set", vec![vm.object_class], vm.type_class)?,
             range: vm
                 .heap
                 .builtin_class("range", vec![vm.object_class], vm.type_class)?,
@@ -2178,7 +2191,11 @@ impl Vm {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, "__hash__", value)?;
         }
-        for class in [vm.runtime_types.list, vm.runtime_types.dict] {
+        for class in [
+            vm.runtime_types.list,
+            vm.runtime_types.dict,
+            vm.runtime_types.set,
+        ] {
             vm.heap.set_attr(class, "__hash__", Value::NONE)?;
         }
         vm.builtins.push(("object".into(), vm.object_class));
@@ -3466,6 +3483,7 @@ impl Vm {
             Object::List(_) => self.runtime_types.list,
             Object::Tuple(_) => self.runtime_types.tuple,
             Object::Dict(_) => self.runtime_types.dict,
+            Object::Set(_) => self.runtime_types.set,
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
             Object::Generator(frame) => frame.class,
@@ -6021,6 +6039,30 @@ impl Vm {
                     }
                     Op::Dict => {
                         self.registers[a] = self.heap.alloc(Object::Dict(Default::default()))?
+                    }
+                    Op::Set => {
+                        self.registers[a] = self.heap.alloc(Object::Set(Default::default()))?
+                    }
+                    Op::SetAdd => {
+                        let owner = self.read(a)?;
+                        let value = self.read(b)?;
+                        if !matches!(
+                            self.heap.get(self.heap.native_value(owner))?,
+                            Object::Set(_)
+                        ) {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "SET_ADD requires a set accumulator",
+                            ));
+                        }
+                        self.invoke_dict_operation(
+                            p,
+                            owner,
+                            value,
+                            a,
+                            DictOperationKind::SetAdd,
+                            output,
+                        )?;
                     }
                     Op::SetItem => {
                         let owner = self.read(a)?;

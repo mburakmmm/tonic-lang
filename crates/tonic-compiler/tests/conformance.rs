@@ -70,10 +70,11 @@ fn identity_and_membership_comparisons_are_tonic_owned() {
 
 #[test]
 fn comprehensions_have_hidden_scopes_and_owned_bytecode() {
-    let source = "result=[x*2 for x in source if x]\nmapping={x:x+1 for x in source}\nstream=(x for x in source)";
+    let source = "result=[x*2 for x in source if x]\nunique={x%3 for x in source}\nmapping={x:x+1 for x in source}\nstream=(x for x in source)";
     let ast = parse(source, "comprehensions").unwrap();
     for (statement, expected) in ast.body.iter().zip([
         ComprehensionKind::List,
+        ComprehensionKind::Set,
         ComprehensionKind::Dict,
         ComprehensionKind::Generator,
     ]) {
@@ -98,6 +99,16 @@ fn comprehensions_have_hidden_scopes_and_owned_bytecode() {
         .instructions
         .iter()
         .any(|instruction| instruction.opcode == Op::ListAppend as u16));
+    let set = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("<setcomp>"))
+        .expect("set comprehension code");
+    assert!(set
+        .instructions
+        .iter()
+        .any(|instruction| instruction.opcode == Op::SetAdd as u16));
     let generator = program
         .program()
         .code
@@ -110,12 +121,12 @@ fn comprehensions_have_hidden_scopes_and_owned_bytecode() {
 
 #[test]
 fn async_comprehensions_have_coroutine_scopes_and_owned_bytecode() {
-    let source = "async def collect(source):\n    values=[await transform(x) async for x in source if x]\n    awaited=[await transform(x) for x in [1,2]]\n    mapping={x:await transform(x) async for x in source}\n    return values,awaited,mapping,(await transform(x) async for x in source)\nstream=(x async for x in source)";
+    let source = "async def collect(source):\n    values=[await transform(x) async for x in source if x]\n    awaited=[await transform(x) for x in [1,2]]\n    unique={await transform(x) async for x in source}\n    mapping={x:await transform(x) async for x in source}\n    return values,awaited,unique,mapping,(await transform(x) async for x in source)\nstream=(x async for x in source)";
     let ast = parse(source, "async-comprehensions").unwrap();
     let StmtKind::Function { body, .. } = &ast.body[0].kind else {
         panic!("async function")
     };
-    for statement in &body[..3] {
+    for statement in &body[..4] {
         let StmtKind::Assign(_, expression) = &statement.kind else {
             panic!("comprehension assignment")
         };
@@ -265,7 +276,6 @@ fn invalid_python_forms() {
 fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
-        "x={i for i in range(3)}",
         "print(f'{1}')",
         "match x:\n    case 1:\n        pass",
         "x=[1,2]\nx[:]=[3]",

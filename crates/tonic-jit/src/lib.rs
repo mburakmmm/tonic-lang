@@ -1742,10 +1742,16 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
-            Op::Move | Op::Neg | Op::Pos | Op::Not | Op::ListAppend => {
+            Op::Move | Op::Neg | Op::Pos | Op::Not | Op::ListAppend | Op::SetAdd => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 if instruction.c != 0 {
+                    return Err(invalid(Some(pc), "nonzero reserved operand"));
+                }
+            }
+            Op::Set => {
+                register(pc, instruction.a)?;
+                if instruction.b != 0 || instruction.c != 0 {
                     return Err(invalid(Some(pc), "nonzero reserved operand"));
                 }
             }
@@ -3716,14 +3722,18 @@ mod tests {
 
     #[test]
     fn comprehension_mutation_stays_in_the_generic_runtime() {
-        let program = function("def collect(values):\n    return [value*2 for value in values]");
-        let code = program
-            .program()
-            .code
-            .iter()
-            .find(|code| code.name.ends_with("<listcomp>"))
-            .unwrap();
-        assert!(matches!(compile(code), Err(Error::Unsupported(_))));
+        let program = function(
+            "def collect(values):\n    return [value*2 for value in values],{value%3 for value in values}",
+        );
+        for suffix in ["<listcomp>", "<setcomp>"] {
+            let code = program
+                .program()
+                .code
+                .iter()
+                .find(|code| code.name.ends_with(suffix))
+                .unwrap();
+            assert!(matches!(compile(code), Err(Error::Unsupported(_))));
+        }
     }
 
     #[test]

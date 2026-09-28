@@ -171,12 +171,14 @@ sonra alınır.
     closure cell'leri, geçici guest-list üretmeyen `LIST_APPEND`, precise
     suspended roots ve JIT
     generic-tier fallback'i.
-  - [ ] Set ve async comprehensions.
+  - [x] Set ve async comprehensions.
     - [x] Async list/dict comprehensions ve async generator expressions; async
       clause ile expression/filter/later-iterable `await`, eager outer
       `iter`/`aiter`, coroutine/async-generator hidden scope, mixed sync/async
       clause'lar, precise suspended roots ve interpreter/JIT-caller stress-GC.
-    - [ ] Set storage, literal ve set comprehension.
+    - [x] Bytecode v23 native set storage, set literal ve sync/async set
+      comprehension; ortak hash/collision tablosu, suspending `__hash__`/`__eq__`,
+      membership/equality/iteration, precise GC ve generic-tier JIT fallback'i.
   - [ ] Structural pattern matching (`match`/`case`).
   - [ ] F-string/format-spec lowering.
   - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.

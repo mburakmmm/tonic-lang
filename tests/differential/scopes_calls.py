@@ -411,6 +411,24 @@ async def consume(stream):
     return [value async for value in stream]
 print(asyncio.run(consume(stream)))
 ''',
+'''import asyncio
+values={1,3,1}
+print(type(values).__name__,len(values),1 in values,2 not in values)
+print(values=={3,1})
+print({value%3 for value in range(8)}=={0,1,2})
+print({value for value in []})
+class SetSource:
+    def __init__(self): self.value=0
+    def __aiter__(self): return self
+    async def __anext__(self):
+        if self.value>=4: raise StopAsyncIteration
+        value=self.value
+        self.value+=1
+        return value
+async def collect_set():
+    return {value%2 async for value in SetSource()}
+print(asyncio.run(collect_set())=={0,1})
+''',
 '''def annotated(x: int, *args: str, y: float = 1, **kwargs: dict) -> str:
     return str(x)
 def bare():
@@ -427,6 +445,7 @@ print(annotated(7))
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
+('{{1}}', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},x=print(2))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},**{True:2},x=print(2))', 'TypeError'),
