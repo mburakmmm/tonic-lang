@@ -448,6 +448,23 @@ container ve continuation değerleri precise GC edge'idir; opkodlar Cranelift
 destek kümesi dışında açık generic runtime fallback'inde kalır. Ayrıntılar
 [ADR 0082](adr/0082-structural-pattern-matching.md) dosyasındadır.
 
+Bytecode v30 f-string parçalarını Tonic-owned `JoinedString` ve
+`FormattedValue` AST düğümlerinden `CONVERT`/`FORMAT_VALUE` sınırlarına indirir.
+Expression, conversion ve nested dynamic format-spec kaynak sırasıyla yalnız bir
+kez değerlendirilir; sabit ve biçimlenmiş parçalar normal string `ADD` yolu ile
+birleşir. `!s`, `!r` ve ASCII-escape üreten `!a`, kullanıcı
+`__str__`/`__repr__` metodunu special-method lookup ile çağırır. Format aşaması
+aynı biçimde kullanıcı `__format__` metodunu normal Tonic frame'inde askıya
+alabilir ve dönüşün string olduğunu continuation tamamlanırken doğrular.
+
+Yerleşik string/int/float format motoru Unicode code-point width/precision,
+fill/alignment, sign, alternate form, zero padding, decimal ve radix grouping,
+`b/o/d/x/X/c`, `e/E/f/F/g/G/%/n`, significant-digit rounding, normalize edilmiş
+exponent ve negatif sıfır `z` semantiğini uygular. Format opkodları iki bytecode
+verifier tarafından denetlenir ve Cranelift destek kümesinin dışında açık
+generic-runtime fallback'inde kalır. Ayrıntılar
+[ADR 0083](adr/0083-f-strings-and-formatting.md) dosyasındadır.
+
 Fonksiyon parametre ve dönüş annotation'ları parser adapter'dan Tonic-owned
 AST/HIR'e alınır ve defining scope içinde register değerlerine indirilir.
 Function-site metadata yalnız `SymbolId` ve doğrulanmış register index'i taşır;

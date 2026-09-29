@@ -31,6 +31,19 @@ fn fib() {
 }
 
 #[test]
+fn f_strings_format_in_order_with_nested_specs_and_conversions() {
+    let source = "import asyncio\ndef mark(value):\n    print('mark',value)\n    return value\nname='Tönic'\nwidth=6\nprint(f'hello {name} {mark(42):04d} {3.14159:.2f}')\nprint(f'{42:{width}d}',f'{name!r}',f'{name!a}',f'{name:*^9.3s}')\nclass Display:\n    def __str__(self):\n        print('str-call')\n        return 'string'\n    def __repr__(self):\n        print('repr-call')\n        return 'répr'\n    def __format__(self,spec):\n        print('format-call',spec)\n        return '['+spec+']'\nvalue=Display()\nprint(f'{value!s}',f'{value!r}',f'{value!a}',f'{value:custom}')\nasync def get():\n    return 7\nasync def render():\n    return f'{await get():04d}'\nprint(asyncio.run(render()))";
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"mark 42\nhello T\xc3\xb6nic 0042 3.14\n    42 'T\xc3\xb6nic' 'T\\xf6nic' ***T\xc3\xb6n***\nstr-call\nrepr-call\nrepr-call\nformat-call custom\nstring r\xc3\xa9pr r\\xe9pr [custom]\n0007\n",
+    );
+    assert_eq!(
+        error("class Bad:\n    def __format__(self,spec): return 1\nprint(f'{Bad()}')").kind,
+        "TypeError"
+    );
+}
+
+#[test]
 fn generators_suspend_resume_and_feed_all_builtin_consumers() {
     let source = "def generate(n):\n    i=0\n    while i<n:\n        sent=(yield i)\n        print('sent',sent)\n        i+=1\nprint(type(generate(0)).__name__)\nmethods=generate(1)\nprint(iter(methods)==methods,methods.__iter__()==methods,methods.__next__())\ntry:\n    methods.__next__()\nexcept StopIteration:\n    print('method-stopped')\ng=generate(2)\nprint('next',next(g),next(g),next(g,'done'))\ntry:\n    next(g)\nexcept StopIteration:\n    print('stopped')\nprint(list(generate(3)))\nfor value in generate(2):\n    print('for',value)\na,b=generate(2)\nprint('unpack',a,b)\ndef collect(*values):\n    print('star',values)\ncollect(*generate(3))\nprint('exhausted',list(generate(0)))";
     assert_eq!(

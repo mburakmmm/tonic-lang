@@ -790,6 +790,11 @@ enum ReturnAction {
     NumericConversion(NumericConversion),
     IndexConversion(IndexConversion),
     Hash(HashAction),
+    StringConversion {
+        ascii: bool,
+        repr: bool,
+    },
+    FormatResult,
     Import(usize),
     Setter,
 }
@@ -1259,6 +1264,8 @@ impl ReturnAction {
             | Self::Close
             | Self::ExpandIterableStart(_)
             | Self::Length
+            | Self::StringConversion { .. }
+            | Self::FormatResult
             | Self::MembershipContains { .. }
             | Self::Import(_)
             | Self::NamespaceLookup { cell: None, .. }
@@ -5370,6 +5377,17 @@ impl Vm {
                                 index_conversion = Some(state);
                             }
                             ReturnAction::Hash(action) => hash_action = Some(action),
+                            ReturnAction::StringConversion { ascii, repr } => {
+                                value = self.finish_string_conversion(
+                                    value,
+                                    ascii,
+                                    if repr { "__repr__" } else { "__str__" },
+                                )?;
+                            }
+                            ReturnAction::FormatResult => {
+                                value =
+                                    self.finish_string_conversion(value, false, "__format__")?;
+                            }
                             ReturnAction::Import(module_id) => {
                                 let name = p.modules[module_id].name.clone();
                                 let object = self.source_modules[module_id]
@@ -6069,6 +6087,79 @@ impl Vm {
                             DictOperationKind::SetAdd,
                             output,
                         )?;
+                    }
+                    Op::Convert => {
+                        let source = self.read(b)?;
+                        let method = if i.c == 1 { "__str__" } else { "__repr__" };
+                        if let Some(call) = self.heap.special_method_call(source, method)? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [Value::UNBOUND; 3],
+                                    count: 0,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("conversion frame").action =
+                                    ReturnAction::StringConversion {
+                                        ascii: i.c == 3,
+                                        repr: i.c != 1,
+                                    };
+                            } else {
+                                let result = self.read(a)?;
+                                self.registers[a] =
+                                    self.finish_string_conversion(result, i.c == 3, method)?;
+                            }
+                        } else {
+                            let mut text = self.heap.format(source, i.c != 1)?;
+                            if i.c == 3 {
+                                text = ascii_only(&text);
+                            }
+                            self.registers[a] = self.heap.alloc(Object::Str(text))?;
+                        }
+                    }
+                    Op::FormatValue => {
+                        let value = self.read(b)?;
+                        let spec_value = self.read(c)?;
+                        let spec = match self.heap.get(self.heap.native_value(spec_value))? {
+                            Object::Str(spec) => spec.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "TypeError",
+                                    "format specifier must be a string",
+                                ))
+                            }
+                        };
+                        if let Some(call) = self.heap.special_method_call(value, "__format__")? {
+                            let depth = self.frames.len();
+                            self.invoke(
+                                p,
+                                call.callable,
+                                a,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional: [spec_value, Value::UNBOUND, Value::UNBOUND],
+                                    count: 1,
+                                },
+                                output,
+                            )?;
+                            if self.frames.len() > depth {
+                                self.frames.last_mut().expect("format frame").action =
+                                    ReturnAction::FormatResult;
+                            } else {
+                                let result = self.read(a)?;
+                                self.registers[a] =
+                                    self.finish_string_conversion(result, false, "__format__")?;
+                            }
+                        } else {
+                            let text = self.heap.format_spec(value, &spec)?;
+                            self.registers[a] = self.heap.alloc(Object::Str(text))?;
+                        }
                     }
                     Op::MatchSequence => {
                         let source = self.read(b)?;
@@ -8613,6 +8704,27 @@ impl Vm {
             Ok(())
         }
     }
+
+    fn finish_string_conversion(
+        &mut self,
+        value: Value,
+        ascii: bool,
+        method: &str,
+    ) -> Result<Value> {
+        let native = self.heap.native_value(value);
+        let Object::Str(text) = self.heap.get(native)? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                format!("{method} returned a non-string value"),
+            ));
+        };
+        let text = if ascii {
+            ascii_only(text)
+        } else {
+            text.clone()
+        };
+        self.heap.alloc(Object::Str(text))
+    }
 }
 
 fn module_filename(program: &Program, code: usize) -> &str {
@@ -8624,6 +8736,23 @@ fn module_filename(program: &Program, code: usize) -> &str {
             (start..start + usize::from(module.code_count)).contains(&code)
         })
         .map_or("<unknown>", |module| module.filename.as_str())
+}
+
+fn ascii_only(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for character in text.chars() {
+        let code = character as u32;
+        if character.is_ascii() {
+            result.push(character);
+        } else if code <= 0xff {
+            result.push_str(&format!("\\x{code:02x}"));
+        } else if code <= 0xffff {
+            result.push_str(&format!("\\u{code:04x}"));
+        } else {
+            result.push_str(&format!("\\U{code:08x}"));
+        }
+    }
+    result
 }
 
 impl Drop for Vm {

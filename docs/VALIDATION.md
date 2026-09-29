@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 24, core verifier 17, Cranelift JIT 19, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 25, core verifier 18, Cranelift JIT 20, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 108, CPython bridge 15 ve HPy manifest 5; toplam 345 test.
+native handles 5, language/runtime 109, CPython bridge 15 ve HPy manifest 5; toplam 349 test.
 
-Differential corpus: 316 stdout vakası ve 173 exception türü vakası. Seed 42.
-Structural matching diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 317 stdout vakası ve 176 exception türü vakası. Seed 42.
+F-string/format-spec diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -483,6 +483,16 @@ dinamik duplicate key denetimini, positional/keyword class desenlerini,
 `__match_args__`, builtin self-pattern'ı ve descriptor'ın tek okunmasını kapsar.
 Eksik attribute case başarısızlığına dönüşürken diğer protokol hataları korunur;
 Cranelift bu doğrulanmış opkodlarda açık generic-tier fallback uygular.
+
+F-string dilimi bytecode v30 `CONVERT` ve `FORMAT_VALUE` operandlarını iki
+verifier'da doğrular. Compiler/runtime testleri owned AST'yi, kaynak sırasını,
+nested dynamic spec'i, `!s`/`!r`/`!a`, Unicode string precision ve kullanıcı
+`__str__`/`__repr__`/`__format__` continuation'larını interpreter/JIT-caller ×
+allocation-stress GC altında kapsar. Kalıcı diferansiyel vaka sonuçları ve hata
+türlerini Python 3.14.6 ile karşılaştırır; ek deterministik format grid'i 216
+string/int/float birleşimini, seeded numeric tarama ise 2.684 sayı/spec
+birleşimini sıfır gözlenebilir farkla doğrulamıştır. Cranelift format opkodlarında
+açık generic-tier fallback uygular.
 
 `.github/workflows/ci.yml` Linux/macOS için aynı kontrolleri tanımlar; remote
 sonuçlar her push sonrasında ilgili GitHub Actions koşusundan ayrıca doğrulanır.

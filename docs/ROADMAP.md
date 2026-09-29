@@ -184,7 +184,11 @@ sonra alınır.
     mapping/`**rest`, dynamic duplicate-key; keyword/positional class,
     `__match_args__`, builtin self-pattern, descriptor-aware missing attribute,
     precise continuation roots ve Cranelift generic-tier fallback'i.
-  - [ ] F-string/format-spec lowering.
+  - [x] Bytecode v30 f-string/format-spec lowering; Tonic-owned joined/formatted
+    AST, source-order evaluation, nested dynamic spec, `!s`/`!r`/`!a`, Unicode
+    string width/precision, integer/float format mini-language, suspending
+    `__str__`/`__repr__`/`__format__`, precise continuation roots ve Cranelift
+    generic-tier fallback'i.
   - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
     - [x] Positional-only, positional, variadic, keyword-only ve mapping
       parametreleri ile dönüş annotation ifadeleri; Tonic-owned AST/HIR,

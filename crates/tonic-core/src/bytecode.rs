@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 29;
+pub const BYTECODE_VERSION: u16 = 30;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -111,6 +111,8 @@ pub enum Op {
     MatchArgs = 116,
     MatchClassItem = 117,
     MatchUnique = 118,
+    Convert = 119,
+    FormatValue = 120,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -219,6 +221,8 @@ impl TryFrom<u16> for Op {
             116 => Self::MatchArgs,
             117 => Self::MatchClassItem,
             118 => Self::MatchUnique,
+            119 => Self::Convert,
+            120 => Self::FormatValue,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -632,6 +636,18 @@ impl Program {
                         if i.c > 1 {
                             return Err(bad("invalid match uniqueness mode"));
                         }
+                    }
+                    Op::Convert => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        if !(1..=3).contains(&i.c) {
+                            return Err(bad("invalid format conversion"));
+                        }
+                    }
+                    Op::FormatValue => {
+                        reg(i.a)?;
+                        reg(i.b)?;
+                        reg(i.c)?;
                     }
                     Op::MatchMapping => {
                         reg(i.a)?;

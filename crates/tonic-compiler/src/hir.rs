@@ -302,6 +302,7 @@ impl<'a> Scan<'a> {
             ExprKind::Tuple(es)
             | ExprKind::List(es)
             | ExprKind::Set(es)
+            | ExprKind::JoinedString(es)
             | ExprKind::Bool(_, es) => {
                 for e in es {
                     self.expr(e);
@@ -352,6 +353,14 @@ impl<'a> Scan<'a> {
                 self.expr(value);
             }
             ExprKind::Await(value) => self.expr(value),
+            ExprKind::FormattedValue {
+                value, format_spec, ..
+            } => {
+                self.expr(value);
+                if let Some(format_spec) = format_spec {
+                    self.expr(format_spec);
+                }
+            }
             ExprKind::Lambda { params, body } => {
                 for (_, default) in params.defaults() {
                     self.expr(default);

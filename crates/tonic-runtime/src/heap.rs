@@ -3,7 +3,7 @@ mod gc;
 use crate::{classes::ClassDictionaryKey, value::Value};
 pub use gc::CollectionStats;
 use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use std::collections::HashSet;
 use tonic_core::diagnostic::{Diagnostic, Result, Span};
 
@@ -1577,6 +1577,24 @@ impl Heap {
     pub fn format(&self, v: Value, repr: bool) -> Result<String> {
         self.format_depth(v, repr, &mut Vec::new())
     }
+    pub fn format_spec(&self, value: Value, spec: &str) -> Result<String> {
+        if spec.is_empty() {
+            return self.format(value, false);
+        }
+        let native = self.native_value(value);
+        if let Some(integer) = native.integer() {
+            return format_integer(&BigInt::from(integer), spec);
+        }
+        match self.get(native)? {
+            Object::Int(integer) => format_integer(integer, spec),
+            Object::Float(float) => format_float(*float, spec),
+            Object::Str(string) => format_string(string, spec),
+            _ => Err(Diagnostic::new(
+                "TypeError",
+                format!("unsupported format string '{spec}'"),
+            )),
+        }
+    }
     pub(crate) fn exception_message(&self, arguments: &[Value]) -> Result<String> {
         match arguments {
             [] => Ok(String::new()),
@@ -1848,6 +1866,404 @@ fn quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+#[derive(Clone, Debug)]
+struct FormatSpec {
+    fill: char,
+    explicit_fill: bool,
+    align: Option<char>,
+    sign: Option<char>,
+    coerce_negative_zero: bool,
+    alternate: bool,
+    zero: bool,
+    width: Option<usize>,
+    grouping: Option<char>,
+    precision: Option<usize>,
+    kind: Option<char>,
+}
+
+fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut at = 0;
+    let mut parsed = FormatSpec {
+        fill: ' ',
+        explicit_fill: false,
+        align: None,
+        sign: None,
+        coerce_negative_zero: false,
+        alternate: false,
+        zero: false,
+        width: None,
+        grouping: None,
+        precision: None,
+        kind: None,
+    };
+    if chars.get(1).is_some_and(|c| "<>=^".contains(*c)) {
+        parsed.fill = chars[0];
+        parsed.explicit_fill = true;
+        parsed.align = Some(chars[1]);
+        at = 2;
+    } else if chars.first().is_some_and(|c| "<>=^".contains(*c)) {
+        parsed.align = Some(chars[0]);
+        at = 1;
+    }
+    if chars.get(at).is_some_and(|c| "+- ".contains(*c)) {
+        parsed.sign = Some(chars[at]);
+        at += 1;
+    }
+    if chars.get(at) == Some(&'z') {
+        parsed.coerce_negative_zero = true;
+        at += 1;
+    }
+    if chars.get(at) == Some(&'#') {
+        parsed.alternate = true;
+        at += 1;
+    }
+    if chars.get(at) == Some(&'0') {
+        parsed.zero = true;
+        at += 1;
+    }
+    let width_start = at;
+    while chars.get(at).is_some_and(char::is_ascii_digit) {
+        at += 1;
+    }
+    if at > width_start {
+        parsed.width = Some(
+            chars[width_start..at]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .map_err(|_| Diagnostic::new("ValueError", "format width is too large"))?,
+        );
+    }
+    if chars.get(at).is_some_and(|c| matches!(c, ',' | '_')) {
+        parsed.grouping = Some(chars[at]);
+        at += 1;
+    }
+    if chars.get(at) == Some(&'.') {
+        at += 1;
+        let precision_start = at;
+        while chars.get(at).is_some_and(char::is_ascii_digit) {
+            at += 1;
+        }
+        if at == precision_start {
+            return Err(Diagnostic::new("ValueError", "missing format precision"));
+        }
+        parsed.precision = Some(
+            chars[precision_start..at]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .map_err(|_| Diagnostic::new("ValueError", "format precision is too large"))?,
+        );
+    }
+    if at < chars.len() {
+        parsed.kind = Some(chars[at]);
+        at += 1;
+    }
+    if at != chars.len() {
+        return Err(Diagnostic::new(
+            "ValueError",
+            format!("invalid format specifier '{spec}'"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn apply_width(mut text: String, spec: &FormatSpec, numeric_prefix: usize) -> String {
+    let Some(width) = spec.width else {
+        return text;
+    };
+    let length = text.chars().count();
+    if length >= width {
+        return text;
+    }
+    let padding = width - length;
+    let align = spec.align.unwrap_or(if spec.zero { '=' } else { '>' });
+    let fill = if spec.zero && !spec.explicit_fill {
+        '0'
+    } else {
+        spec.fill
+    };
+    match align {
+        '<' => text.extend(std::iter::repeat_n(fill, padding)),
+        '^' => {
+            let left = padding / 2;
+            let right = padding - left;
+            text = format!(
+                "{}{}{}",
+                std::iter::repeat_n(fill, left).collect::<String>(),
+                text,
+                std::iter::repeat_n(fill, right).collect::<String>()
+            );
+        }
+        '=' => {
+            let split = numeric_prefix.min(text.len());
+            text = format!(
+                "{}{}{}",
+                &text[..split],
+                std::iter::repeat_n(fill, padding).collect::<String>(),
+                &text[split..]
+            );
+        }
+        _ => {
+            text = format!(
+                "{}{}",
+                std::iter::repeat_n(fill, padding).collect::<String>(),
+                text
+            );
+        }
+    }
+    text
+}
+
+fn grouped(mut digits: String, separator: Option<char>, group: usize) -> String {
+    let Some(separator) = separator else {
+        return digits;
+    };
+    let mut result = String::with_capacity(digits.len() + digits.len() / group);
+    let first = digits.len() % group;
+    if first != 0 {
+        result.push_str(&digits[..first]);
+        if digits.len() > first {
+            result.push(separator);
+        }
+    }
+    digits.drain(..first);
+    for (index, chunk) in digits.as_bytes().chunks(group).enumerate() {
+        if index > 0 {
+            result.push(separator);
+        }
+        result.push_str(std::str::from_utf8(chunk).expect("ASCII digits"));
+    }
+    result
+}
+
+fn format_integer(value: &BigInt, source: &str) -> Result<String> {
+    let spec = parse_format_spec(source)?;
+    if matches!(spec.kind, Some('e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%')) {
+        let value = value.to_f64().ok_or_else(|| {
+            Diagnostic::new("OverflowError", "integer is too large for floating format")
+        })?;
+        return format_float(value, source);
+    }
+    if spec.coerce_negative_zero {
+        return Err(Diagnostic::new(
+            "ValueError",
+            "negative zero coercion is not allowed in integer format specifier",
+        ));
+    }
+    if spec.precision.is_some() {
+        return Err(Diagnostic::new(
+            "ValueError",
+            "precision not allowed in integer format specifier",
+        ));
+    }
+    let kind = spec.kind.unwrap_or('d');
+    let (radix, prefix, upper, group) = match kind {
+        'd' | 'n' => (10, "", false, 3),
+        'b' => (2, "0b", false, 4),
+        'o' => (8, "0o", false, 4),
+        'x' => (16, "0x", false, 4),
+        'X' => (16, "0X", true, 4),
+        'c' => {
+            if spec.sign.is_some() || spec.alternate || spec.zero || spec.grouping.is_some() {
+                return Err(Diagnostic::new(
+                    "ValueError",
+                    "invalid integer character format",
+                ));
+            }
+            let code = value
+                .to_u32()
+                .and_then(char::from_u32)
+                .ok_or_else(|| Diagnostic::new("OverflowError", "%c arg not in range"))?;
+            return Ok(apply_width(code.to_string(), &spec, 0));
+        }
+        _ => {
+            return Err(Diagnostic::new(
+                "ValueError",
+                format!("unknown format code '{kind}' for integer"),
+            ))
+        }
+    };
+    if spec.grouping == Some(',') && radix != 10 {
+        return Err(Diagnostic::new(
+            "ValueError",
+            "comma grouping is not allowed for non-decimal integers",
+        ));
+    }
+    let mut digits = value.abs().to_str_radix(radix);
+    if upper {
+        digits.make_ascii_uppercase();
+    }
+    digits = grouped(digits, spec.grouping, group);
+    let sign = if value.is_negative() {
+        "-"
+    } else {
+        match spec.sign {
+            Some('+') => "+",
+            Some(' ') => " ",
+            _ => "",
+        }
+    };
+    let prefix = if spec.alternate { prefix } else { "" };
+    let text = format!("{sign}{prefix}{digits}");
+    Ok(apply_width(text, &spec, sign.len() + prefix.len()))
+}
+
+fn format_float(value: f64, source: &str) -> Result<String> {
+    let spec = parse_format_spec(source)?;
+    let magnitude = value.abs();
+    let kind = spec.kind;
+    let precision = spec.precision.unwrap_or(6);
+    let mut body = if magnitude.is_nan() {
+        "nan".to_owned()
+    } else if magnitude.is_infinite() {
+        "inf".to_owned()
+    } else {
+        match kind {
+            Some('f' | 'F') => {
+                alternate_decimal(format!("{magnitude:.precision$}"), spec.alternate)
+            }
+            Some('e' | 'E') => normalize_exponent(&alternate_decimal(
+                format!("{magnitude:.precision$e}"),
+                spec.alternate,
+            )),
+            Some('%') => format!(
+                "{}%",
+                alternate_decimal(format!("{:.precision$}", magnitude * 100.0), spec.alternate)
+            ),
+            Some('g' | 'G' | 'n') => general_float(magnitude, precision, spec.alternate),
+            None if spec.precision.is_some() => general_float(magnitude, precision, spec.alternate),
+            None => normalize_exponent(&format!("{magnitude:?}")),
+            _ => {
+                return Err(Diagnostic::new(
+                    "ValueError",
+                    format!(
+                        "unknown format code '{}' for float",
+                        kind.expect("unknown explicit kind")
+                    ),
+                ))
+            }
+        }
+    };
+    if matches!(kind, Some('E' | 'F' | 'G')) {
+        body.make_ascii_uppercase();
+    }
+    if let Some(separator) = spec.grouping {
+        if let Some(dot) = body.find('.') {
+            let integer = grouped(body[..dot].to_owned(), Some(separator), 3);
+            body = format!("{integer}{}", &body[dot..]);
+        } else if !body.contains('e') && !body.contains('E') {
+            body = grouped(body, Some(separator), 3);
+        }
+    }
+    let negative = value.is_sign_negative() && !(spec.coerce_negative_zero && magnitude == 0.0);
+    let sign = if negative {
+        "-"
+    } else {
+        match spec.sign {
+            Some('+') => "+",
+            Some(' ') => " ",
+            _ => "",
+        }
+    };
+    let text = format!("{sign}{body}");
+    Ok(apply_width(text, &spec, sign.len()))
+}
+
+fn alternate_decimal(mut text: String, alternate: bool) -> String {
+    if !alternate || text.contains('.') {
+        return text;
+    }
+    if let Some(exponent) = text.find(['e', 'E']) {
+        text.insert(exponent, '.');
+    } else {
+        text.push('.');
+    }
+    text
+}
+
+fn trim_float_zeros(text: &str) -> String {
+    let exponent = text.find(['e', 'E']).unwrap_or(text.len());
+    let (mantissa, suffix) = text.split_at(exponent);
+    let mut mantissa = mantissa.to_owned();
+    if mantissa.contains('.') {
+        while mantissa.ends_with('0') {
+            mantissa.pop();
+        }
+        if mantissa.ends_with('.') {
+            mantissa.pop();
+        }
+    }
+    format!("{mantissa}{suffix}")
+}
+
+fn normalize_exponent(text: &str) -> String {
+    let Some(position) = text.find(['e', 'E']) else {
+        return text.to_owned();
+    };
+    let marker = text.as_bytes()[position] as char;
+    let Ok(exponent) = text[position + 1..].parse::<i32>() else {
+        return text.to_owned();
+    };
+    format!("{}{marker}{exponent:+03}", &text[..position])
+}
+
+fn general_float(value: f64, precision: usize, alternate: bool) -> String {
+    let precision = precision.max(1);
+    if value == 0.0 {
+        let fixed = format!("{value:.digits$}", digits = precision.saturating_sub(1));
+        return if alternate {
+            alternate_decimal(fixed, true)
+        } else {
+            trim_float_zeros(&fixed)
+        };
+    }
+    let scientific = format!("{value:.digits$e}", digits = precision.saturating_sub(1));
+    let exponent = scientific
+        .split_once('e')
+        .and_then(|(_, exponent)| exponent.parse::<i32>().ok())
+        .unwrap_or(0);
+    let mut text = if exponent < -4 || exponent >= precision as i32 {
+        scientific
+    } else {
+        let decimals = (precision as i32 - 1 - exponent).max(0) as usize;
+        format!("{value:.decimals$}")
+    };
+    if !alternate {
+        text = trim_float_zeros(&text);
+    } else {
+        text = alternate_decimal(text, true);
+    }
+    normalize_exponent(&text)
+}
+
+fn format_string(value: &str, source: &str) -> Result<String> {
+    let spec = parse_format_spec(source)?;
+    if spec.sign.is_some()
+        || spec.alternate
+        || spec.coerce_negative_zero
+        || spec.grouping.is_some()
+        || !matches!(spec.kind, None | Some('s'))
+        || spec.align == Some('=')
+    {
+        return Err(Diagnostic::new(
+            "ValueError",
+            "invalid string format specifier",
+        ));
+    }
+    let mut text = match spec.precision {
+        Some(limit) => value.chars().take(limit).collect(),
+        None => value.to_owned(),
+    };
+    let string_spec = FormatSpec {
+        align: Some(spec.align.unwrap_or('<')),
+        ..spec
+    };
+    text = apply_width(text, &string_spec, 0);
+    Ok(text)
 }
 
 fn invalid_value(value: Value) -> Diagnostic {

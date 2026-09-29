@@ -90,6 +90,30 @@ fn list_append_operands_are_verified() {
 }
 
 #[test]
+fn f_string_operands_are_verified() {
+    let mut valid = program();
+    valid.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::Convert, 1, 0, 2));
+    valid.code[0]
+        .instructions
+        .insert(2, Instr::new(Op::FormatValue, 0, 1, 0));
+    valid.code[0].spans.insert(1, Span::default());
+    valid.code[0].spans.insert(2, Span::default());
+    valid.clone().verify().unwrap();
+
+    let mut bad = valid.clone();
+    bad.code[0].instructions[1].c = 0;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].instructions[1].c = 4;
+    assert!(bad.verify().is_err());
+    let mut bad = valid;
+    bad.code[0].instructions[2].c = bad.code[0].registers;
+    assert!(bad.verify().is_err());
+}
+
+#[test]
 fn set_construction_operands_are_verified() {
     let mut valid = program();
     valid.code[0]

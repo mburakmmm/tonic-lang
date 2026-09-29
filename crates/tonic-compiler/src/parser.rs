@@ -789,6 +789,26 @@ impl Adapter {
                 }
                 ExprKind::Await(Box::new(self.expr(*await_.value)?))
             }
+            py::Expr::JoinedStr(joined) => ExprKind::JoinedString(
+                joined
+                    .values
+                    .into_iter()
+                    .map(|value| self.expr(value))
+                    .collect::<Result<_>>()?,
+            ),
+            py::Expr::FormattedValue(formatted) => ExprKind::FormattedValue {
+                value: Box::new(self.expr(*formatted.value)?),
+                conversion: match formatted.conversion {
+                    py::ConversionFlag::None => FormatConversion::None,
+                    py::ConversionFlag::Str => FormatConversion::Str,
+                    py::ConversionFlag::Repr => FormatConversion::Repr,
+                    py::ConversionFlag::Ascii => FormatConversion::Ascii,
+                },
+                format_spec: formatted
+                    .format_spec
+                    .map(|spec| self.expr(*spec).map(Box::new))
+                    .transpose()?,
+            },
             py::Expr::Lambda(lambda) => {
                 let params = self.parameters(*lambda.args, s)?;
                 let previous_async = std::mem::replace(&mut self.async_function, false);
@@ -931,6 +951,15 @@ impl Adapter {
                     || Self::expression_suspends(else_value)
             }
             ExprKind::Yield(value) => value.as_deref().is_some_and(Self::expression_suspends),
+            ExprKind::JoinedString(values) => values.iter().any(Self::expression_suspends),
+            ExprKind::FormattedValue {
+                value, format_spec, ..
+            } => {
+                Self::expression_suspends(value)
+                    || format_spec
+                        .as_deref()
+                        .is_some_and(Self::expression_suspends)
+            }
             ExprKind::Comprehension(comprehension) => {
                 comprehension.coroutine && comprehension.kind != ComprehensionKind::Generator
             }

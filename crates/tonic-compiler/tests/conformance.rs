@@ -1,6 +1,6 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
-    ast::{CompareOp, ComprehensionKind, ExprKind, PatternKind, StmtKind},
+    ast::{CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind},
     bytecode::Op,
 };
 #[test]
@@ -40,6 +40,41 @@ fn valid_python_forms() {
     ] {
         compile(src, "x").unwrap();
     }
+}
+
+#[test]
+fn f_strings_have_owned_ast_and_verified_format_bytecode() {
+    let source = "width=6\nresult=f'value={42!r:>{width}}'";
+    let ast = parse(source, "f-string").unwrap();
+    let StmtKind::Assign(_, expression) = &ast.body[1].kind else {
+        panic!("f-string assignment")
+    };
+    let ExprKind::JoinedString(parts) = &expression.kind else {
+        panic!("joined string")
+    };
+    assert_eq!(parts.len(), 2);
+    let ExprKind::FormattedValue {
+        conversion,
+        format_spec,
+        ..
+    } = &parts[1].kind
+    else {
+        panic!("formatted value")
+    };
+    assert_eq!(*conversion, FormatConversion::Repr);
+    assert!(matches!(
+        format_spec.as_deref().map(|spec| &spec.kind),
+        Some(ExprKind::JoinedString(_))
+    ));
+
+    let program = compile(source, "f-string").unwrap();
+    let operations = program.program().code[0]
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    assert!(operations.contains(&Op::Convert));
+    assert!(operations.contains(&Op::FormatValue));
 }
 
 #[test]
@@ -276,7 +311,6 @@ fn invalid_python_forms() {
 fn unsupported_syntax_is_explicit() {
     for src in [
         "class X(extra=1):\n    pass",
-        "print(f'{1}')",
         "x=[1,2]\nx[:]=[3]",
         "del x",
         "from . import sibling",

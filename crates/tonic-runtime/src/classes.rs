@@ -198,6 +198,9 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__doc__"
                 | "__name__"
                 | "__match_args__"
+                | "__str__"
+                | "__repr__"
+                | "__format__"
         )
     {
         return Err(Diagnostic::new(

@@ -1756,6 +1756,13 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
                     return Err(invalid(Some(pc), "invalid match uniqueness mode"));
                 }
             }
+            Op::Convert => {
+                register(pc, instruction.a)?;
+                register(pc, instruction.b)?;
+                if !(1..=3).contains(&instruction.c) {
+                    return Err(invalid(Some(pc), "invalid format conversion"));
+                }
+            }
             Op::MatchSequence => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
@@ -1797,7 +1804,8 @@ fn validate_structural_safety(code: &CodeObject) -> Result<(), Error> {
             | Op::MatchClass
             | Op::MatchAttr
             | Op::MatchArgs
-            | Op::MatchClassItem => {
+            | Op::MatchClassItem
+            | Op::FormatValue => {
                 register(pc, instruction.a)?;
                 register(pc, instruction.b)?;
                 register(pc, instruction.c)?;
@@ -3769,6 +3777,21 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn f_string_formatting_stays_in_the_generic_runtime() {
+        let program = function("def render(value):\n    return f'{value!r:>8}'");
+        let code = &program.program().code[1];
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Convert)));
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::FormatValue)));
+        assert!(matches!(compile(code), Err(Error::Unsupported(_))));
     }
 
     #[test]

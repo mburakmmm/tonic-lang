@@ -168,11 +168,24 @@ pub enum ExprKind {
     Yield(Option<Box<Expr>>),
     YieldFrom(Box<Expr>),
     Await(Box<Expr>),
+    JoinedString(Vec<Expr>),
+    FormattedValue {
+        value: Box<Expr>,
+        conversion: FormatConversion,
+        format_spec: Option<Box<Expr>>,
+    },
     Lambda {
         params: Parameters,
         body: Box<Expr>,
     },
     Comprehension(Comprehension),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatConversion {
+    None,
+    Str,
+    Repr,
+    Ascii,
 }
 #[derive(Clone, Debug)]
 pub struct Comprehension {

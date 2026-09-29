@@ -547,6 +547,27 @@ def choose(value):
             return lambda:other
 print(choose(None)(),choose(4)(),choose(9)())
 ''',
+'''def mark(value):
+    print('mark',value)
+    return value
+name='Tönic'
+width=6
+print(f'hello {name} {mark(42):04d} {3.14159:.2f}')
+print(f'{42:{width}d}',f'{name!r}',f'{name!a}',f'{name:*^9.3s}')
+print(f'{1234567:,d}',f'{255:#06x}',f'{12345.678:.3g}',f'{-0.0:z.1f}',f'{name=}')
+class Display:
+    def __str__(self):
+        print('str-call')
+        return 'string'
+    def __repr__(self):
+        print('repr-call')
+        return 'répr'
+    def __format__(self,spec):
+        print('format-call',spec)
+        return '['+spec+']'
+value=Display()
+print(f'{value!s}',f'{value!r}',f'{value!a}',f'{value:custom}')
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
@@ -555,6 +576,9 @@ ERRORS = [
 ('class C:\n    __match_args__=(1,)\nmatch C():\n    case C(value):\n        pass', 'TypeError'),
 ('class C:\n    __match_args__=("x",)\nmatch C():\n    case C(first,second):\n        pass', 'TypeError'),
 ('class C:\n    __match_args__=("x",)\n    x=1\nmatch C():\n    case C(first,x=second):\n        pass', 'TypeError'),
+('f"{1:.2d}"', 'ValueError'),
+("f\"{'value':=8s}\"", 'ValueError'),
+('class Bad:\n    def __format__(self,spec): return 1\nprint(f"{Bad()}")', 'TypeError'),
 ('class Keys:\n    first=1\n    second=True\nmatch {1:"x",2:"y"}:\n    case {Keys.first:left,Keys.second:right}:\n        pass', 'ValueError'),
 ('def f(**kw):\n    pass\nf(**{"x":1},x=print(2),y=print(3))', 'TypeError'),
 ('def f(**kw):\n    pass\nf(**{1:1},x=print(2))', 'TypeError'),

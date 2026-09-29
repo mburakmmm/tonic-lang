@@ -1743,6 +1743,51 @@ impl Lower<'_> {
                 }
                 Ok(result)
             }
+            ExprKind::JoinedString(values) => {
+                let Some((first, rest)) = values.split_first() else {
+                    return self.constant(Constant::Str(String::new()), s);
+                };
+                let mut result = self.expr(first)?;
+                for value in rest {
+                    let span = value.span;
+                    let value = self.expr(value)?;
+                    let joined = self.alloc(1)?;
+                    self.emit(Op::Add, joined, result, value, span)?;
+                    result = joined;
+                }
+                Ok(result)
+            }
+            ExprKind::FormattedValue {
+                value,
+                conversion,
+                format_spec,
+            } => {
+                let mut value = self.expr(value)?;
+                if *conversion != FormatConversion::None {
+                    let converted = self.alloc(1)?;
+                    self.emit(
+                        Op::Convert,
+                        converted,
+                        value,
+                        match conversion {
+                            FormatConversion::None => unreachable!(),
+                            FormatConversion::Str => 1,
+                            FormatConversion::Repr => 2,
+                            FormatConversion::Ascii => 3,
+                        },
+                        s,
+                    )?;
+                    value = converted;
+                }
+                let spec = if let Some(format_spec) = format_spec {
+                    self.expr(format_spec)?
+                } else {
+                    self.constant(Constant::Str(String::new()), s)?
+                };
+                let result = self.alloc(1)?;
+                self.emit(Op::FormatValue, result, value, spec, s)?;
+                Ok(result)
+            }
             ExprKind::Binary(a, op, b) => {
                 let a = self.expr(a)?;
                 let b = self.expr(b)?;
