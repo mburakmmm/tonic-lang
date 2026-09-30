@@ -1154,6 +1154,23 @@ fn variable_annotations_obey_scope_order_and_survive_jit_and_stress_gc() {
         );
     }
 }
+
+#[test]
+fn type_parameters_aliases_and_lexical_cells_survive_jit_and_stress_gc() {
+    let source = "def identity[T: int](value: T) -> T:\n    return value\ndef reveal[T]():\n    def nested():\n        return T\n    return nested\nclass Box[T]:\n    seen=T\n    item: T\n    def reveal(self):\n        return T\nclass Child[T](Box[T]):\n    pass\ntype Plain = int\ntype Pair[T] = (T,T)\nprint(identity.__type_params__,identity.__annotations__,identity(7))\nprint(identity.__type_params__[0].__name__,identity.__type_params__[0].__bound__)\nprint(reveal()())\nprint(Box.__type_params__,Box.seen,Box.__annotations__,Box().reveal())\nprint(Child.__bases__)\nprint(Plain,Plain.__name__,Plain.__type_params__,Plain.__value__)\nprint(Pair,Pair.__name__,Pair.__type_params__,Pair.__value__)\nprint(list[int],tuple[int,str],dict[str,int],list[int]([1,2]))\nprint(Pair[int],Pair[int].__origin__,Pair[int].__args__,Pair[int].__value__)\ndef shadow[T](T):\n    return T\nprint(shadow(9),shadow.__type_params__)\ndef missing[T]():\n    print(T)\n    T=1\ntry:\n    missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
+    let program = compile(source, "type-parameters").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"(T,) {'value': T, 'return': T} 7\nT <class 'int'>\nT\n(T,) T {'item': T} T\n(<class 'Box'>,)\nPlain Plain () <class 'int'>\nPair Pair (T,) (T, T)\nlist[int] tuple[int, str] dict[str, int] [1, 2]\nPair[int] Pair (<class 'int'>,) (T, T)\n9 (T,)\nUnboundLocalError\n"
+        );
+    }
+}
 #[test]
 fn short_circuit_and_chains() {
     assert_eq!(output("def tick(n):\n    print(n)\n    return n\nprint(3 < tick(2) < tick(1))\nprint(0 and missing, 5 or missing, not [])\nprint(tick(1) if True else missing)\n"),"2\nFalse\n0 5 True\n1\n1\n");

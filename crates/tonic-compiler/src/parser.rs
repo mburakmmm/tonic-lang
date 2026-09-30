@@ -165,10 +165,20 @@ impl Adapter {
                 StmtKind::DeleteTargets(targets)
             }
             py::Stmt::Expr(e) => StmtKind::Expr(self.expr(*e.value)?),
-            py::Stmt::ClassDef(c) => {
-                if !c.type_params.is_empty() {
-                    return Err(unsupported(s, "class type parameters"));
+            py::Stmt::TypeAlias(alias) => {
+                let py::Expr::Name(name) = *alias.name else {
+                    return Err(
+                        Diagnostic::new("SyntaxError", "type alias name must be a name").at(s),
+                    );
+                };
+                StmtKind::TypeAlias {
+                    name: self.symbol(name.id.as_str())?,
+                    type_params: self.type_params(alias.type_params, s)?,
+                    value: self.expr(*alias.value)?,
                 }
+            }
+            py::Stmt::ClassDef(c) => {
+                let type_params = self.type_params(c.type_params, s)?;
                 let mut metaclass = None;
                 for keyword in c.keywords {
                     if keyword.arg.as_ref().map(|name| name.as_str()) != Some("metaclass") {
@@ -228,15 +238,14 @@ impl Adapter {
                     class_cell,
                     label,
                     decorators,
+                    type_params,
                     bases,
                     metaclass,
                     body,
                 }
             }
             py::Stmt::FunctionDef(f) => {
-                if !f.type_params.is_empty() {
-                    return Err(unsupported(s, "type parameters"));
-                }
+                let type_params = self.type_params(f.type_params, s)?;
                 let label = f.name.to_string();
                 // Decorator expressions precede defaults; applications happen
                 // in reverse order after the Function object is constructed.
@@ -264,15 +273,14 @@ impl Adapter {
                     label,
                     is_async: false,
                     decorators,
+                    type_params,
                     params,
                     returns,
                     body,
                 }
             }
             py::Stmt::AsyncFunctionDef(f) => {
-                if !f.type_params.is_empty() {
-                    return Err(unsupported(s, "type parameters"));
-                }
+                let type_params = self.type_params(f.type_params, s)?;
                 let label = f.name.to_string();
                 let decorators = f
                     .decorator_list
@@ -298,6 +306,7 @@ impl Adapter {
                     label,
                     is_async: true,
                     decorators,
+                    type_params,
                     params,
                     returns,
                     body,
@@ -653,6 +662,45 @@ impl Adapter {
             )),
             _ => Err(unsupported(s, "assignment target")),
         }
+    }
+
+    fn type_params(&mut self, params: Vec<py::TypeParam>, s: Span) -> Result<Vec<TypeParam>> {
+        let mut result = Vec::with_capacity(params.len());
+        let mut seen = std::collections::HashSet::new();
+        for param in params {
+            let param_span = span(&param);
+            let (name, kind) = match param {
+                py::TypeParam::TypeVar(param) => (
+                    self.symbol(param.name.as_str())?,
+                    TypeParamKind::TypeVar {
+                        bound: param
+                            .bound
+                            .map(|bound| self.expr(*bound).map(Box::new))
+                            .transpose()?
+                            .map(|bound| *bound),
+                    },
+                ),
+                py::TypeParam::ParamSpec(param) => {
+                    (self.symbol(param.name.as_str())?, TypeParamKind::ParamSpec)
+                }
+                py::TypeParam::TypeVarTuple(param) => (
+                    self.symbol(param.name.as_str())?,
+                    TypeParamKind::TypeVarTuple,
+                ),
+            };
+            if !seen.insert(name) {
+                return Err(Diagnostic::new("SyntaxError", "duplicate type parameter").at(s));
+            }
+            result.push(TypeParam {
+                name,
+                kind,
+                span: param_span,
+            });
+        }
+        if !result.is_empty() {
+            self.symbol("__type_params__")?;
+        }
+        Ok(result)
     }
     fn expr(&mut self, node: py::Expr) -> Result<Expr> {
         let s = span(&node);

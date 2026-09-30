@@ -1,4 +1,8 @@
-use tonic_core::{ast::Constant, bytecode::*, diagnostic::Span};
+use tonic_core::{
+    ast::{Constant, SymbolId},
+    bytecode::*,
+    diagnostic::Span,
+};
 fn program() -> Program {
     Program {
         version: BYTECODE_VERSION,
@@ -18,6 +22,7 @@ fn program() -> Program {
             params: 0,
             signature: Default::default(),
             locals: vec![],
+            type_params: vec![],
             registers: 2,
             cell_locals: vec![],
             free_vars: vec![],
@@ -110,6 +115,35 @@ fn f_string_operands_are_verified() {
     assert!(bad.verify().is_err());
     let mut bad = valid;
     bad.code[0].instructions[2].c = bad.code[0].registers;
+    assert!(bad.verify().is_err());
+}
+
+#[test]
+fn type_parameter_operands_and_metadata_are_verified() {
+    let mut valid = program();
+    valid.code[0].locals.push(SymbolId(0));
+    valid.code[0].type_params.push((SymbolId(0), Some(0)));
+    valid.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::TypeParam, 0, 0, 1));
+    valid.code[0]
+        .instructions
+        .insert(2, Instr::new(Op::TypeAlias, 0, 0, 1));
+    valid.code[0].spans.insert(1, Span::default());
+    valid.code[0].spans.insert(2, Span::default());
+    valid.clone().verify().unwrap();
+
+    let mut bad = valid.clone();
+    bad.code[0].instructions[1].c = 4;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].instructions[2].c = bad.code[0].registers;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].type_params[0].0 = SymbolId(1);
+    assert!(bad.verify().is_err());
+    let mut bad = valid;
+    bad.code[0].type_params[0].1 = Some(1);
     assert!(bad.verify().is_err());
 }
 
@@ -414,7 +448,6 @@ fn deterministic_decoder_mutation_sweep() {
 
 #[test]
 fn closure_and_signature_metadata() {
-    use tonic_core::ast::SymbolId;
     let mut p = program();
     let mut parent = p.code[0].clone();
     parent.locals = vec![SymbolId(0)];
@@ -424,12 +457,14 @@ fn closure_and_signature_metadata() {
         captures: vec![0],
         defaults: vec![1],
         annotations: vec![(SymbolId(0), 1)],
+        type_params: vec![1],
     }];
     let mut child = p.code[0].clone();
     child.params = 1;
     child.signature.positional = 1;
     child.signature.defaults = vec![0];
     child.locals = vec![SymbolId(0)];
+    child.type_params = vec![(SymbolId(0), None)];
     child.free_vars = vec![SymbolId(0)];
     p.code.extend([parent, child]);
     p.modules[0].code_count = 3;
@@ -453,6 +488,12 @@ fn closure_and_signature_metadata() {
     variants.push(bad);
     let mut bad = p.clone();
     bad.code[1].functions[0].annotations[0].0 = SymbolId(1);
+    variants.push(bad);
+    let mut bad = p.clone();
+    bad.code[1].functions[0].type_params.clear();
+    variants.push(bad);
+    let mut bad = p.clone();
+    bad.code[1].functions[0].type_params[0] = 2;
     variants.push(bad);
     let mut bad = p.clone();
     bad.code[1].functions[0].annotations.push((SymbolId(0), 0));
@@ -508,7 +549,6 @@ fn expanded_argument_control_flow_balance() {
 
 #[test]
 fn keyword_windows_and_symbols() {
-    use tonic_core::ast::SymbolId;
     let mut p = program();
     p.code[0].calls.push(CallSite {
         first: 0,

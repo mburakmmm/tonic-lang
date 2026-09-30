@@ -23,6 +23,7 @@ fn program(instructions: Vec<Instr>) -> Program {
             params: 0,
             signature: Default::default(),
             locals: vec![],
+            type_params: vec![],
             registers: 4,
             cell_locals: vec![],
             free_vars: vec![],

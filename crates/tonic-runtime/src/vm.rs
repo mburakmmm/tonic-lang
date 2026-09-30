@@ -4,7 +4,7 @@ use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
     heap::{
         AsyncGeneratorAwaitState, Builtin, GeneratorFrame, GeneratorKind, GeneratorState, Heap,
-        Object, SuspendedGenerator, TracebackEntry,
+        Object, SuspendedGenerator, TracebackEntry, TypeParameterKind,
     },
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
@@ -4929,6 +4929,16 @@ impl Vm {
                             }
                             Some(annotations)
                         };
+                        let type_params = if site.type_params.is_empty() {
+                            None
+                        } else {
+                            let values = site
+                                .type_params
+                                .iter()
+                                .map(|register| self.read(base + *register as usize))
+                                .collect::<Result<Vec<_>>>()?;
+                            Some(self.heap.alloc(Object::Tuple(values))?)
+                        };
                         self.registers[a] = self.heap.alloc(Object::Function {
                             code: site.code,
                             execution: self.execution,
@@ -4939,7 +4949,31 @@ impl Vm {
                                 .map(|r| self.read(base + *r as usize))
                                 .collect::<Result<_>>()?,
                             annotations,
+                            type_params,
                         })?
+                    }
+                    Op::TypeParam => {
+                        let bound = (i.c == 1).then(|| self.read(a)).transpose()?;
+                        let kind = match i.c {
+                            0 | 1 => TypeParameterKind::TypeVar,
+                            2 => TypeParameterKind::ParamSpec,
+                            3 => TypeParameterKind::TypeVarTuple,
+                            _ => unreachable!("verified type parameter kind"),
+                        };
+                        self.registers[a] = self.heap.alloc(Object::TypeParam {
+                            name: p.symbols[i.b as usize].clone(),
+                            kind,
+                            bound,
+                        })?;
+                    }
+                    Op::TypeAlias => {
+                        let value = self.read(a)?;
+                        let type_params = self.read(c)?;
+                        self.registers[a] = self.heap.alloc(Object::TypeAlias {
+                            name: p.symbols[i.b as usize].clone(),
+                            type_params,
+                            value,
+                        })?;
                     }
                     Op::Return | Op::Yield | Op::AsyncYield => {
                         let yielding = matches!(op, Op::Yield | Op::AsyncYield);
@@ -5829,6 +5863,11 @@ impl Vm {
                         for r in 0..site.count {
                             bases.push(self.read(base + (site.first + r) as usize)?);
                         }
+                        for base in &mut bases {
+                            if let Ok(Object::GenericAlias { origin, .. }) = self.heap.get(*base) {
+                                *base = *origin;
+                            }
+                        }
                         let declared_bases = bases.clone();
                         if bases.is_empty() {
                             bases.push(self.object_class);
@@ -6486,6 +6525,44 @@ impl Vm {
                     Op::Item => {
                         let owner = self.read(b)?;
                         let key = self.read(c)?;
+                        let generic = match self.heap.get(owner)? {
+                            Object::TypeAlias { type_params, .. } => matches!(
+                                self.heap.get(*type_params),
+                                Ok(Object::Tuple(values)) if !values.is_empty()
+                            ),
+                            Object::Class(_) => {
+                                [
+                                    self.runtime_types.list,
+                                    self.runtime_types.tuple,
+                                    self.runtime_types.dict,
+                                    self.runtime_types.set,
+                                    self.type_class,
+                                ]
+                                .contains(&owner)
+                                    || self
+                                        .heap
+                                        .class_lookup(owner, "__type_params__")?
+                                        .is_some_and(|parameters| {
+                                            matches!(
+                                                self.heap.get(parameters),
+                                                Ok(Object::Tuple(values)) if !values.is_empty()
+                                            )
+                                        })
+                            }
+                            _ => false,
+                        };
+                        if generic {
+                            let args = if matches!(self.heap.get(key), Ok(Object::Tuple(_))) {
+                                key
+                            } else {
+                                self.heap.alloc(Object::Tuple(vec![key]))?
+                            };
+                            self.registers[a] = self.heap.alloc(Object::GenericAlias {
+                                origin: owner,
+                                args,
+                            })?;
+                            return Ok(());
+                        }
                         if let Some(call) = self.heap.special_method_call(owner, "__getitem__")? {
                             self.invoke(
                                 p,
@@ -7314,6 +7391,7 @@ impl Vm {
                 && (!materialize_variadics || signature.vararg.is_none())
             || !metadata.cell_locals.is_empty()
             || !metadata.free_vars.is_empty()
+            || !metadata.type_params.is_empty()
             || metadata.class_body
             || metadata.generator
             || metadata.coroutine
@@ -7596,6 +7674,7 @@ impl Vm {
                     if positional.len() > usize::from(signature.positional)
                         || !target_code.cell_locals.is_empty()
                         || !target_code.free_vars.is_empty()
+                        || !target_code.type_params.is_empty()
                         || target_code.class_body
                         || !tonic_jit::unobserved_variadic_parameters(target_code)
                         || !tonic_jit::is_direct_call_inlineable(target_code)

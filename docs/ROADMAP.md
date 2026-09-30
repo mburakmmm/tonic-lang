@@ -189,7 +189,7 @@ sonra alınır.
     string width/precision, integer/float format mini-language, suspending
     `__str__`/`__repr__`/`__format__`, precise continuation roots ve Cranelift
     generic-tier fallback'i.
-  - [ ] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
+  - [x] Değişken, parametre ve dönüş annotations/type-parameter yüzeyi.
     - [x] Positional-only, positional, variadic, keyword-only ve mapping
       parametreleri ile dönüş annotation ifadeleri; Tonic-owned AST/HIR,
       definition-scope evaluation, doğrulanmış function-site metadata,
@@ -198,7 +198,12 @@ sonra alınır.
     - [x] Değişken annotation'ları; Tonic-owned annotated-assignment AST/HIR,
       module/class `__annotations__`, function-local binding semantiği, karmaşık
       hedef değerlendirme sırası ve interpreter/JIT-caller stress-GC testleri.
-    - [ ] Type parameter ve type-alias yüzeyi.
+    - [x] Python 3.12 type parameter ve `type` alias yüzeyi; TypeVar,
+      TypeVarTuple, ParamSpec ve bound metadata'sı, lexical cell/shadowing,
+      `__type_params__`, managed alias/generic-alias nesneleri, builtin/class
+      subscription, generic base çözümleme, verifier ve JIT fallback sınırı.
+  - [ ] Python 3.13 type-parameter default sözdizimi ve ileride seçilecek PEP 649
+    deferred-annotation modu; mevcut eager Tonic semantiği varsayılan kalabilir.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

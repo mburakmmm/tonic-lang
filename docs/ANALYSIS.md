@@ -486,6 +486,23 @@ ve key yan etkilerini Python sırasıyla bir kez çalıştırır. Cranelift yeni
 da opkod gerektirmeden doğrulanmış generic continuation'a düşer. Ayrıntılar
 [ADR 0084](adr/0084-variable-annotations.md) dosyasındadır.
 
+Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
+Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
+`TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,
+TypeVarTuple, ParamSpec ve alias nesneleri üretir. Generic function/class
+gövdelerindeki aktif isimler frame kurulurken hidden local slotlara yazılır;
+nested function veya method bunları kullandığında normal precise cell'e
+dönüşür. Ordinary parameter/assignment aynı adı bütün scope'ta Python gibi
+gölgeler. Function/class `__type_params__` tuple'ı ile alias `__name__`,
+`__type_params__`, `__value__` yüzeyi managed edge'lerdir.
+
+Builtin container, generic class ve generic alias subscription'ı origin/args
+taşıyan managed generic-alias üretir; class alias çağrısı origin constructor'a,
+generic base ise MRO kurulurken origin class'a gider. Type-parametreli code
+direct-call inline planından çıkarılır, yeni construction opkodları Cranelift'in
+explicit generic-runtime fallback'inde kalır. Ayrıntılar
+[ADR 0085](adr/0085-type-parameters-and-aliases.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

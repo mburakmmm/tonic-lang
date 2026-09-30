@@ -272,6 +272,7 @@ mod tests {
                 captures: vec![cell],
                 defaults: vec![default],
                 annotations: None,
+                type_params: None,
             })
             .unwrap();
         let stats = heap.collect([f]).unwrap();

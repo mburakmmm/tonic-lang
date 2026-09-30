@@ -454,6 +454,21 @@ impl Vm {
         let mut callee = callee;
         let mut redirects = 0;
         loop {
+            if let Object::GenericAlias { origin, .. } = self.heap.get(callee)? {
+                let origin = *origin;
+                if !matches!(self.heap.get(origin), Ok(Object::Class(_))) {
+                    return Err(Diagnostic::new("TypeError", "object is not callable"));
+                }
+                callee = origin;
+                redirects += 1;
+                if redirects > 100 {
+                    return Err(Diagnostic::new(
+                        "RecursionError",
+                        "callable protocol chain is too deep",
+                    ));
+                }
+                continue;
+            }
             let call = match self.heap.get(callee)? {
                 Object::StaticMethod(function) => Some(crate::classes::DescriptorCall {
                     callable: *function,
@@ -4293,6 +4308,29 @@ impl Vm {
                 let reg = base + *slot as usize;
                 if self.registers[reg] == Value::UNBOUND {
                     self.registers[reg] = *value;
+                }
+            }
+        }
+        if let Some(callable) = callable {
+            let Object::Function { type_params, .. } = self.heap.get(callable)? else {
+                unreachable!()
+            };
+            let values = match type_params {
+                Some(type_params) => match self.heap.get(*type_params)? {
+                    Object::Tuple(values) => values.clone(),
+                    _ => return Err(Diagnostic::new("BytecodeError", "invalid type parameters")),
+                },
+                None => Vec::new(),
+            };
+            if values.len() != metadata.type_params.len() {
+                return Err(Diagnostic::new(
+                    "BytecodeError",
+                    "type parameter count mismatch",
+                ));
+            }
+            for ((_, slot), value) in metadata.type_params.iter().zip(values) {
+                if let Some(slot) = slot {
+                    self.registers[base + usize::from(*slot)] = value;
                 }
             }
         }

@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 26, core verifier 18, Cranelift JIT 20, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 27, core verifier 19, Cranelift JIT 21, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 110, CPython bridge 15 ve HPy manifest 5; toplam 351 test.
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 355 test.
 
-Differential corpus: 318 stdout vakası ve 177 exception türü vakası. Seed 42.
-Değişken annotation diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 319 stdout vakası ve 178 exception türü vakası. Seed 42.
+Type parameter/type-alias diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -469,6 +469,17 @@ interpreter/JIT-caller × allocation-stress GC altında yaşamasını kapsar. Py
 3.14 differential vakaları ortak class sözlüğü, local binding ve karmaşık target
 davranışını karşılaştırır; Tonic'in eager annotation değerlendirmesi ADR 0084'te
 açıkça belgelenmiş dil tercihidir.
+
+Type parameter/type-alias dilimi bytecode v31 `TYPE_PARAM` ve `TYPE_ALIAS`
+operandlarını, code/function-site name-slot-register tutarlılığını ve duplicate
+parametre reddini verifier/compiler katmanında sınar. Runtime testi TypeVar,
+TypeVarTuple, ParamSpec, bound, function/class/alias introspection'ı, generic
+annotation ve gövde görünürlüğünü, nested lexical cell'i, ordinary binding
+shadowing'ini, generic base çözümlemeyi, builtin/class/type-alias subscription ve
+class-alias construction'ı interpreter/JIT-caller × allocation-stress GC altında
+kapsar. Cranelift testi construction opkodlarının explicit generic fallback'te
+kaldığını doğrular. Python 3.14 differential vakaları aynı gözlemlenebilir çıktı
+ve shadowing hata sınıflarını karşılaştırır.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

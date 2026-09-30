@@ -69,6 +69,7 @@ fn build(
         cleanups: Vec::new(),
         finally_bypasses: Vec::new(),
         with_bypasses: Vec::new(),
+        type_bindings: Vec::new(),
     };
     if lower.scope.class_body {
         let span = body
@@ -164,6 +165,19 @@ fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeO
             defaults: params.defaults().map(|(slot, _)| slot as u16).collect(),
         },
         locals: scope.locals.clone(),
+        type_params: scope
+            .type_params
+            .iter()
+            .map(|name| {
+                (
+                    *name,
+                    scope
+                        .active_type_params
+                        .contains(name)
+                        .then(|| scope.local(*name).expect("active type parameter local")),
+                )
+            })
+            .collect(),
         registers: 0,
         instructions: Vec::new(),
         spans: Vec::new(),
@@ -216,6 +230,7 @@ fn build_comprehension(
         cleanups: Vec::new(),
         finally_bypasses: Vec::new(),
         with_bypasses: Vec::new(),
+        type_bindings: Vec::new(),
     };
     let span = comprehension.element.span;
     if comprehension.kind != ComprehensionKind::Generator {
@@ -282,8 +297,34 @@ struct Lower<'a> {
     cleanups: Vec<ControlCleanup>,
     finally_bypasses: Vec<Vec<FinallyBypass>>,
     with_bypasses: Vec<Vec<FinallyBypass>>,
+    type_bindings: Vec<(SymbolId, u16)>,
 }
 impl Lower<'_> {
+    fn lower_type_params(&mut self, params: &[TypeParam]) -> Result<Vec<u16>> {
+        let mut values = Vec::with_capacity(params.len());
+        for param in params {
+            let (value, kind) = match &param.kind {
+                TypeParamKind::TypeVar { bound: Some(bound) } => (self.expr(bound)?, 1),
+                TypeParamKind::TypeVar { bound: None } => (self.alloc(1)?, 0),
+                TypeParamKind::ParamSpec => (self.alloc(1)?, 2),
+                TypeParamKind::TypeVarTuple => (self.alloc(1)?, 3),
+            };
+            self.emit(Op::TypeParam, value, param.name.0, kind, param.span)?;
+            self.type_bindings.push((param.name, value));
+            values.push(value);
+        }
+        Ok(values)
+    }
+    fn tuple_from_registers(&mut self, values: &[u16], span: Span) -> Result<u16> {
+        let count = index(values.len())?;
+        let first = self.alloc(count)?;
+        for (offset, value) in values.iter().copied().enumerate() {
+            self.emit(Op::Move, first + offset as u16, value, 0, span)?;
+        }
+        let tuple = self.alloc(1)?;
+        self.emit(Op::Tuple, tuple, first, count, span)?;
+        Ok(tuple)
+    }
     fn lower_annotations(
         &mut self,
         params: &Parameters,
@@ -396,6 +437,24 @@ impl Lower<'_> {
     }
     fn load(&mut self, n: SymbolId, s: Span) -> Result<u16> {
         let r = self.alloc(1)?;
+        if let Some((_, value)) = self.type_bindings.iter().rev().find(|(name, _)| *name == n) {
+            self.emit(Op::Move, r, *value, 0, s)?;
+            return Ok(r);
+        }
+        if self.scope.active_type_params.contains(&n) {
+            if let Some(cell) = self.scope.cell(n) {
+                self.emit(Op::LoadCell, r, cell, 0, s)?;
+            } else {
+                self.emit(
+                    Op::Move,
+                    r,
+                    self.scope.local(n).expect("active type parameter"),
+                    0,
+                    s,
+                )?;
+            }
+            return Ok(r);
+        }
         if self.scope.globals.contains(&n) {
             self.emit(Op::LoadGlobal, r, n.0, 0, s)?;
             return Ok(r);
@@ -1204,11 +1263,27 @@ impl Lower<'_> {
             StmtKind::Expr(e) => {
                 self.expr(e)?;
             }
+            StmtKind::TypeAlias {
+                name,
+                type_params,
+                value,
+            } => {
+                let binding_mark = self.type_bindings.len();
+                let type_param_values = self.lower_type_params(type_params)?;
+                let value = self.expr(value)?;
+                let type_params = self.tuple_from_registers(&type_param_values, s)?;
+                let alias = self.alloc(1)?;
+                self.emit(Op::Move, alias, value, 0, s)?;
+                self.emit(Op::TypeAlias, alias, name.0, type_params, s)?;
+                self.type_bindings.truncate(binding_mark);
+                self.store(*name, alias, s)?;
+            }
             StmtKind::Class {
                 name,
                 class_cell: _,
                 label,
                 decorators,
+                type_params,
                 bases,
                 metaclass,
                 body,
@@ -1217,6 +1292,8 @@ impl Lower<'_> {
                     .iter()
                     .map(|d| self.expr(d).map(|r| (r, d.span)))
                     .collect::<Result<Vec<_>>>()?;
+                let binding_mark = self.type_bindings.len();
+                let type_param_values = self.lower_type_params(type_params)?;
                 let child = self.scope.take_child(s.start);
                 let captures = child
                     .free
@@ -1231,6 +1308,7 @@ impl Lower<'_> {
                     captures,
                     defaults: Vec::new(),
                     annotations: Vec::new(),
+                    type_params: type_param_values.clone(),
                 });
                 let function = self.alloc(1)?;
                 self.emit(Op::Function, function, site, 0, s)?;
@@ -1256,6 +1334,21 @@ impl Lower<'_> {
                 });
                 let result = self.alloc(1)?;
                 self.emit(Op::Class, result, function, site, s)?;
+                if !type_param_values.is_empty() {
+                    let tuple = self.tuple_from_registers(&type_param_values, s)?;
+                    let type_params_name = self
+                        .program
+                        .symbols
+                        .iter()
+                        .position(|symbol| symbol == "__type_params__")
+                        .ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "missing type parameter symbol")
+                        })?;
+                    let class = self.alloc(1)?;
+                    self.emit(Op::Move, class, result, 0, s)?;
+                    self.emit(Op::SetAttr, class, tuple, index(type_params_name)?, s)?;
+                }
+                self.type_bindings.truncate(binding_mark);
                 let result = self.apply_decorators(result, &decorators)?;
                 self.store(*name, result, s)?;
             }
@@ -1293,6 +1386,7 @@ impl Lower<'_> {
                 label,
                 is_async,
                 decorators,
+                type_params,
                 params,
                 returns,
                 body,
@@ -1321,15 +1415,19 @@ impl Lower<'_> {
                     .defaults()
                     .map(|(_, e)| self.expr(e))
                     .collect::<Result<_>>()?;
+                let binding_mark = self.type_bindings.len();
+                let type_param_values = self.lower_type_params(type_params)?;
                 let annotations = self.lower_annotations(params, returns.as_ref())?;
                 self.code.functions.push(FunctionSite {
                     code: id,
                     captures,
                     defaults,
                     annotations,
+                    type_params: type_param_values,
                 });
                 let r = self.alloc(1)?;
                 self.emit(Op::Function, r, site, 0, s)?;
+                self.type_bindings.truncate(binding_mark);
                 let r = self.apply_decorators(r, &decorators)?;
                 self.store(*name, r, s)?;
             }
@@ -1770,6 +1868,7 @@ impl Lower<'_> {
                     captures,
                     defaults,
                     annotations: Vec::new(),
+                    type_params: Vec::new(),
                 });
                 let result = self.alloc(1)?;
                 self.emit(Op::Function, result, site, 0, s)?;
@@ -1813,6 +1912,7 @@ impl Lower<'_> {
                     captures,
                     defaults: Vec::new(),
                     annotations: Vec::new(),
+                    type_params: Vec::new(),
                 });
                 let function = self.alloc(1)?;
                 self.emit(Op::Function, function, site, 0, s)?;

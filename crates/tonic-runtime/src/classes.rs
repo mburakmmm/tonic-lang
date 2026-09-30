@@ -198,6 +198,10 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__doc__"
                 | "__name__"
                 | "__annotations__"
+                | "__type_params__"
+                | "__value__"
+                | "__bound__"
+                | "__constraints__"
                 | "__match_args__"
                 | "__str__"
                 | "__repr__"
@@ -1432,6 +1436,69 @@ impl Heap {
             };
             *slot = Some(annotations);
             return Ok(annotations);
+        }
+        let type_parameter_function = (name == "__type_params__")
+            .then(|| match self.get(owner) {
+                Ok(Object::Function { .. }) => Some(owner),
+                Ok(Object::BoundMethod { function, .. }) => Some(*function),
+                _ => None,
+            })
+            .flatten();
+        if let Some(function) = type_parameter_function {
+            if let Object::Function {
+                type_params: Some(type_params),
+                ..
+            } = self.get(function)?
+            {
+                return Ok(*type_params);
+            }
+            let type_params = self.alloc(Object::Tuple(Vec::new()))?;
+            self.write_barrier(function, type_params);
+            let Object::Function {
+                type_params: slot, ..
+            } = self.get_mut(function)?
+            else {
+                unreachable!("checked function changed kind")
+            };
+            *slot = Some(type_params);
+            return Ok(type_params);
+        }
+        let type_metadata = match self.get(owner) {
+            Ok(Object::TypeParam {
+                name: parameter_name,
+                kind,
+                bound,
+            }) => Some((parameter_name.clone(), Some((*kind, *bound)), None)),
+            Ok(Object::TypeAlias {
+                name: alias_name,
+                type_params,
+                value,
+            }) => Some((alias_name.clone(), None, Some((*type_params, *value)))),
+            _ => None,
+        };
+        if let Some((metadata_name, parameter, alias)) = type_metadata {
+            return match name {
+                "__name__" => self.alloc(Object::Str(metadata_name)),
+                "__bound__" if parameter.is_some() => Ok(parameter
+                    .and_then(|(_, bound)| bound)
+                    .unwrap_or(Value::NONE)),
+                "__constraints__" if parameter.is_some() => self.alloc(Object::Tuple(Vec::new())),
+                "__type_params__" if alias.is_some() => Ok(alias.expect("checked alias").0),
+                "__value__" if alias.is_some() => Ok(alias.expect("checked alias").1),
+                _ => Err(missing(name)),
+            };
+        }
+        if let Ok(Object::GenericAlias { origin, args }) = self.get(owner) {
+            return match name {
+                "__origin__" => Ok(*origin),
+                "__args__" => Ok(*args),
+                "__value__" | "__type_params__"
+                    if matches!(self.get(*origin), Ok(Object::TypeAlias { .. })) =>
+                {
+                    self.attr(*origin, name)
+                }
+                _ => Err(missing(name)),
+            };
         }
         let value = match self.get(owner) {
             Ok(Object::Module(values)) => {

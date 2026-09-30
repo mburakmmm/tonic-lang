@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 30;
+pub const BYTECODE_VERSION: u16 = 31;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -113,6 +113,8 @@ pub enum Op {
     MatchUnique = 118,
     Convert = 119,
     FormatValue = 120,
+    TypeParam = 121,
+    TypeAlias = 122,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -223,6 +225,8 @@ impl TryFrom<u16> for Op {
             118 => Self::MatchUnique,
             119 => Self::Convert,
             120 => Self::FormatValue,
+            121 => Self::TypeParam,
+            122 => Self::TypeAlias,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -282,6 +286,8 @@ pub struct FunctionSite {
     /// Definition-time annotation values in source order. The synthetic
     /// `return` symbol denotes the return annotation.
     pub annotations: Vec<(SymbolId, u16)>,
+    /// Definition-time type-parameter values in declaration order.
+    pub type_params: Vec<u16>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExceptionRegion {
@@ -309,6 +315,9 @@ pub struct CodeObject {
     pub params: u16,
     pub signature: Signature,
     pub locals: Vec<SymbolId>,
+    /// Declared type parameter names and optional initialized local slots.
+    /// `None` means an ordinary parameter/assignment shadows the body binding.
+    pub type_params: Vec<(SymbolId, Option<u16>)>,
     pub registers: u16,
     pub instructions: Vec<Instr>,
     pub spans: Vec<Span>,
@@ -441,6 +450,17 @@ impl Program {
                     return Err(bad("invalid local symbol"));
                 }
             }
+            let mut type_param_names = std::collections::HashSet::new();
+            for (name, slot) in &code.type_params {
+                if name.0 as usize >= self.symbols.len() || !type_param_names.insert(*name) {
+                    return Err(bad("invalid type parameter symbol"));
+                }
+                if let Some(slot) = slot {
+                    if *slot as usize >= code.locals.len() || code.locals[*slot as usize] != *name {
+                        return Err(bad("invalid type parameter slot"));
+                    }
+                }
+            }
             let cell_count = code.cell_locals.len() + code.free_vars.len();
             if cell_count > u16::MAX as usize {
                 return Err(bad("too many cells"));
@@ -451,13 +471,18 @@ impl Program {
                     return Err(bad("invalid or duplicate cell local"));
                 }
             }
-            if code.class_body
-                && (code.cell_locals.len() > 1
-                    || code.cell_locals.iter().any(|local| {
-                        self.symbols[code.locals[*local as usize].0 as usize] != "__class__"
-                    }))
-            {
-                return Err(bad("invalid class cell"));
+            if code.class_body {
+                for local in &code.cell_locals {
+                    let symbol = code.locals[*local as usize];
+                    if self.symbols[symbol.0 as usize] != "__class__"
+                        && !code
+                            .type_params
+                            .iter()
+                            .any(|(name, slot)| *name == symbol && *slot == Some(*local))
+                    {
+                        return Err(bad("invalid class cell"));
+                    }
+                }
             }
             for name in &code.free_vars {
                 if name.0 as usize >= self.symbols.len() {
@@ -476,6 +501,14 @@ impl Program {
                     || site.defaults.iter().any(|r| *r >= code.registers)
                 {
                     return Err(bad("invalid function defaults"));
+                }
+                if site.type_params.len() != child.type_params.len()
+                    || site
+                        .type_params
+                        .iter()
+                        .any(|register| *register >= code.registers)
+                {
+                    return Err(bad("invalid function type parameters"));
                 }
                 let mut annotation_names = std::collections::HashSet::new();
                 for (name, register) in &site.annotations {
@@ -647,6 +680,18 @@ impl Program {
                     Op::FormatValue => {
                         reg(i.a)?;
                         reg(i.b)?;
+                        reg(i.c)?;
+                    }
+                    Op::TypeParam => {
+                        reg(i.a)?;
+                        sym(i.b)?;
+                        if i.c > 3 {
+                            return Err(bad("invalid type parameter kind"));
+                        }
+                    }
+                    Op::TypeAlias => {
+                        reg(i.a)?;
+                        sym(i.b)?;
                         reg(i.c)?;
                     }
                     Op::MatchMapping => {

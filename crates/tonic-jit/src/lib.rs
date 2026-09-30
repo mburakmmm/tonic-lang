@@ -2167,6 +2167,7 @@ pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
     if code.class_body
         || code.generator
         || code.coroutine
+        || !code.type_params.is_empty()
         || validate_structural_safety(code).is_err()
     {
         return false;
@@ -3791,6 +3792,21 @@ mod tests {
             .instructions
             .iter()
             .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::FormatValue)));
+        assert!(matches!(compile(code), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn type_parameter_construction_stays_in_the_generic_runtime() {
+        let program = function("def make():\n    type Alias[T] = (T,T)\n    return Alias");
+        let code = &program.program().code[1];
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::TypeParam)));
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::TypeAlias)));
         assert!(matches!(compile(code), Err(Error::Unsupported(_))));
     }
 

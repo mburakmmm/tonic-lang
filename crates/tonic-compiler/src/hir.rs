@@ -10,6 +10,8 @@ use tonic_core::{
 pub(crate) struct Scope {
     pub module: bool,
     pub class_body: bool,
+    pub type_params: Vec<SymbolId>,
+    pub active_type_params: HashSet<SymbolId>,
     pub generator: bool,
     pub coroutine: bool,
     class_cell: Option<SymbolId>,
@@ -20,6 +22,13 @@ pub(crate) struct Scope {
     pub free: Vec<SymbolId>,
     pub children: Vec<(u32, Scope)>,
 }
+#[derive(Clone, Copy)]
+struct ScopeKind {
+    module: bool,
+    class_body: bool,
+    coroutine: bool,
+    class_cell: Option<SymbolId>,
+}
 impl Scope {
     pub fn resolve(
         params: &Parameters,
@@ -27,17 +36,32 @@ impl Scope {
         module: bool,
         bound: &HashSet<SymbolId>,
     ) -> Result<Self> {
-        Self::resolve_kind(params, body, module, false, false, None, bound)
+        Self::resolve_kind(
+            params,
+            &[],
+            body,
+            ScopeKind {
+                module,
+                class_body: false,
+                coroutine: false,
+                class_cell: None,
+            },
+            bound,
+        )
     }
     fn resolve_kind(
         params: &Parameters,
+        type_params: &[TypeParam],
         body: &[Stmt],
-        module: bool,
-        class_body: bool,
-        coroutine: bool,
-        class_cell: Option<SymbolId>,
+        kind: ScopeKind,
         bound: &HashSet<SymbolId>,
     ) -> Result<Self> {
+        let ScopeKind {
+            module,
+            class_body,
+            coroutine,
+            class_cell,
+        } = kind;
         let mut scan = Scan {
             params: params.names(),
             locals: params.names(),
@@ -48,11 +72,24 @@ impl Scope {
             children: Vec::new(),
             module,
             class_body,
+            suppressed_reads: HashSet::new(),
             yield_span: None,
             yield_from_span: None,
             return_value_span: None,
         };
         scan.block(body)?;
+        let active_type_params = type_params
+            .iter()
+            .map(|param| param.name)
+            .filter(|name| {
+                !scan.locals.contains(name)
+                    && !scan.globals.contains(name)
+                    && !scan.nonlocals.contains(name)
+            })
+            .collect::<HashSet<_>>();
+        for name in &active_type_params {
+            unique(&mut scan.locals, *name);
+        }
         if module || class_body {
             if let Some(span) = scan.yield_span {
                 return Err(Diagnostic::new("SyntaxError", "yield outside function").at(span));
@@ -82,6 +119,8 @@ impl Scope {
         let mut scope = Self {
             module,
             class_body,
+            type_params: type_params.iter().map(|param| param.name).collect(),
+            active_type_params,
             generator: scan.yield_span.is_some(),
             coroutine,
             class_cell,
@@ -108,6 +147,8 @@ impl Scope {
         let mut child_bound = bound.clone();
         if !module && !class_body {
             child_bound.extend(scope.locals.iter().copied());
+        } else if class_body {
+            child_bound.extend(scope.active_type_params.iter().copied());
         }
         if let Some(class_cell) = class_cell {
             child_bound.insert(class_cell);
@@ -119,16 +160,28 @@ impl Scope {
         }
         for (span, child) in scan.children {
             let child = match child {
-                Child::Function(params, body, coroutine) => {
-                    Self::resolve_kind(params, body, false, false, coroutine, None, &child_bound)?
-                }
-                Child::Class(body, class_cell) => Self::resolve_kind(
-                    &Parameters::default(),
+                Child::Function(params, type_params, body, coroutine) => Self::resolve_kind(
+                    params,
+                    type_params,
                     body,
-                    false,
-                    true,
-                    false,
-                    Some(class_cell),
+                    ScopeKind {
+                        module: false,
+                        class_body: false,
+                        coroutine,
+                        class_cell: None,
+                    },
+                    &child_bound,
+                )?,
+                Child::Class(type_params, body, class_cell) => Self::resolve_kind(
+                    &Parameters::default(),
+                    type_params,
+                    body,
+                    ScopeKind {
+                        module: false,
+                        class_body: true,
+                        coroutine: false,
+                        class_cell: Some(class_cell),
+                    },
                     &child_bound,
                 )?,
                 Child::Lambda(params, body) => {
@@ -142,11 +195,14 @@ impl Scope {
                     let (params, body) = comprehension_scope(comprehension);
                     Self::resolve_kind(
                         &params,
+                        &[],
                         &body,
-                        false,
-                        false,
-                        comprehension.coroutine,
-                        None,
+                        ScopeKind {
+                            module: false,
+                            class_body: false,
+                            coroutine: comprehension.coroutine,
+                            class_cell: None,
+                        },
                         &child_bound,
                     )?
                 }
@@ -155,7 +211,9 @@ impl Scope {
                 if class_body && scope.class_cell == Some(*name) {
                     unique(&mut scope.locals, *name);
                     unique(&mut scope.cells, *name);
-                } else if !class_body && scope.locals.contains(name) {
+                } else if (!class_body || scope.active_type_params.contains(name))
+                    && scope.locals.contains(name)
+                {
                     unique(&mut scope.cells, *name);
                 } else if !module && bound.contains(name) {
                     unique(&mut scope.free, *name);
@@ -207,18 +265,22 @@ struct Scan<'a> {
     children: Vec<(u32, Child<'a>)>,
     module: bool,
     class_body: bool,
+    suppressed_reads: HashSet<SymbolId>,
     yield_span: Option<Span>,
     yield_from_span: Option<Span>,
     return_value_span: Option<Span>,
 }
 enum Child<'a> {
-    Function(&'a Parameters, &'a [Stmt], bool),
-    Class(&'a [Stmt], SymbolId),
+    Function(&'a Parameters, &'a [TypeParam], &'a [Stmt], bool),
+    Class(&'a [TypeParam], &'a [Stmt], SymbolId),
     Lambda(&'a Parameters, &'a Expr),
     Comprehension(&'a Comprehension),
 }
 impl<'a> Scan<'a> {
     fn read(&mut self, n: SymbolId) {
+        if self.suppressed_reads.contains(&n) {
+            return;
+        }
         unique(&mut self.reads, n);
         self.seen.insert(n);
     }
@@ -379,6 +441,13 @@ impl<'a> Scan<'a> {
             }
         }
     }
+    fn type_expr(&mut self, expression: &'a Expr, type_params: &'a [TypeParam]) {
+        let previous = self.suppressed_reads.clone();
+        self.suppressed_reads
+            .extend(type_params.iter().map(|param| param.name));
+        self.expr(expression);
+        self.suppressed_reads = previous;
+    }
     fn block(&mut self, body: &'a [Stmt]) -> Result<()> {
         for s in body {
             match &s.kind {
@@ -434,6 +503,19 @@ impl<'a> Scan<'a> {
                     }
                 }
                 StmtKind::Expr(e) => self.expr(e),
+                StmtKind::TypeAlias {
+                    name,
+                    type_params,
+                    value,
+                } => {
+                    for param in type_params {
+                        if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
+                            self.type_expr(bound, type_params);
+                        }
+                    }
+                    self.type_expr(value, type_params);
+                    self.bind(*name);
+                }
                 StmtKind::Return(Some(e)) => {
                     self.return_value_span.get_or_insert(s.span);
                     self.expr(e);
@@ -499,6 +581,7 @@ impl<'a> Scan<'a> {
                     name,
                     is_async,
                     decorators,
+                    type_params,
                     params,
                     returns,
                     body,
@@ -510,28 +593,36 @@ impl<'a> Scan<'a> {
                     for (_, default) in params.defaults() {
                         self.expr(default);
                     }
+                    for param in type_params {
+                        if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
+                            self.type_expr(bound, type_params);
+                        }
+                    }
                     for parameter in params.positional.iter().chain(&params.keyword_only) {
                         if let Some(annotation) = &parameter.annotation {
-                            self.expr(annotation);
+                            self.type_expr(annotation, type_params);
                         }
                     }
                     if let Some(annotation) = &params.vararg_annotation {
-                        self.expr(annotation);
+                        self.type_expr(annotation, type_params);
                     }
                     if let Some(annotation) = &params.kwarg_annotation {
-                        self.expr(annotation);
+                        self.type_expr(annotation, type_params);
                     }
                     if let Some(annotation) = returns {
-                        self.expr(annotation);
+                        self.type_expr(annotation, type_params);
                     }
                     self.bind(*name);
-                    self.children
-                        .push((s.span.start, Child::Function(params, body, *is_async)));
+                    self.children.push((
+                        s.span.start,
+                        Child::Function(params, type_params, body, *is_async),
+                    ));
                 }
                 StmtKind::Class {
                     name,
                     class_cell,
                     decorators,
+                    type_params,
                     bases,
                     metaclass,
                     body,
@@ -540,15 +631,20 @@ impl<'a> Scan<'a> {
                     for decorator in decorators {
                         self.expr(decorator);
                     }
+                    for param in type_params {
+                        if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
+                            self.type_expr(bound, type_params);
+                        }
+                    }
                     for base in bases {
-                        self.expr(base);
+                        self.type_expr(base, type_params);
                     }
                     if let Some((_, metaclass)) = metaclass {
-                        self.expr(metaclass);
+                        self.type_expr(metaclass, type_params);
                     }
                     self.bind(*name);
                     self.children
-                        .push((s.span.start, Child::Class(body, *class_cell)));
+                        .push((s.span.start, Child::Class(type_params, body, *class_cell)));
                 }
                 StmtKind::Import(names) => {
                     for alias in names {

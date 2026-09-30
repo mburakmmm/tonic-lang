@@ -2,6 +2,7 @@ use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSo
 use tonic_core::{
     ast::{
         CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind, Target,
+        TypeParamKind,
     },
     bytecode::Op,
 };
@@ -453,6 +454,53 @@ fn variable_annotations_are_owned_and_lowered_by_scope() {
             "SyntaxError"
         );
     }
+}
+
+#[test]
+fn type_parameters_and_aliases_are_owned_and_lowered() {
+    let source = "def identity[T: int, *Ts, **P](value: T) -> T:\n    return value\nclass Box[T]:\n    item: T\ntype Pair[T] = (T, T)\n";
+    let ast = parse(source, "type-parameters").unwrap();
+    let StmtKind::Function { type_params, .. } = &ast.body[0].kind else {
+        panic!("generic function")
+    };
+    assert_eq!(type_params.len(), 3);
+    assert!(matches!(
+        type_params[0].kind,
+        TypeParamKind::TypeVar { bound: Some(_) }
+    ));
+    assert!(matches!(type_params[1].kind, TypeParamKind::TypeVarTuple));
+    assert!(matches!(type_params[2].kind, TypeParamKind::ParamSpec));
+    let StmtKind::Class { type_params, .. } = &ast.body[1].kind else {
+        panic!("generic class")
+    };
+    assert_eq!(type_params.len(), 1);
+    let StmtKind::TypeAlias {
+        type_params, value, ..
+    } = &ast.body[2].kind
+    else {
+        panic!("generic alias")
+    };
+    assert_eq!(type_params.len(), 1);
+    assert!(matches!(value.kind, ExprKind::Tuple(_)));
+
+    let program = compile(source, "type-parameters").unwrap();
+    let module = &program.program().code[0];
+    let operations = module
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    assert!(operations.contains(&Op::TypeParam));
+    assert!(operations.contains(&Op::TypeAlias));
+    assert_eq!(module.functions[0].type_params.len(), 3);
+    let identity = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("identity"))
+        .unwrap();
+    assert_eq!(identity.type_params.len(), 3);
+    program.program().clone().verify().unwrap();
 }
 
 #[test]

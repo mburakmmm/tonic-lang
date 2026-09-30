@@ -589,6 +589,31 @@ box={}
 box['item']: missing_name = 4
 print(box)
 ''',
+'''def identity[T: int](value: T) -> T:
+    return value
+def reveal[T]():
+    def nested():
+        return T
+    return nested
+class GenericBox[T]:
+    seen=T
+    item: T
+    def reveal(self):
+        return T
+type PlainAlias = int
+type PairAlias[T] = (T,T)
+print(identity.__type_params__,identity.__annotations__,identity(7))
+print(identity.__type_params__[0].__name__,identity.__type_params__[0].__bound__)
+print(reveal()())
+print(GenericBox.__type_params__,GenericBox.seen,GenericBox.__annotations__,GenericBox().reveal())
+print(PlainAlias,PlainAlias.__name__,PlainAlias.__type_params__,PlainAlias.__value__)
+print(PairAlias,PairAlias.__name__,PairAlias.__type_params__,PairAlias.__value__)
+print(list[int],tuple[int,str],dict[str,int],list[int]([1,2]))
+print(PairAlias[int],PairAlias[int].__origin__,PairAlias[int].__args__,PairAlias[int].__value__)
+def shadow[T](T):
+    return T
+print(shadow(9),shadow.__type_params__)
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
@@ -639,6 +664,7 @@ ERRORS = [
 ('async def bad():\n    yield 1\n    return 2', 'SyntaxError'),
 ('async def bad():\n    yield from []', 'SyntaxError'),
 ('def annotated_local():\n    value: int\n    return value\nannotated_local()', 'UnboundLocalError'),
+('def generic_missing[T]():\n    print(T)\n    T=1\ngeneric_missing()', 'UnboundLocalError'),
 ('1 in 2', 'TypeError'),
 ('1 in "123"', 'TypeError'),
 ('[hidden for hidden in range(2)]\nprint(hidden)', 'NameError'),

@@ -33,11 +33,17 @@ pub enum StmtKind {
     AugAssign(Target, BinaryOp, Expr),
     DeleteTargets(Vec<Target>),
     Expr(Expr),
+    TypeAlias {
+        name: SymbolId,
+        type_params: Vec<TypeParam>,
+        value: Expr,
+    },
     Function {
         name: SymbolId,
         label: String,
         is_async: bool,
         decorators: Vec<Expr>,
+        type_params: Vec<TypeParam>,
         params: Parameters,
         returns: Option<Expr>,
         body: Vec<Stmt>,
@@ -48,6 +54,7 @@ pub enum StmtKind {
         class_cell: SymbolId,
         label: String,
         decorators: Vec<Expr>,
+        type_params: Vec<TypeParam>,
         bases: Vec<Expr>,
         metaclass: Option<(SymbolId, Expr)>,
         body: Vec<Stmt>,
@@ -90,6 +97,18 @@ pub enum StmtKind {
     Break,
     Continue,
     Pass,
+}
+#[derive(Clone, Debug)]
+pub struct TypeParam {
+    pub name: SymbolId,
+    pub kind: TypeParamKind,
+    pub span: Span,
+}
+#[derive(Clone, Debug)]
+pub enum TypeParamKind {
+    TypeVar { bound: Option<Expr> },
+    ParamSpec,
+    TypeVarTuple,
 }
 #[derive(Clone, Debug)]
 pub struct MatchCase {

@@ -200,6 +200,13 @@ pub(crate) enum Builtin {
     TypeSetAttr,
     TypeDelAttr,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TypeParameterKind {
+    TypeVar,
+    ParamSpec,
+    TypeVarTuple,
+}
+
 #[derive(Debug)]
 pub(crate) enum Object {
     Class(Box<crate::classes::Class>),
@@ -262,6 +269,21 @@ pub(crate) enum Object {
         captures: Vec<Value>,
         defaults: Vec<Value>,
         annotations: Option<Value>,
+        type_params: Option<Value>,
+    },
+    TypeParam {
+        name: String,
+        kind: TypeParameterKind,
+        bound: Option<Value>,
+    },
+    TypeAlias {
+        name: String,
+        type_params: Value,
+        value: Value,
+    },
+    GenericAlias {
+        origin: Value,
+        args: Value,
     },
     Generator(GeneratorFrame),
     CoroutineIterator {
@@ -418,6 +440,7 @@ impl Object {
                 captures,
                 defaults,
                 annotations,
+                type_params,
                 ..
             } => {
                 captures
@@ -425,7 +448,19 @@ impl Object {
                     .chain(defaults)
                     .copied()
                     .for_each(&mut visit);
-                annotations.iter().copied().for_each(visit);
+                annotations.iter().copied().for_each(&mut visit);
+                type_params.iter().copied().for_each(visit);
+            }
+            Self::TypeParam { bound, .. } => bound.iter().copied().for_each(visit),
+            Self::TypeAlias {
+                type_params, value, ..
+            } => {
+                visit(*type_params);
+                visit(*value);
+            }
+            Self::GenericAlias { origin, args } => {
+                visit(*origin);
+                visit(*args);
             }
             Self::Generator(frame) => {
                 visit(frame.class);
@@ -1755,6 +1790,32 @@ impl Heap {
                 self.format_depth(*step, true, path)?
             ),
             Object::Function { .. } => "<function>".into(),
+            Object::TypeParam { name, .. } | Object::TypeAlias { name, .. } => name.clone(),
+            Object::GenericAlias { origin, args } => {
+                let origin = match self.get(*origin)? {
+                    Object::Class(class) => class.name.clone(),
+                    Object::TypeAlias { name, .. } => name.clone(),
+                    _ => self.format_depth(*origin, true, path)?,
+                };
+                let Object::Tuple(arguments) = self.get(*args)? else {
+                    return Err(Diagnostic::new(
+                        "BytecodeError",
+                        "invalid generic alias args",
+                    ));
+                };
+                let mut text = format!("{origin}[");
+                for (index, argument) in arguments.iter().enumerate() {
+                    if index != 0 {
+                        text.push_str(", ");
+                    }
+                    match self.get(*argument) {
+                        Ok(Object::Class(class)) => text.push_str(&class.name),
+                        _ => text.push_str(&self.format_depth(*argument, true, path)?),
+                    }
+                }
+                text.push(']');
+                text
+            }
             Object::Generator(frame) => match frame.kind {
                 GeneratorKind::Generator => "<generator object>".into(),
                 GeneratorKind::Coroutine => "<coroutine object>".into(),
@@ -2308,6 +2369,7 @@ impl Object {
                 Self::Function {
                     captures, defaults, ..
                 } => (captures.capacity() + defaults.capacity()) * 8,
+                Self::TypeParam { name, .. } | Self::TypeAlias { name, .. } => name.capacity(),
                 Self::Generator(frame) => frame.payload_bytes(),
                 Self::AsyncFuture(future) => {
                     (future.waiters.capacity() + future.callbacks.capacity())
