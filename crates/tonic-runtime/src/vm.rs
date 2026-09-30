@@ -964,6 +964,7 @@ pub(super) struct IndexConversion {
 pub(super) enum IndexContinuation {
     Length,
     Truth(TruthAction),
+    Round { value: Value },
     Range(RangeConstruction),
     IntBase(IntBaseConversion),
     GetItem { owner: Value },
@@ -1541,6 +1542,7 @@ impl IndexContinuation {
         match self {
             Self::Length => {}
             Self::Truth(action) => action.trace(visit),
+            Self::Round { value } => visit(*value),
             Self::Range(state) => state.values[..state.count].iter().copied().for_each(visit),
             Self::IntBase(state) => {
                 visit(state.argument);
@@ -1706,6 +1708,7 @@ impl Vm {
             ("hash", Builtin::Hash),
             ("abs", Builtin::Abs),
             ("divmod", Builtin::DivMod),
+            ("round", Builtin::Round),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
@@ -2209,6 +2212,13 @@ impl Vm {
         ] {
             let value = vm.heap.alloc(Object::Builtin(builtin))?;
             vm.heap.set_attr(class, "__hash__", value)?;
+        }
+        for (class, builtin) in [
+            (vm.runtime_types.int, Builtin::IntRound),
+            (vm.runtime_types.float, Builtin::FloatRound),
+        ] {
+            let value = vm.heap.alloc(Object::Builtin(builtin))?;
+            vm.heap.set_attr(class, "__round__", value)?;
         }
         for class in [
             vm.runtime_types.list,

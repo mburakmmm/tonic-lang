@@ -190,6 +190,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__neg__"
                 | "__pos__"
                 | "__abs__"
+                | "__round__"
                 | "__invert__"
                 | "__int__"
                 | "__float__"
@@ -1309,6 +1310,8 @@ impl Heap {
                 | Builtin::StrHash
                 | Builtin::TupleHash
                 | Builtin::RangeHash
+                | Builtin::IntRound
+                | Builtin::FloatRound
                 | Builtin::ListInit
                 | Builtin::DictInit
                 | Builtin::GeneratorIter
@@ -1378,6 +1381,8 @@ impl Heap {
                 | Builtin::TypeSetAttr
                 | Builtin::TypeDelAttr
                 | Builtin::ObjectInit
+                | Builtin::IntRound
+                | Builtin::FloatRound
                 | Builtin::ListInit
                 | Builtin::DictInit
                 | Builtin::GeneratorIter
@@ -1429,6 +1434,48 @@ impl Heap {
             }),
         }
     }
+
+    /// Bind an attribute stored on the canonical class of an immediate or
+    /// native-layout value. Those values do not carry `instance_class()` in
+    /// their object representation, so the VM supplies the runtime class.
+    pub(crate) fn native_attribute_getter(
+        &mut self,
+        owner: Value,
+        owner_class: Value,
+        name: &str,
+    ) -> Result<Option<DescriptorAccess>> {
+        let Some(descriptor) = self.class_lookup(owner_class, name)? else {
+            return Ok(None);
+        };
+        if let Ok(Object::Property { getter, .. }) = self.get(descriptor) {
+            let getter = getter.ok_or_else(|| missing(name))?;
+            return Ok(Some(DescriptorAccess::Call {
+                callable: getter,
+                receiver: Some(owner),
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            }));
+        }
+        if let Ok(descriptor_object) = self.get(descriptor) {
+            if let Some(descriptor_class) = descriptor_object.instance_class() {
+                if let Some(getter) = self.class_lookup(descriptor_class, "__get__")? {
+                    let call = self.descriptor_callable(getter, descriptor, descriptor_class)?;
+                    return Ok(Some(DescriptorAccess::Call {
+                        callable: call.callable,
+                        receiver: call.receiver,
+                        positional: [owner, owner_class, Value::UNBOUND],
+                        count: 2,
+                    }));
+                }
+            }
+        }
+        Ok(Some(DescriptorAccess::Value(self.bind_descriptor(
+            descriptor,
+            Some(owner),
+            owner_class,
+        )?)))
+    }
+
     pub fn attr(&mut self, owner: Value, name: &str) -> Result<Value> {
         let annotation_function = (name == "__annotations__")
             .then(|| match self.get(owner) {

@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 52,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 361 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 53,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 363 test.
 
-Differential corpus: 322 stdout vakası ve 183 exception türü vakası. Seed 42.
-`divmod` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 323 stdout vakası ve 194 exception türü vakası. Seed 42.
+`round` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -502,6 +502,14 @@ subclass `__rdivmod__` önceliği, `NotImplemented` fallback'i ve metaclass
 dispatch'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
 Python 3.14 differential vakaları aynı gözlenebilir sonuçları; sıfıra bölme,
 desteklenmeyen operand ve yanlış arity hata sınıflarını karşılaştırır.
+
+`round` testi global keyword binder'ını, doğrudan int/float `__round__`
+descriptor'larını, suspending kullanıcı/metaclass hook'unu ve `__index__`
+dönüşümünü interpreter/JIT-caller × allocation-stress GC altında doğrular.
+Exact ratio motoru decimal ties-to-even, bigint negatif basamak, signed zero,
+NaN/infinity ve overflow sınırlarını kapsar. Kalıcı Python 3.14 vakalarına ek
+olarak seed'li 5.000 finite-f64/basamak ve 1.000 bigint/basamak birleşimi
+CPython'ın ürettiği sonuçlarla sıfır değer farkı vermiştir.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

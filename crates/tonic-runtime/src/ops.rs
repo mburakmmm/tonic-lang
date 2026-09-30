@@ -19,6 +19,44 @@ fn zero() -> Diagnostic {
 const MAX_INTEGER_RESULT_BITS: u64 = 1 << 26;
 
 impl Heap {
+    pub fn round(&mut self, value: Value, ndigits: Option<BigInt>) -> Result<Value> {
+        if let Some(boolean) = value.as_bool() {
+            return self.round_integer(BigInt::from(i64::from(boolean)), ndigits);
+        }
+        if self.is_integer(value) {
+            return self.round_integer(self.integer(value)?, ndigits);
+        }
+        if self.is_float(value) {
+            let value = self.float(value)?;
+            return match ndigits {
+                Some(ndigits) => {
+                    self.alloc(Object::Float(crate::number::round_float(value, &ndigits)?))
+                }
+                None => self.int(crate::number::round_float_to_integer(value)?),
+            };
+        }
+        Err(type_error())
+    }
+
+    fn round_integer(&mut self, value: BigInt, ndigits: Option<BigInt>) -> Result<Value> {
+        let Some(ndigits) = ndigits else {
+            return self.int(value);
+        };
+        if !ndigits.is_negative() || value.is_zero() {
+            return self.int(value);
+        }
+        let places = -ndigits;
+        if places > BigInt::from(value.bits().saturating_add(1)) {
+            return self.int(BigInt::zero());
+        }
+        let places = places
+            .to_u32()
+            .ok_or_else(|| Diagnostic::new("MemoryError", "round precision is too large"))?;
+        let scale = BigInt::from(10).pow(places);
+        let rounded = crate::number::round_ratio(&value, &scale) * scale;
+        self.int(rounded)
+    }
+
     pub fn divmod(&mut self, a: Value, b: Value) -> Result<Value> {
         let quotient = self.binary(Op::FloorDiv, a, b)?;
         let remainder = self.binary(Op::Mod, a, b)?;

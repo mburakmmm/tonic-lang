@@ -50,7 +50,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | VM | 8-byte register instructions, verifier, yeniden kullanılan geçici registerlar, açık frame stack, fuel/recursion limitleri |
 | Interop | ABI v1 C table/panic guard; typed buffer; callback/reentry; foreign wrapper/vtable, precise trace ve deferred exactly-once destructor; staged shutdown |
 | Sınıflar | class scope, `__init__`, bound/unbound metot, private mangling, C3 multiple inheritance, class attribute rebinding |
-| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; operator ve `divmod` dispatch; conversion, range, index/slice ve length için askıya alınabilir `__int__`/`__float__`/`__index__`; class MRO lookup ve VM continuation |
+| Özel protokoller | instance `__call__`, `__len__`, `__bool__`; operator, `divmod` ve exact `round` dispatch; conversion, range, index/slice ve length için askıya alınabilir `__int__`/`__float__`/`__index__`; class MRO lookup ve VM continuation |
 | Decorator/descriptor dilimi | function/class decorators, `staticmethod`, `classmethod`, property, custom `__get__/__set__/__delete__`, otomatik `__set_name__`, metaclass seçimi ve `__prepare__/__new__/__init__` zinciri |
 | M3 | class/instance, ortak shapes + slotlar, dictionary fallback, canlı mappingproxy ve canonical builtin type nesneleri |
 | Bellek | precise generational tracing, nursery/old ayrımı, write barrier, remembered set, cycle collection, compaction ve stress GC |
@@ -64,10 +64,10 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
 | Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
 
-Aritmetik: `+ - * / // %`, `divmod` ve bunların desteklenen tiplerde augmented assignment
+Aritmetik: `+ - * / // %`, `divmod`, `round` ve bunların desteklenen tiplerde augmented assignment
 biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
 `and/or` operand döndürür ve kısa devre yapar. Builtin isimleri yeniden bağlanabilir.
-`print`, `range`, `len`, `abs`, `divmod`, `object`, `isinstance`, `issubclass`, `getattr`,
+`print`, `range`, `len`, `abs`, `divmod`, `round`, `object`, `isinstance`, `issubclass`, `getattr`,
 `setattr`, `hasattr` sağlanır. Type-check builtin'lerinin classinfo argümanı
 Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlardan
 oluşan tuple'ları kabul eder. `object.__init__`, int/bool/float/str/list/tuple/
@@ -95,7 +95,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 361 Rust testi ile 322 stdout ve 183 exception türü
+Güncel yerel matris 363 Rust testi ile 323 stdout ve 194 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile

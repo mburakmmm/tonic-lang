@@ -1163,6 +1163,68 @@ print(divmod(Maybe(),Reverse()),divmod(C,4))"#;
 }
 
 #[test]
+fn round_protocol_is_exact_suspendable_and_index_aware() {
+    let source = r#"class Digits:
+    def __index__(self):
+        total=0
+        for i in range(20): total+=i
+        return 2
+class Rounded:
+    def __round__(self,ndigits='missing'):
+        total=0.0
+        for i in range(20): total+=0.5
+        return ('rounded',ndigits,total)
+class FloatChild(float):
+    def __round__(self,ndigits='missing'): return ('float-child',ndigits)
+class Meta(type):
+    def __round__(cls,ndigits='missing'): return ('meta',cls.__name__,ndigits)
+class C(metaclass=Meta): pass
+print(round(2.675,2),round(1.005,2),round(0.045,2))
+print(round(2.5),round(3.5),round(-2.5),round(25.0,-1),round(35.0,-1))
+print(round(12345,-2),round(1250,-2),round(1350,-2),round(-1250,-2))
+print(round(-2.5,-400),round(2.5,400),round(2.675,Digits()))
+print(round(Rounded()),round(Rounded(),None),round(number=Rounded(),ndigits=3))
+print(round(FloatChild(2.5)),round(C),round(C,2))
+print(round(**{'number':2.675,'ndigits':2}))
+print((125).__round__(-1),(2.675).__round__(2),int.__round__(1350,-2),float.__round__(1.005,2))"#;
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&compile(source, "round-protocol").unwrap(), &mut output)
+            .unwrap();
+        assert_eq!(
+            output,
+            b"2.67 1.0 0.04\n2 4 -2 20.0 40.0\n12300 1200 1400 -1200\n-0.0 2.5 2.67\n('rounded', 'missing', 10.0) ('rounded', 'missing', 10.0) ('rounded', 3, 10.0)\n('float-child', 'missing') ('meta', 'C', 'missing') ('meta', 'C', 2)\n2.67\n120 2.67 1400 1.0\n"
+        );
+    }
+
+    for (source, kind) in [
+        ("round()", "TypeError"),
+        ("round(1,2,3)", "TypeError"),
+        ("round(1,number=2)", "TypeError"),
+        ("round(1,unknown=2)", "TypeError"),
+        ("class C: pass\nround(C())", "TypeError"),
+        (
+            "class D:\n    def __index__(self): return 1.5\nround(1.2,D())",
+            "TypeError",
+        ),
+        ("round(float('nan'))", "ValueError"),
+        ("round(float('inf'))", "OverflowError"),
+        ("round(1.7e308,-308)", "OverflowError"),
+        ("(1).__round__(ndigits=2)", "TypeError"),
+        ("float.__round__(1,2)", "TypeError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "invalid-round").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn power_bitwise_and_invert_protocols_reflect_and_suspend() {
     let source = r#"class Number:
     def __init__(self,value): self.value=value

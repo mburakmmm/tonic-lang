@@ -100,6 +100,10 @@ sonra alınır.
       tuple sonucu, suspending `__divmod__`/`__rdivmod__`, strict-subclass
       reflected önceliği, `NotImplemented`, metaclass dispatch, precise roots ve
       JIT-caller generic fallback'i.
+    - [x] `round`; keyword ve direct int/float `__round__` descriptor yüzeyi,
+      suspending kullanıcı/metaclass hook'u ve `__index__`, bigint decimal
+      yuvarlama, exact IEEE-754 ratio üzerinden ties-to-even, signed zero,
+      NaN/infinity sınırları, precise roots ve JIT-caller generic fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

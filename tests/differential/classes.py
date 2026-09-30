@@ -1578,12 +1578,41 @@ print(divmod(7,3),divmod(-7,3),divmod(7.5,2.0))
 print(divmod(Number(8),Number(3)),divmod(Number(8),Child(2)))
 print(divmod(Maybe(),Reverse()),divmod(C,4))
 ''')
+CASES.append('''class Digits:
+    def __index__(self): return 2
+class Rounded:
+    def __round__(self,ndigits='missing'): return ('rounded',ndigits)
+class FloatChild(float):
+    def __round__(self,ndigits='missing'): return ('float-child',ndigits)
+class Meta(type):
+    def __round__(cls,ndigits='missing'): return ('meta',cls.__name__,ndigits)
+class C(metaclass=Meta): pass
+print(round(2.675,2),round(1.005,2),round(0.045,2))
+print(round(2.5),round(3.5),round(-2.5),round(25.0,-1),round(35.0,-1))
+print(round(12345,-2),round(1250,-2),round(1350,-2),round(-1250,-2))
+print(round(-2.5,-400),round(2.5,400),round(2.675,Digits()))
+print(round(Rounded()),round(Rounded(),None),round(number=Rounded(),ndigits=3))
+print(round(FloatChild(2.5)),round(C),round(C,2))
+print(round(**{'number':2.675,'ndigits':2}))
+print((125).__round__(-1),(2.675).__round__(2),int.__round__(1350,-2),float.__round__(1.005,2))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
     ('divmod(1,0)', 'ZeroDivisionError'),
     ('class C: pass\ndivmod(C(),C())', 'TypeError'),
     ('divmod(1)', 'TypeError'),
+    ('round()', 'TypeError'),
+    ('round(1,2,3)', 'TypeError'),
+    ('round(1,number=2)', 'TypeError'),
+    ('round(1,unknown=2)', 'TypeError'),
+    ('class C: pass\nround(C())', 'TypeError'),
+    ('class D:\n    def __index__(self): return 1.5\nround(1.2,D())', 'TypeError'),
+    ("round(float('nan'))", 'ValueError'),
+    ("round(float('inf'))", 'OverflowError'),
+    ('round(1.7e308,-308)', 'OverflowError'),
+    ('(1).__round__(ndigits=2)', 'TypeError'),
+    ('float.__round__(1,2)', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

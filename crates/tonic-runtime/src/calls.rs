@@ -188,6 +188,14 @@ fn native_hash_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
     })
 }
 
+fn native_round_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
+    Some(match builtin {
+        Builtin::IntRound => super::RuntimeTypeKind::Int,
+        Builtin::FloatRound => super::RuntimeTypeKind::Float,
+        _ => return None,
+    })
+}
+
 impl Vm {
     fn alloc_async_generator_awaitable(
         &mut self,
@@ -1556,6 +1564,70 @@ impl Vm {
                     }
                     return Ok(());
                 }
+                if matches!(builtin, Builtin::Round) || native_round_kind(builtin).is_some() {
+                    let (value, ndigits) = if let Some(kind) = native_round_kind(builtin) {
+                        if args.keyword_count() != 0 || !(1..=2).contains(&args.count()) {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "numeric __round__ expects one or two positional arguments",
+                            ));
+                        }
+                        let value = args.positional(&self.registers, 0);
+                        let valid = match kind {
+                            super::RuntimeTypeKind::Int => {
+                                value.as_bool().is_some() || self.heap.is_integer(value)
+                            }
+                            super::RuntimeTypeKind::Float => self.heap.is_float(value),
+                            _ => unreachable!("round is only defined for int and float"),
+                        };
+                        if !valid {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "numeric __round__ received an incompatible object",
+                            ));
+                        }
+                        (
+                            value,
+                            (args.count() == 2)
+                                .then(|| args.positional(&self.registers, 1))
+                                .filter(|value| *value != Value::NONE),
+                        )
+                    } else {
+                        self.bind_round_arguments(p, &args)?
+                    };
+                    if matches!(builtin, Builtin::Round) && self.operator_protocol_capable(value) {
+                        if let Some(call) = self.operator_method_call(value, "__round__")? {
+                            let mut positional = [Value::UNBOUND; 3];
+                            let count = usize::from(ndigits.is_some());
+                            if let Some(ndigits) = ndigits {
+                                positional[0] = ndigits;
+                            }
+                            self.invoke_target(
+                                p,
+                                call.callable,
+                                destination,
+                                Arguments::Inline {
+                                    receiver: call.receiver,
+                                    positional,
+                                    count,
+                                },
+                                output,
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                    if let Some(ndigits) = ndigits {
+                        return self.invoke_index_conversion(
+                            p,
+                            ndigits,
+                            destination,
+                            super::IndexContinuation::Round { value },
+                            output,
+                        );
+                    }
+                    self.registers[destination] = self.heap.round(value, None)?;
+                    return Ok(());
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -1863,6 +1935,44 @@ impl Vm {
                         state,
                         output,
                     );
+                }
+            }
+        }
+        let native_layout = match self.heap.get(owner) {
+            Ok(object) => object.instance_parts().is_none(),
+            Err(_) => true,
+        };
+        if name == "__round__" && !class_owner && native_layout {
+            let owner_class = self.runtime_class(owner)?;
+            if owner_class != self.object_class {
+                if let Some(access) = self
+                    .heap
+                    .native_attribute_getter(owner, owner_class, name)?
+                {
+                    match access {
+                        crate::classes::DescriptorAccess::Value(value) => {
+                            self.registers[destination] = value;
+                            if let Some(state) = state.as_ref() {
+                                self.finish_attribute_success(destination, state);
+                            }
+                            return Ok(());
+                        }
+                        crate::classes::DescriptorAccess::Call {
+                            callable,
+                            receiver,
+                            positional,
+                            count,
+                        } => {
+                            return self.invoke_attribute_call(
+                                p,
+                                crate::classes::DescriptorCall { callable, receiver },
+                                destination,
+                                (positional, count),
+                                state,
+                                output,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2785,6 +2895,11 @@ impl Vm {
             super::IndexContinuation::Truth(action) => {
                 let truth = self.checked_length(value)? != 0;
                 self.apply_truth(p, destination, truth, action, output)
+            }
+            super::IndexContinuation::Round { value: number } => {
+                let ndigits = self.heap.integer(value)?;
+                self.registers[destination] = self.heap.round(number, Some(ndigits))?;
+                Ok(())
             }
             super::IndexContinuation::Range(mut state) => {
                 state.values[state.next] = value;
@@ -6320,6 +6435,44 @@ impl Vm {
         Ok(())
     }
 
+    fn bind_round_arguments(
+        &self,
+        p: &Program,
+        args: &Arguments<'_>,
+    ) -> Result<(Value, Option<Value>)> {
+        if args.count() > 2 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "round expects at most two arguments",
+            ));
+        }
+        let mut number = (args.count() >= 1).then(|| args.positional(&self.registers, 0));
+        let mut ndigits = (args.count() >= 2).then(|| args.positional(&self.registers, 1));
+        for index in 0..args.keyword_count() {
+            let (name, value) = args.keyword(p, &self.registers, index);
+            let slot = match name {
+                "number" => &mut number,
+                "ndigits" => &mut ndigits,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("round got an unexpected keyword argument '{name}'"),
+                    ))
+                }
+            };
+            if slot.replace(value).is_some() {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    format!("round got multiple values for argument '{name}'"),
+                ));
+            }
+        }
+        let number = number.ok_or_else(|| {
+            Diagnostic::new("TypeError", "round missing required argument 'number'")
+        })?;
+        Ok((number, ndigits.filter(|value| *value != Value::NONE)))
+    }
+
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -6398,7 +6551,9 @@ impl Vm {
             | Builtin::RangeHash => {
                 unreachable!("hash builtin has a suspending call path")
             }
-            Builtin::DivMod => unreachable!("divmod builtin has a suspending call path"),
+            Builtin::DivMod | Builtin::Round | Builtin::IntRound | Builtin::FloatRound => {
+                unreachable!("numeric builtin has a suspending call path")
+            }
             Builtin::ObjectNew => {
                 if count != 1 || args.keyword_count() != 0 {
                     return Err(Diagnostic::new(

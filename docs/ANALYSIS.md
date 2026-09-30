@@ -529,6 +529,21 @@ mevcut kesin kök modelini paylaşır. Kullanıcı hook'u bulunmazsa native yol 
 Builtin çağrı JIT içinden geldiğinde exact caller PC'sinde generic VM yoluna
 çıkar; dönüşte aynı native caller'a güvenle devam eder.
 
+`round` da bytecode yüzeyini büyütmeden versioned builtin çağrı sınırında kalır.
+Global binder `number`/`ndigits` positional ve keyword biçimlerini tek kez bağlar;
+kullanıcı veya metaclass `__round__` normal VM frame'inde askıya alınabilir.
+Native int/float ve bunların alt sınıflarında canonical `__round__` descriptor'ı
+aynı motoru kullanır; native `ndigits` dönüşümü mevcut suspending `__index__`
+continuation'ına `number` değerini kesin kök olarak ekler.
+
+Float yuvarlama host `round()` fonksiyonuna veya ikili kayan noktalı `x*10^n`
+yaklaşımına dayanmaz. IEEE-754 değeri exact BigInt oranına açılır, decimal ölçek
+üzerinde quotient/remainder ile ties-to-even seçilir ve mevcut correctly-rounded
+ratio→binary64 yordamıyla tekrar f64'e çevrilir. Bu yol `2.675`, subnormal,
+signed-zero ve overflow sınırlarını aynı kuralla taşır; bigint negatif basamaklar
+da aynı exact ratio yuvarlayıcısını paylaşır. JIT caller builtin çağrıda exact
+PC'den generic VM'e çıkar ve dönüşte native yürütmeye devam eder.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |
