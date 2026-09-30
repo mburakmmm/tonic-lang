@@ -869,9 +869,14 @@ pub(super) struct BinaryCandidate {
     argument: Value,
     negate: bool,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BinaryProtocolKind {
+    Opcode(Op),
+    DivMod,
+}
 #[derive(Clone)]
 pub(super) struct BinaryProtocol {
-    op: Op,
+    kind: BinaryProtocolKind,
     left: Value,
     right: Value,
     candidates: Vec<BinaryCandidate>,
@@ -1700,6 +1705,7 @@ impl Vm {
             ("next", Builtin::Next),
             ("hash", Builtin::Hash),
             ("abs", Builtin::Abs),
+            ("divmod", Builtin::DivMod),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),

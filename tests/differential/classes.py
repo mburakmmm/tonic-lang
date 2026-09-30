@@ -1562,9 +1562,28 @@ class Generic[T]:
     def __class_getitem__(cls,key): return 'custom-'+cls.__name__+str(key)
 print(Plain[1],Wrapped[2],Child[3],Both[4],Generic[5])
 ''')
+CASES.append('''class Number:
+    def __init__(self,value): self.value=value
+    def __divmod__(self,other): return ('direct',self.value,other.value)
+class Child(Number):
+    def __rdivmod__(self,other): return ('child',other.value,self.value)
+class Maybe:
+    def __divmod__(self,other): return NotImplemented
+class Reverse:
+    def __rdivmod__(self,other): return ('reverse',type(other).__name__)
+class Meta(type):
+    def __divmod__(cls,other): return ('meta',cls.__name__,other)
+class C(metaclass=Meta): pass
+print(divmod(7,3),divmod(-7,3),divmod(7.5,2.0))
+print(divmod(Number(8),Number(3)),divmod(Number(8),Child(2)))
+print(divmod(Maybe(),Reverse()),divmod(C,4))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
+    ('divmod(1,0)', 'ZeroDivisionError'),
+    ('class C: pass\ndivmod(C(),C())', 'TypeError'),
+    ('divmod(1)', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

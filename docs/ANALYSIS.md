@@ -520,6 +520,15 @@ Kullanıcı hook'u frame askıya alabildiği için receiver/key normal VM regist
 kökleri olarak moving GC altında korunur; `ITEM` Cranelift'te generic fallback'te
 kalır.
 
+`divmod` ayrı bir sentetik bytecode opkodu üretmeden builtin çağrı yolunda
+çalışır. Ortak suspending binary-protocol continuation'ı opcode tabanlı işlemler
+ile `DivMod` işlemini ayıran kapalı bir kind taşır; böylece `__divmod__` ve
+`__rdivmod__` strict-subclass sırası, `NotImplemented` ve metaclass dispatch için
+mevcut kesin kök modelini paylaşır. Kullanıcı hook'u bulunmazsa native yol önce
+`FloorDiv`, sonra `Mod` semantiğini çalıştırıp iki sonucu managed tuple'a koyar.
+Builtin çağrı JIT içinden geldiğinde exact caller PC'sinde generic VM yoluna
+çıkar; dönüşte aynı native caller'a güvenle devam eder.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

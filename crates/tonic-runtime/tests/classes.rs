@@ -1117,6 +1117,52 @@ print(C @ '!')"#;
 }
 
 #[test]
+fn divmod_protocol_suspends_reflects_and_matches_native_numbers() {
+    let source = r#"class Number:
+    def __init__(self,value): self.value=value
+    def __divmod__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return ('direct',self.value,other.value)
+class Child(Number):
+    def __rdivmod__(self,other): return ('child',other.value,self.value)
+class Maybe:
+    def __divmod__(self,other): return NotImplemented
+class Reverse:
+    def __rdivmod__(self,other): return ('reverse',type(other).__name__)
+class Meta(type):
+    def __divmod__(cls,other): return ('meta',cls.__name__,other)
+class C(metaclass=Meta): pass
+print(divmod(7,3),divmod(-7,3),divmod(7.5,2.0))
+print(divmod(Number(8),Number(3)),divmod(Number(8),Child(2)))
+print(divmod(Maybe(),Reverse()),divmod(C,4))"#;
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&compile(source, "divmod-protocol").unwrap(), &mut output)
+            .unwrap();
+        assert_eq!(
+            output,
+            b"(2, 1) (-3, 2) (3.0, 1.5)\n('direct', 8, 3) ('child', 8, 2)\n('reverse', 'Maybe') ('meta', 'C', 4)\n"
+        );
+    }
+
+    for (source, kind) in [
+        ("divmod(1,0)", "ZeroDivisionError"),
+        ("class C: pass\ndivmod(C(),C())", "TypeError"),
+        ("divmod(1)", "TypeError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "invalid-divmod").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn power_bitwise_and_invert_protocols_reflect_and_suspend() {
     let source = r#"class Number:
     def __init__(self,value): self.value=value

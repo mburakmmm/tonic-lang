@@ -159,6 +159,8 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__mod__"
                 | "__rmod__"
                 | "__imod__"
+                | "__divmod__"
+                | "__rdivmod__"
                 | "__pow__"
                 | "__rpow__"
                 | "__ipow__"

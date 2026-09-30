@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 51,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 360 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 52,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 361 test.
 
-Differential corpus: 321 stdout vakası ve 180 exception türü vakası. Seed 42.
-Class-subscription diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 322 stdout vakası ve 183 exception türü vakası. Seed 42.
+`divmod` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -496,6 +496,12 @@ receiver'ını, generic class override'ını ve hook yokken managed `GenericAlia
 fallback'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
 Python 3.14 differential vakası aynı gözlenebilir çağrı sırasını; hata vakası
 callable olmayan hook'un TypeError sınırını karşılaştırır.
+
+`divmod` testi native int/float sonuçlarını, suspending `__divmod__`, strict
+subclass `__rdivmod__` önceliği, `NotImplemented` fallback'i ve metaclass
+dispatch'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
+Python 3.14 differential vakaları aynı gözlenebilir sonuçları; sıfıra bölme,
+desteklenmeyen operand ve yanlış arity hata sınıflarını karşılaştırır.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

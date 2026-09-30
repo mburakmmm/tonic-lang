@@ -164,6 +164,7 @@ pub(crate) enum Builtin {
     AsyncioTaskAddDoneCallback,
     Hash,
     Abs,
+    DivMod,
     IsInstance,
     IsSubclass,
     GetAttr,

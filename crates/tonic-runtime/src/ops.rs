@@ -19,6 +19,12 @@ fn zero() -> Diagnostic {
 const MAX_INTEGER_RESULT_BITS: u64 = 1 << 26;
 
 impl Heap {
+    pub fn divmod(&mut self, a: Value, b: Value) -> Result<Value> {
+        let quotient = self.binary(Op::FloorDiv, a, b)?;
+        let remainder = self.binary(Op::Mod, a, b)?;
+        self.alloc(Object::Tuple(vec![quotient, remainder]))
+    }
+
     pub fn inplace_add(&mut self, a: Value, b: Value) -> Result<Value> {
         let storage = self.native_value(a);
         // Probe tags without constructing a TypeError on immediate arithmetic.

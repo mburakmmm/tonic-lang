@@ -1540,6 +1540,22 @@ impl Vm {
                         output,
                     );
                 }
+                if matches!(builtin, Builtin::DivMod) {
+                    if args.keyword_count() != 0 || args.count() != 2 {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "divmod expects two positional arguments",
+                        ));
+                    }
+                    let left = args.positional(&self.registers, 0);
+                    let right = args.positional(&self.registers, 1);
+                    if let Some(state) = self.divmod_protocol(left, right)? {
+                        self.continue_binary_protocol(p, destination, state, output)?;
+                    } else {
+                        self.registers[destination] = self.heap.divmod(left, right)?;
+                    }
+                    return Ok(());
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -2376,6 +2392,43 @@ impl Vm {
             Op::Ge => (None, "__ge__", "__le__"),
             _ => return Ok(None),
         };
+        self.binary_protocol_candidates(
+            super::BinaryProtocolKind::Opcode(op),
+            left,
+            right,
+            inplace,
+            direct,
+            reflected,
+        )
+    }
+
+    pub(super) fn divmod_protocol(
+        &self,
+        left: Value,
+        right: Value,
+    ) -> Result<Option<super::BinaryProtocol>> {
+        if !self.operator_protocol_capable(left) && !self.operator_protocol_capable(right) {
+            return Ok(None);
+        }
+        self.binary_protocol_candidates(
+            super::BinaryProtocolKind::DivMod,
+            left,
+            right,
+            None,
+            "__divmod__",
+            "__rdivmod__",
+        )
+    }
+
+    fn binary_protocol_candidates(
+        &self,
+        kind: super::BinaryProtocolKind,
+        left: Value,
+        right: Value,
+        inplace: Option<&str>,
+        direct: &str,
+        reflected: &str,
+    ) -> Result<Option<super::BinaryProtocol>> {
         let mut candidates = Vec::with_capacity(3);
         if let Some(inplace) = inplace {
             if let Some(call) = self.operator_method_call(left, inplace)? {
@@ -2415,7 +2468,7 @@ impl Vm {
             push(left_call, right, false);
             push(right_call, left, false);
         }
-        if op == Op::Ne {
+        if kind == super::BinaryProtocolKind::Opcode(tonic_core::bytecode::Op::Ne) {
             let left_eq = self.operator_method_call(left, "__eq__")?;
             let right_eq = if left_class == right_class {
                 None
@@ -2431,7 +2484,7 @@ impl Vm {
             }
         }
         Ok((!candidates.is_empty()).then_some(super::BinaryProtocol {
-            op,
+            kind,
             left,
             right,
             candidates,
@@ -2491,21 +2544,23 @@ impl Vm {
                 output,
             );
         }
-        self.registers[destination] = match state.op {
-            tonic_core::bytecode::Op::InplaceAdd => {
+        self.registers[destination] = match state.kind {
+            super::BinaryProtocolKind::Opcode(tonic_core::bytecode::Op::InplaceAdd) => {
                 self.heap.inplace_add(state.left, state.right)?
             }
-            tonic_core::bytecode::Op::Eq
-            | tonic_core::bytecode::Op::Ne
-            | tonic_core::bytecode::Op::Lt
-            | tonic_core::bytecode::Op::Le
-            | tonic_core::bytecode::Op::Gt
-            | tonic_core::bytecode::Op::Ge => {
-                self.heap.compare(state.op, state.left, state.right)?
+            super::BinaryProtocolKind::Opcode(
+                op @ (tonic_core::bytecode::Op::Eq
+                | tonic_core::bytecode::Op::Ne
+                | tonic_core::bytecode::Op::Lt
+                | tonic_core::bytecode::Op::Le
+                | tonic_core::bytecode::Op::Gt
+                | tonic_core::bytecode::Op::Ge),
+            ) => self.heap.compare(op, state.left, state.right)?,
+            super::BinaryProtocolKind::Opcode(op) => {
+                self.heap
+                    .binary(super::base_binary_op(op), state.left, state.right)?
             }
-            _ => self
-                .heap
-                .binary(super::base_binary_op(state.op), state.left, state.right)?,
+            super::BinaryProtocolKind::DivMod => self.heap.divmod(state.left, state.right)?,
         };
         Ok(())
     }
@@ -6343,6 +6398,7 @@ impl Vm {
             | Builtin::RangeHash => {
                 unreachable!("hash builtin has a suspending call path")
             }
+            Builtin::DivMod => unreachable!("divmod builtin has a suspending call path"),
             Builtin::ObjectNew => {
                 if count != 1 || args.keyword_count() != 0 {
                     return Err(Diagnostic::new(

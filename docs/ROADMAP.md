@@ -96,6 +96,10 @@ sonra alınır.
     - [x] `@` ve `@=`; suspending `__matmul__`/`__rmatmul__`/`__imatmul__`, strict
       subclass önceliği, `NotImplemented` ve in-place fallback, metaclass
       dispatch, bytecode v32 doğrulaması ve Cranelift generic-tier fallback'i.
+    - [x] `divmod`; native int/float floor-division ve modulo çiftinin managed
+      tuple sonucu, suspending `__divmod__`/`__rdivmod__`, strict-subclass
+      reflected önceliği, `NotImplemented`, metaclass dispatch, precise roots ve
+      JIT-caller generic fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.
