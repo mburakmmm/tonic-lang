@@ -2348,6 +2348,8 @@ impl Vm {
             Op::InplaceSub => (Some("__isub__"), "__sub__", "__rsub__"),
             Op::Mul => (None, "__mul__", "__rmul__"),
             Op::InplaceMul => (Some("__imul__"), "__mul__", "__rmul__"),
+            Op::MatMul => (None, "__matmul__", "__rmatmul__"),
+            Op::InplaceMatMul => (Some("__imatmul__"), "__matmul__", "__rmatmul__"),
             Op::Div => (None, "__truediv__", "__rtruediv__"),
             Op::InplaceDiv => (Some("__itruediv__"), "__truediv__", "__rtruediv__"),
             Op::FloorDiv => (None, "__floordiv__", "__rfloordiv__"),

@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 31;
+pub const BYTECODE_VERSION: u16 = 32;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -115,6 +115,8 @@ pub enum Op {
     FormatValue = 120,
     TypeParam = 121,
     TypeAlias = 122,
+    MatMul = 123,
+    InplaceMatMul = 124,
 }
 impl TryFrom<u16> for Op {
     type Error = Diagnostic;
@@ -227,6 +229,8 @@ impl TryFrom<u16> for Op {
             120 => Self::FormatValue,
             121 => Self::TypeParam,
             122 => Self::TypeAlias,
+            123 => Self::MatMul,
+            124 => Self::InplaceMatMul,
             _ => {
                 return Err(Diagnostic::new(
                     "BytecodeError",
@@ -762,6 +766,8 @@ impl Program {
                     | Op::InplaceBitAnd
                     | Op::InplaceLeftShift
                     | Op::InplaceRightShift
+                    | Op::MatMul
+                    | Op::InplaceMatMul
                     | Op::Item
                     | Op::SetItem
                     | Op::MatchKey

@@ -1058,11 +1058,12 @@ impl Adapter {
             ExprKind::Constant(_) | ExprKind::Name(_) => false,
         }
     }
-    fn binary(op: py::Operator, s: Span) -> Result<BinaryOp> {
+    fn binary(op: py::Operator, _s: Span) -> Result<BinaryOp> {
         Ok(match op {
             py::Operator::Add => BinaryOp::Add,
             py::Operator::Sub => BinaryOp::Subtract,
             py::Operator::Mult => BinaryOp::Multiply,
+            py::Operator::MatMult => BinaryOp::MatrixMultiply,
             py::Operator::Pow => BinaryOp::Power,
             py::Operator::BitOr => BinaryOp::BitOr,
             py::Operator::BitXor => BinaryOp::BitXor,
@@ -1072,7 +1073,6 @@ impl Adapter {
             py::Operator::FloorDiv => BinaryOp::FloorDivide,
             py::Operator::Mod => BinaryOp::Modulo,
             py::Operator::Div => BinaryOp::Divide,
-            py::Operator::MatMult => return Err(unsupported(s, "matrix multiplication")),
         })
     }
     fn compare(op: py::CmpOp, _s: Span) -> Result<CompareOp> {

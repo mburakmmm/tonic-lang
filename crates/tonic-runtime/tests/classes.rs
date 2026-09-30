@@ -1036,6 +1036,51 @@ print(C*'!')"#;
 }
 
 #[test]
+fn matrix_multiplication_protocols_suspend_reflect_and_fallback() {
+    let source = r#"class Matrix:
+    def __init__(self,value): self.value=value
+    def __matmul__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return self.value+other.value
+class Child(Matrix):
+    def __rmatmul__(self,other): return other.value+100+ self.value
+class Reverse:
+    def __rmatmul__(self,other): return 77
+class Maybe:
+    def __matmul__(self,other): return NotImplemented
+class InPlace:
+    def __imatmul__(self,other): return NotImplemented
+    def __matmul__(self,other): return 88
+left=Matrix(10)
+print(left @ Matrix(2),left @ Child(3),Maybe() @ Reverse())
+value=InPlace(); value @= 1; print(value)
+class Meta(type):
+    def __matmul__(cls,other): return cls.__name__+other
+class C(metaclass=Meta): pass
+print(C @ '!')"#;
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut output = Vec::new();
+    vm.run(
+        &compile(source, "matrix-multiplication-protocols").unwrap(),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, b"12 113 77\n88\nC!\n");
+
+    let error = Vm::new()
+        .unwrap()
+        .run(
+            &compile("1 @ 2", "invalid-matrix-multiplication").unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, "TypeError");
+}
+
+#[test]
 fn power_bitwise_and_invert_protocols_reflect_and_suspend() {
     let source = r#"class Number:
     def __init__(self,value): self.value=value

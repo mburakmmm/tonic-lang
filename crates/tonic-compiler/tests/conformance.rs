@@ -1,8 +1,8 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
     ast::{
-        CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind, Target,
-        TypeParamKind,
+        BinaryOp, CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind,
+        Target, TypeParamKind,
     },
     bytecode::Op,
 };
@@ -500,6 +500,33 @@ fn type_parameters_and_aliases_are_owned_and_lowered() {
         .find(|code| code.name.ends_with("identity"))
         .unwrap();
     assert_eq!(identity.type_params.len(), 3);
+    program.program().clone().verify().unwrap();
+}
+
+#[test]
+fn matrix_multiplication_is_owned_and_lowered() {
+    let source = "result = left @ right\nresult @= next_value\n";
+    let ast = parse(source, "matrix-multiplication").unwrap();
+    let StmtKind::Assign(_, value) = &ast.body[0].kind else {
+        panic!("matrix assignment")
+    };
+    assert!(matches!(
+        value.kind,
+        ExprKind::Binary(_, BinaryOp::MatrixMultiply, _)
+    ));
+    assert!(matches!(
+        ast.body[1].kind,
+        StmtKind::AugAssign(_, BinaryOp::MatrixMultiply, _)
+    ));
+
+    let program = compile(source, "matrix-multiplication").unwrap();
+    let operations = program.program().code[0]
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    assert!(operations.contains(&Op::MatMul));
+    assert!(operations.contains(&Op::InplaceMatMul));
     program.program().clone().verify().unwrap();
 }
 

@@ -296,6 +296,7 @@ pub enum BinaryOp {
     Add,
     Subtract,
     Multiply,
+    MatrixMultiply,
     Power,
     BitOr,
     BitXor,

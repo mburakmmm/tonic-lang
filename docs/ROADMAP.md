@@ -90,6 +90,9 @@ sonra alınır.
       protokoller, bool/int/BigInt semantiği, negatif shift ve sıfırın negatif
       kuvveti tanıları, büyük sonuç kaynak sınırı, bytecode v13 doğrulaması ve
       Cranelift desteklenmeyen-op interpreter fallback'i.
+    - [x] `@` ve `@=`; suspending `__matmul__`/`__rmatmul__`/`__imatmul__`, strict
+      subclass önceliği, `NotImplemented` ve in-place fallback, metaclass
+      dispatch, bytecode v32 doğrulaması ve Cranelift generic-tier fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

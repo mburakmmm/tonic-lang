@@ -3811,6 +3811,23 @@ mod tests {
     }
 
     #[test]
+    fn matrix_multiplication_stays_in_the_generic_runtime() {
+        let program = function("def product(left,right):\n    return left @ right");
+        let code = &program.program().code[1];
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::MatMul)));
+        assert!(matches!(
+            compile(code),
+            Err(Error::Unsupported(Unsupported {
+                opcode: Some(Op::MatMul),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn unboxed_float_loop_has_complete_deopt_maps_and_resumable_state() {
         struct FloatRuntime {
             boxed: Vec<f64>,

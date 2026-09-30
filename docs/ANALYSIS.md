@@ -503,6 +503,14 @@ direct-call inline planından çıkarılır, yeni construction opkodları Cranel
 explicit generic-runtime fallback'inde kalır. Ayrıntılar
 [ADR 0085](adr/0085-type-parameters-and-aliases.md) dosyasındadır.
 
+Bytecode v32, Python'ın `@` ve `@=` işlemlerini ayrı `MAT_MUL` ve
+`INPLACE_MAT_MUL` opkodlarıyla taşır. Her üç operand verifier tarafından register
+sınırında doğrulanır. Runtime mevcut suspending binary-protocol state machine'ini
+`__matmul__`, `__rmatmul__` ve `__imatmul__` için paylaşır; strict subclass
+reflected önceliği, `NotImplemented`, in-place fallback ve metaclass dispatch
+aynı kesin GC kökleriyle korunur. Native bir matrix storage varsayılmadığı için
+Cranelift bu opkodları açık generic-runtime fallback sınırında bırakır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

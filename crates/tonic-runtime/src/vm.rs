@@ -4833,7 +4833,9 @@ impl Vm {
                     | Op::InplaceBitXor
                     | Op::InplaceBitAnd
                     | Op::InplaceLeftShift
-                    | Op::InplaceRightShift => {
+                    | Op::InplaceRightShift
+                    | Op::MatMul
+                    | Op::InplaceMatMul => {
                         let left = self.read(b)?;
                         let right = self.read(c)?;
                         if let Some(state) = self.binary_protocol(op, left, right)? {
@@ -8919,6 +8921,7 @@ pub(super) fn base_binary_op(op: Op) -> Op {
         Op::InplaceBitAnd => Op::BitAnd,
         Op::InplaceLeftShift => Op::LeftShift,
         Op::InplaceRightShift => Op::RightShift,
+        Op::InplaceMatMul => Op::MatMul,
         op => op,
     }
 }

@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 27, core verifier 19, Cranelift JIT 21, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 355 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 50,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 359 test.
 
-Differential corpus: 319 stdout vakası ve 178 exception türü vakası. Seed 42.
-Type parameter/type-alias diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 320 stdout vakası ve 179 exception türü vakası. Seed 42.
+Matrix multiplication diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -480,6 +480,15 @@ class-alias construction'ı interpreter/JIT-caller × allocation-stress GC altı
 kapsar. Cranelift testi construction opkodlarının explicit generic fallback'te
 kaldığını doğrular. Python 3.14 differential vakaları aynı gözlemlenebilir çıktı
 ve shadowing hata sınıflarını karşılaştırır.
+
+Matrix multiplication dilimi bytecode v32 `MAT_MUL`/`INPLACE_MAT_MUL`
+operandlarını iki verifier'da sınar. Compiler testi Tonic-owned AST ve iki opcode
+lowering'ini; runtime testi direct/reflected/in-place yolları, strict subclass
+önceliği, `NotImplemented` fallback'i, metaclass dispatch'i ve askıya alınan
+method frame'lerinin precise roots'unu JIT-caller × allocation-stress GC altında
+doğrular. Cranelift testi opkodun açık generic-runtime fallback'inde kaldığını;
+Python 3.14 differential vakaları gözlenebilir sonuç ve TypeError sınırını
+karşılaştırır.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.
