@@ -134,6 +134,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__set_name__"
                 | "__prepare__"
                 | "__getitem__"
+                | "__class_getitem__"
                 | "__setitem__"
                 | "__delitem__"
                 | "__delete__"
@@ -763,6 +764,19 @@ impl Heap {
         };
         self.descriptor_callable(callable, instance, class)
             .map(Some)
+    }
+
+    /// Resolve class subscription after the metaclass `__getitem__` path has
+    /// declined it. Python implicitly binds a plain `__class_getitem__`
+    /// function to the subscribed class, just like an explicit classmethod.
+    pub fn class_getitem_call(&self, class: Value) -> Result<Option<DescriptorCall>> {
+        if !matches!(self.get(class), Ok(Object::Class(_))) {
+            return Ok(None);
+        }
+        let Some(callable) = self.class_lookup(class, "__class_getitem__")? else {
+            return Ok(None);
+        };
+        self.descriptor_callable(callable, class, class).map(Some)
     }
 
     fn is_default_attribute_method(&self, value: Value, expected: Builtin) -> bool {

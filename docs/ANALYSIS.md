@@ -511,6 +511,15 @@ reflected önceliği, `NotImplemented`, in-place fallback ve metaclass dispatch
 aynı kesin GC kökleriyle korunur. Native bir matrix storage varsayılmadığı için
 Cranelift bu opkodları açık generic-runtime fallback sınırında bırakır.
 
+Class subscription, `ITEM` generic runtime yolunda Python'ın protokol sırasını
+korur. Önce class nesnesinin metaclass'ındaki `__getitem__` descriptor'ı bağlanır;
+bu yoksa class MRO'sundaki `__class_getitem__` plain function olsa bile subscribed
+class'a örtük classmethod gibi bağlanır. Ancak iki hook da yoksa builtin, PEP 695
+generic class ve type-alias için managed `GenericAlias` hızlı yolu kullanılır.
+Kullanıcı hook'u frame askıya alabildiği için receiver/key normal VM register
+kökleri olarak moving GC altında korunur; `ITEM` Cranelift'te generic fallback'te
+kalır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

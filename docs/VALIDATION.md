@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 50,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 359 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 51,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 360 test.
 
-Differential corpus: 320 stdout vakası ve 179 exception türü vakası. Seed 42.
-Matrix multiplication diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 321 stdout vakası ve 180 exception türü vakası. Seed 42.
+Class-subscription diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -489,6 +489,13 @@ method frame'lerinin precise roots'unu JIT-caller × allocation-stress GC altın
 doğrular. Cranelift testi opkodun açık generic-runtime fallback'inde kaldığını;
 Python 3.14 differential vakaları gözlenebilir sonuç ve TypeError sınırını
 karşılaştırır.
+
+Class-subscription testi metaclass `__getitem__` önceliğini, plain ve explicit
+classmethod `__class_getitem__` binding'ini, inherited hook'ta dinamik subclass
+receiver'ını, generic class override'ını ve hook yokken managed `GenericAlias`
+fallback'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
+Python 3.14 differential vakası aynı gözlenebilir çağrı sırasını; hata vakası
+callable olmayan hook'un TypeError sınırını karşılaştırır.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

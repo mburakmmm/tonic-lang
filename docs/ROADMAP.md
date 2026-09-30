@@ -53,6 +53,9 @@ sonra alınır.
 - [ ] Type nesneleri ve kalan özel numeric/operator/attribute/iteration protokolleri.
   - [x] Instance `__getitem__`/`__setitem__`/`__delitem__`; special-method MRO
     lookup, static/class binding, suspending frame ve mutation-return discard.
+  - [x] Class subscription `__class_getitem__`; metaclass `__getitem__`
+    önceliği, plain/explicit-classmethod ve inherited binding, generic-class
+    override ile managed generic-alias fallback'i, precise roots ve JIT-caller.
   - [x] `del list[index]` ve `del dict[key]`; negatif index, insertion-order
     korunumu, iterator version invalidation ve doğru IndexError/KeyError.
   - [x] Canonical builtin type nesneleri: None/int/bool/float/str/list/tuple/dict/

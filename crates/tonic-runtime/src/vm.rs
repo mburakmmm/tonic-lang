@@ -6527,6 +6527,41 @@ impl Vm {
                     Op::Item => {
                         let owner = self.read(b)?;
                         let key = self.read(c)?;
+                        if matches!(self.heap.get(owner)?, Object::Class(_)) {
+                            // Class subscription gives the metaclass's
+                            // `__getitem__` precedence over `__class_getitem__`
+                            // and Tonic's managed generic-alias fallback.
+                            if let Some(call) =
+                                self.heap.metaclass_method_call(owner, "__getitem__")?
+                            {
+                                self.invoke(
+                                    p,
+                                    call.callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver: call.receiver,
+                                        positional: [key, Value::UNBOUND, Value::UNBOUND],
+                                        count: 1,
+                                    },
+                                    output,
+                                )?;
+                                return Ok(());
+                            }
+                            if let Some(call) = self.heap.class_getitem_call(owner)? {
+                                self.invoke(
+                                    p,
+                                    call.callable,
+                                    a,
+                                    Arguments::Inline {
+                                        receiver: call.receiver,
+                                        positional: [key, Value::UNBOUND, Value::UNBOUND],
+                                        count: 1,
+                                    },
+                                    output,
+                                )?;
+                                return Ok(());
+                            }
+                        }
                         let generic = match self.heap.get(owner)? {
                             Object::TypeAlias { type_params, .. } => matches!(
                                 self.heap.get(*type_params),

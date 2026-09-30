@@ -352,6 +352,42 @@ fn item_protocols_use_special_lookup_and_setter_continuations() {
         assert_eq!(error.kind, "TypeError");
     }
 }
+
+#[test]
+fn class_subscription_prefers_metaclass_then_class_getitem_then_generic_alias() {
+    let source = r#"class Plain:
+    def __class_getitem__(cls,key):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return cls.__name__+str(key)
+class Wrapped:
+    @classmethod
+    def __class_getitem__(cls,key): return cls.__name__+str(key)
+class Base:
+    def __class_getitem__(cls,key): return cls.__name__+str(key)
+class Child(Base): pass
+class Meta(type):
+    def __getitem__(cls,key): return 'meta-'+cls.__name__+str(key)
+class Both(metaclass=Meta):
+    def __class_getitem__(cls,key): return 'class-'+cls.__name__+str(key)
+class Generic[T]:
+    def __class_getitem__(cls,key): return 'custom-'+cls.__name__+str(key)
+class Default[T]: pass
+print(Plain[1],Wrapped[2],Child[3],Both[4],Generic[5])
+print(Default[int].__origin__==Default,Default[int].__args__==(int,))"#;
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&compile(source, "class-subscription").unwrap(), &mut output)
+            .unwrap();
+        assert_eq!(
+            output,
+            b"Plain1 Wrapped2 Child3 meta-Both4 custom-Generic5\nTrue True\n"
+        );
+    }
+}
 #[test]
 fn item_deletion_supports_builtin_and_custom_protocols() {
     assert_eq!(

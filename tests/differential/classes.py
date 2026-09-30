@@ -1546,8 +1546,25 @@ class Meta(type):
 class C(metaclass=Meta): pass
 print(C @ '!')
 ''')
+CASES.append('''class Plain:
+    def __class_getitem__(cls,key): return cls.__name__+str(key)
+class Wrapped:
+    @classmethod
+    def __class_getitem__(cls,key): return cls.__name__+str(key)
+class Base:
+    def __class_getitem__(cls,key): return cls.__name__+str(key)
+class Child(Base): pass
+class Meta(type):
+    def __getitem__(cls,key): return 'meta-'+cls.__name__+str(key)
+class Both(metaclass=Meta):
+    def __class_getitem__(cls,key): return 'class-'+cls.__name__+str(key)
+class Generic[T]:
+    def __class_getitem__(cls,key): return 'custom-'+cls.__name__+str(key)
+print(Plain[1],Wrapped[2],Child[3],Both[4],Generic[5])
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
+    ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),
