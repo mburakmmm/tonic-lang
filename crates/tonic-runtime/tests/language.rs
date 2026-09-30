@@ -1137,6 +1137,23 @@ fn function_annotations_evaluate_and_survive_jit_and_stress_gc() {
         );
     }
 }
+
+#[test]
+fn variable_annotations_obey_scope_order_and_survive_jit_and_stress_gc() {
+    let source = "def annotation():\n    print('annotation')\n    return int\nvalue: annotation() = 1\nmissing: str\nif False:\n    dead: float\ndef owner():\n    print('owner')\n    return {}\ndef key():\n    print('key')\n    return 0\nowner()[key()]: print('ignored')\nbox={}\nbox['item']: print('ignored') = 3\ndef build():\n    class Marker:\n        pass\n    class Holder:\n        item: Marker\n        absent: str\n    return Holder\nHolder=build()\ndef local_ok():\n    hidden: missing_name\n    return 7\ndef local_missing():\n    hidden: int\n    return hidden\nprint(value,__annotations__)\nprint(box)\nprint(Holder.__annotations__['item'].__name__,Holder.__annotations__['absent'].__name__)\nprint(local_ok())\ntry:\n    local_missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
+    let program = compile(source, "variable-annotations").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"annotation\nowner\nkey\n1 {'value': <class 'int'>, 'missing': <class 'str'>}\n{'item': 3}\nMarker str\n7\nUnboundLocalError\n"
+        );
+    }
+}
 #[test]
 fn short_circuit_and_chains() {
     assert_eq!(output("def tick(n):\n    print(n)\n    return n\nprint(3 < tick(2) < tick(1))\nprint(0 and missing, 5 or missing, not [])\nprint(tick(1) if True else missing)\n"),"2\nFalse\n0 5 True\n1\n1\n");

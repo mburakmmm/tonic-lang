@@ -31,7 +31,7 @@ The current implementation includes:
 - versioned 8-byte register bytecode with verification before execution;
 - immediate integers, booleans and `None`, plus arbitrary-precision integers;
 - functions, closures, defaults, positional-only/keyword-only and variadic calls,
-  plus GC-traced parameter and return annotations;
+  plus GC-traced function, module, class and variable annotations;
 - native set literals and sync/async set comprehensions with hash-aware
   membership, equality, iteration and collision handling;
 - structural `match`/`case` with guarded value, OR, sequence, mapping and class
@@ -59,9 +59,9 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Variable annotations and type
-parameters, OS-backed async I/O, a full standard library, and several remaining
-protocols are still tracked in the
+The unsupported surface is reported explicitly. Type parameters and aliases,
+OS-backed async I/O, a full standard library, and several remaining protocols
+are still tracked in the
 [roadmap](docs/ROADMAP.md).
 
 ## Architecture
@@ -153,8 +153,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 349 Rust tests and a differential corpus of
-317 output cases plus 176 exception cases. The documented local matrix covers
+The repository currently contains 351 Rust tests and a differential corpus of
+318 output cases plus 177 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

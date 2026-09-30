@@ -24,6 +24,12 @@ pub struct ImportAlias {
 #[derive(Clone, Debug)]
 pub enum StmtKind {
     Assign(Vec<Target>, Expr),
+    AnnAssign {
+        target: Target,
+        annotation: Expr,
+        value: Option<Expr>,
+        simple: bool,
+    },
     AugAssign(Target, BinaryOp, Expr),
     DeleteTargets(Vec<Target>),
     Expr(Expr),

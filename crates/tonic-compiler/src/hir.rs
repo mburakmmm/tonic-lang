@@ -8,6 +8,7 @@ use tonic_core::{
 
 #[derive(Debug)]
 pub(crate) struct Scope {
+    pub module: bool,
     pub class_body: bool,
     pub generator: bool,
     pub coroutine: bool,
@@ -46,6 +47,7 @@ impl Scope {
             nonlocals: HashSet::new(),
             children: Vec::new(),
             module,
+            class_body,
             yield_span: None,
             yield_from_span: None,
             return_value_span: None,
@@ -78,6 +80,7 @@ impl Scope {
             }
         }
         let mut scope = Self {
+            module,
             class_body,
             generator: scan.yield_span.is_some(),
             coroutine,
@@ -203,6 +206,7 @@ struct Scan<'a> {
     nonlocals: HashSet<SymbolId>,
     children: Vec<(u32, Child<'a>)>,
     module: bool,
+    class_body: bool,
     yield_span: Option<Span>,
     yield_from_span: Option<Span>,
     return_value_span: Option<Span>,
@@ -382,6 +386,39 @@ impl<'a> Scan<'a> {
                     self.expr(e);
                     for t in ts {
                         self.target(t);
+                    }
+                }
+                StmtKind::AnnAssign {
+                    target,
+                    annotation,
+                    value,
+                    simple,
+                } => {
+                    if *simple && !self.module {
+                        let Target::Name(name) = target else {
+                            unreachable!("simple annotation target")
+                        };
+                        if self.globals.contains(name) {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "annotated name cannot be global",
+                            )
+                            .at(s.span));
+                        }
+                        if self.nonlocals.contains(name) {
+                            return Err(Diagnostic::new(
+                                "SyntaxError",
+                                "annotated name cannot be nonlocal",
+                            )
+                            .at(s.span));
+                        }
+                    }
+                    if let Some(value) = value {
+                        self.expr(value);
+                    }
+                    self.target(target);
+                    if *simple && (self.module || self.class_body) {
+                        self.expr(annotation);
                     }
                 }
                 StmtKind::AugAssign(target, _, e) => {

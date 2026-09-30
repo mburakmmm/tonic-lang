@@ -197,6 +197,7 @@ fn unsupported_hook(name: &str) -> Result<()> {
                 | "__qualname__"
                 | "__doc__"
                 | "__name__"
+                | "__annotations__"
                 | "__match_args__"
                 | "__str__"
                 | "__repr__"

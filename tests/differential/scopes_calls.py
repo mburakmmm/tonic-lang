@@ -568,6 +568,27 @@ class Display:
 value=Display()
 print(f'{value!s}',f'{value!r}',f'{value!a}',f'{value:custom}')
 ''',
+'''class Annotated:
+    value: int = 3
+    missing: str
+    if True:
+        nested: list
+print(Annotated.value,Annotated.__annotations__)
+def local_annotation():
+    hidden: missing_name
+    return 7
+print(local_annotation())
+def owner():
+    print('owner')
+    return {}
+def key():
+    print('key')
+    return 0
+owner()[key()]: missing_name
+box={}
+box['item']: missing_name = 4
+print(box)
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
@@ -617,6 +638,7 @@ ERRORS = [
 ('async def bad():\n    yield 1\n    raise StopAsyncIteration("escaped")\ngenerator=bad()\ntry:\n    generator.__anext__().send(None)\nexcept StopIteration:\n    pass\ngenerator.__anext__().send(None)', 'RuntimeError'),
 ('async def bad():\n    yield 1\n    return 2', 'SyntaxError'),
 ('async def bad():\n    yield from []', 'SyntaxError'),
+('def annotated_local():\n    value: int\n    return value\nannotated_local()', 'UnboundLocalError'),
 ('1 in 2', 'TypeError'),
 ('1 in "123"', 'TypeError'),
 ('[hidden for hidden in range(2)]\nprint(hidden)', 'NameError'),

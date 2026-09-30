@@ -195,8 +195,10 @@ sonra alınır.
       definition-scope evaluation, doğrulanmış function-site metadata,
       GC-traced `function.__annotations__` ve interpreter/JIT-caller stress-GC
       testleri.
-    - [ ] Değişken annotation'ları, class/module `__annotations__` ve type
-      parameter/type-alias yüzeyi.
+    - [x] Değişken annotation'ları; Tonic-owned annotated-assignment AST/HIR,
+      module/class `__annotations__`, function-local binding semantiği, karmaşık
+      hedef değerlendirme sırası ve interpreter/JIT-caller stress-GC testleri.
+    - [ ] Type parameter ve type-alias yüzeyi.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

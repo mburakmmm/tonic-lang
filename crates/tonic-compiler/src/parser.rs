@@ -125,6 +125,26 @@ impl Adapter {
                     .collect::<Result<_>>()?,
                 self.expr(*a.value)?,
             ),
+            py::Stmt::AnnAssign(a) => {
+                let simple = a.simple;
+                let target = self.target(*a.target)?;
+                if simple && !matches!(target, Target::Name(_)) {
+                    return Err(Diagnostic::new(
+                        "SyntaxError",
+                        "simple annotated assignment must target a name",
+                    )
+                    .at(s));
+                }
+                if simple {
+                    self.symbol("__annotations__")?;
+                }
+                StmtKind::AnnAssign {
+                    target,
+                    annotation: self.expr(*a.annotation)?,
+                    value: a.value.map(|value| self.expr(*value)).transpose()?,
+                    simple,
+                }
+            }
             py::Stmt::AugAssign(a) => {
                 let target = self.target(*a.target)?;
                 if matches!(target, Target::Tuple(_)) {

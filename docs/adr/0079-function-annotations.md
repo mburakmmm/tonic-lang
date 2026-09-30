@@ -52,5 +52,5 @@ and JIT modes, and retain a class whose only remaining edge is an annotation
 value under collection at every allocation. A CPython differential case covers
 the shared observable, side-effect-free annotation surface.
 
-Variable annotations, class/module annotation dictionaries, type parameters,
-and type aliases remain separate roadmap work.
+Variable annotations and class/module annotation dictionaries are specified by
+ADR 0084. Type parameters and type aliases remain separate roadmap work.

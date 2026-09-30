@@ -1,6 +1,8 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
-    ast::{CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind},
+    ast::{
+        CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind, Target,
+    },
     bytecode::Op,
 };
 #[test]
@@ -389,6 +391,68 @@ fn function_annotations_are_owned_and_lowered() {
     let program = compile(source, "annotations").unwrap();
     let site = &program.program().code[0].functions[0];
     assert_eq!(site.annotations.len(), 6);
+}
+
+#[test]
+fn variable_annotations_are_owned_and_lowered_by_scope() {
+    let source = "value: int = 1\nmissing: str\nclass Holder:\n    item: float = 2.0\ndef local():\n    hidden: bytes\n    return 1\n";
+    let ast = parse(source, "variable-annotations").unwrap();
+    let StmtKind::AnnAssign {
+        target,
+        annotation,
+        value,
+        simple,
+    } = &ast.body[0].kind
+    else {
+        panic!("annotated assignment")
+    };
+    assert!(matches!(target, Target::Name(_)));
+    assert!(matches!(annotation.kind, ExprKind::Name(_)));
+    assert!(value.is_some());
+    assert!(*simple);
+
+    let program = compile(source, "variable-annotations").unwrap();
+    let module_ops = program.program().code[0]
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .collect::<Vec<_>>();
+    assert!(module_ops.contains(&Op::Dict));
+    assert!(module_ops.contains(&Op::StoreGlobal));
+    assert!(module_ops.contains(&Op::SetItem));
+
+    let class_code = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.class_body)
+        .unwrap();
+    assert!(class_code
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .any(|op| op == Op::SetItem));
+    let local_code = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("local"))
+        .unwrap();
+    assert!(!local_code
+        .instructions
+        .iter()
+        .filter_map(|instruction| Op::try_from(instruction.opcode).ok())
+        .any(|op| op == Op::SetItem));
+
+    for invalid in [
+        "def f():\n    global value\n    value: int\n",
+        "def outer():\n    value=1\n    def inner():\n        nonlocal value\n        value: int\n",
+    ] {
+        assert_eq!(
+            compile(invalid, "invalid-annotation").unwrap_err().kind,
+            "SyntaxError"
+        );
+    }
 }
 
 #[test]

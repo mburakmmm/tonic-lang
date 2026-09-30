@@ -93,8 +93,53 @@ fn build(
             lower.emit(Op::StoreName, value, index(symbol)?, 0, span)?;
         }
     }
+    if (lower.scope.module || lower.scope.class_body) && has_simple_annotation(body) {
+        let span = body
+            .first()
+            .map(|statement| statement.span)
+            .unwrap_or_default();
+        let annotations = lower.alloc(1)?;
+        lower.emit(Op::Dict, annotations, 0, 0, span)?;
+        let symbol = lower
+            .program
+            .symbols
+            .iter()
+            .position(|candidate| candidate == "__annotations__")
+            .ok_or_else(|| Diagnostic::new("BytecodeError", "missing annotation symbol"))?;
+        lower.store(SymbolId(index(symbol)?), annotations, span)?;
+    }
     lower.block(body)?;
     finish_build(lower, id)
+}
+
+fn has_simple_annotation(body: &[Stmt]) -> bool {
+    body.iter().any(|statement| match &statement.kind {
+        StmtKind::AnnAssign { simple: true, .. } => true,
+        StmtKind::If(_, body, otherwise)
+        | StmtKind::While(_, body, otherwise)
+        | StmtKind::For(_, _, body, otherwise)
+        | StmtKind::AsyncFor(_, _, body, otherwise) => {
+            has_simple_annotation(body) || has_simple_annotation(otherwise)
+        }
+        StmtKind::Try {
+            body,
+            handlers,
+            otherwise,
+            finalbody,
+        } => {
+            has_simple_annotation(body)
+                || handlers
+                    .iter()
+                    .any(|handler| has_simple_annotation(&handler.body))
+                || has_simple_annotation(otherwise)
+                || has_simple_annotation(finalbody)
+        }
+        StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
+            has_simple_annotation(body)
+        }
+        StmtKind::Match { cases, .. } => cases.iter().any(|case| has_simple_annotation(&case.body)),
+        _ => false,
+    })
 }
 
 fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeObject> {
@@ -1062,6 +1107,49 @@ impl Lower<'_> {
                 let r = self.expr(e)?;
                 for t in ts {
                     self.target(t, r, s)?;
+                }
+            }
+            StmtKind::AnnAssign {
+                target,
+                annotation,
+                value,
+                simple,
+            } => {
+                if let Some(value) = value {
+                    let value = self.expr(value)?;
+                    self.target(target, value, s)?;
+                } else {
+                    match target {
+                        Target::Name(_) => {}
+                        Target::Attribute(owner, _) => {
+                            self.expr(owner)?;
+                        }
+                        Target::Item(owner, key) => {
+                            self.expr(owner)?;
+                            self.expr(key)?;
+                        }
+                        Target::Tuple(_) => unreachable!("annotated unpacking target"),
+                    }
+                }
+                if *simple && (self.scope.module || self.scope.class_body) {
+                    let value = self.expr(annotation)?;
+                    let annotations = self
+                        .program
+                        .symbols
+                        .iter()
+                        .position(|candidate| candidate == "__annotations__")
+                        .ok_or_else(|| {
+                            Diagnostic::new("BytecodeError", "missing annotation symbol")
+                        })?;
+                    let annotations = self.load(SymbolId(index(annotations)?), s)?;
+                    let Target::Name(name) = target else {
+                        unreachable!("simple annotation target")
+                    };
+                    let key = self.constant(
+                        Constant::Str(self.program.symbols[name.0 as usize].clone()),
+                        s,
+                    )?;
+                    self.emit(Op::SetItem, annotations, key, value, s)?;
                 }
             }
             StmtKind::AugAssign(target, op, e) => {

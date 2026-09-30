@@ -475,6 +475,17 @@ Cranelift call ABI'si ve exact-callee guard'ları annotation depolamasından
 bağımsız kalır. Ayrıntılar [ADR 0079](adr/0079-function-annotations.md)
 dosyasındadır.
 
+Değişken annotation'ları da parser-owned düğüm taşımadan Tonic AST/HIR'ine
+alınır. Module ve class code prologue'u aynı lexical scope'ta basit isim
+annotation'ı bulunduğunda managed `__annotations__` dict'i kurar; çalışma
+anındaki annotation, normal `SET_ITEM` ve write-barrier yoluyla kaynak isim
+anahtarına yazılır. Function-local annotation yalnız lexical binding oluşturur,
+ifadeyi değerlendirmez; annotation-only read bu yüzden `UnboundLocalError`
+üretir. Attribute/subscript annotation'ları metadata yazmaz, fakat target owner
+ve key yan etkilerini Python sırasıyla bir kez çalıştırır. Cranelift yeni ABI ya
+da opkod gerektirmeden doğrulanmış generic continuation'a düşer. Ayrıntılar
+[ADR 0084](adr/0084-variable-annotations.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

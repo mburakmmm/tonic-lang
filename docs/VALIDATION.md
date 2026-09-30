@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-27 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+30 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,13 +40,13 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 25, core verifier 18, Cranelift JIT 20, runtime unit 22,
+Test dağılımı: CLI 9, compiler/parser 26, core verifier 18, Cranelift JIT 20, runtime unit 22,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 49,
-native handles 5, language/runtime 109, CPython bridge 15 ve HPy manifest 5; toplam 349 test.
+native handles 5, language/runtime 110, CPython bridge 15 ve HPy manifest 5; toplam 351 test.
 
-Differential corpus: 317 stdout vakası ve 176 exception türü vakası. Seed 42.
-F-string/format-spec diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 318 stdout vakası ve 177 exception türü vakası. Seed 42.
+Değişken annotation diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -458,6 +458,17 @@ anahtarları denetler. Runtime testi yalnız annotation sözlüğünden erişile
 bir sınıfı interpreter/JIT-caller × allocation-stress GC altında canlı tutar;
 Python differential vakası gözlenebilir sözlük sırasını ve çağrı davranışını
 karşılaştırır.
+
+Değişken annotation dilimi simple/non-simple hedef ayrımını Tonic-owned AST'te
+korur. Compiler testleri module/class prologue sözlüğünü, function-local
+annotation suppression'ını ve global/nonlocal hata sınırını doğrular. Runtime
+testi eager module/class kayıt sırasını, annotation-only missing binding'i,
+çalışmayan control-flow suite'inin boş metadata etkisini, attribute/subscript
+target yan etkilerini ve yalnız class annotation dict'inden erişilen bir sınıfın
+interpreter/JIT-caller × allocation-stress GC altında yaşamasını kapsar. Python
+3.14 differential vakaları ortak class sözlüğü, local binding ve karmaşık target
+davranışını karşılaştırır; Tonic'in eager annotation değerlendirmesi ADR 0084'te
+açıkça belgelenmiş dil tercihidir.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.
