@@ -18,6 +18,8 @@ fn main() {
         ("sum_float_1000_x100", "values=[i*0.5 for i in range(1000)]\ni=0\ntotal=0.0\nwhile i<100:\n    total+=sum(values)\n    i+=1\n"),
         ("any_all_1000_x100", "false_values=[False for i in range(1000)]\ntrue_values=[True for i in range(1000)]\ni=0\ntotal=0\nwhile i<100:\n    total+=any(false_values)\n    total+=all(true_values)\n    i+=1\n"),
         ("manual_any_all_1000_x100", "false_values=[False for i in range(1000)]\ntrue_values=[True for i in range(1000)]\ni=0\ntotal=0\nwhile i<100:\n    found=False\n    for value in false_values:\n        if value:\n            found=True\n            break\n    total+=found\n    complete=True\n    for value in true_values:\n        if not value:\n            complete=False\n            break\n    total+=complete\n    i+=1\n"),
+        ("min_max_1000_x100", "values=list(range(1000))\ni=0\ntotal=0\nwhile i<100:\n    total+=min(values)\n    total+=max(values)\n    i+=1\n"),
+        ("manual_min_max_1000_x100", "values=list(range(1000))\ni=0\ntotal=0\nwhile i<100:\n    low=values[0]\n    high=values[0]\n    for value in values[1:]:\n        if value<low: low=value\n        if value>high: high=value\n    total+=low+high\n    i+=1\n"),
         ("slice_copy_1000", "i=0\nxs=[0,1,2,3,4,5,6,7,8,9]\nwhile i<1000:\n    y=xs[1:9:2]\n    i+=1\n"),
         ("closure_calls_10000", "def counter(n):\n    def inc():\n        nonlocal n\n        n+=1\n        return n\n    return inc\nf=counter(0)\ni=0\nwhile i<10000:\n    f()\n    i+=1\n"),
         ("closure_creation_5000", "def make(n):\n    def f():\n        return n\n    return f\ni=0\nwhile i<5000:\n    f=make(i)\n    f()\n    i+=1\n"),

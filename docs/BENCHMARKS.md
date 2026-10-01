@@ -127,3 +127,19 @@ parse, compile ve yürütmeyi birlikte ölçer; runtime throughput üstünlüğ�
 yorumlanmaz. Bu ölçüm nihai dil benchmark'ı değildir. Ham örnekler, p95 değerleri,
 binary/source hash'leri ve sınırlamalar
 [any-all-stage-0089](benchmarks/any-all-stage-0089/) altında saklanır.
+
+## `min`/`max` builtin ara kabul ölçümü
+
+ADR 0090 iş yükü 1.000 integer öğenin minimum ve maksimumunu 100 kez tarar.
+Release interpreter builtin medianı 11.838,292 µs, eşdeğer konuk döngüsü
+56.080,458 µs'dir; builtin 4,74× daha hızlıdır. Dispatch 1.402.018'den 2.318'e
+iner. Kaynak/VM dahil builtin 203 allocation raporlar ve öğe başına tahsis yapmaz.
+
+| Faz | Tonic median µs | CPython 3.14.6 median µs | Tonic / CPython |
+|---|---:|---:|---:|
+| warm run | 12.168,771 | 1.377,188 | 8,8360× |
+| cold CLI | 15.571,042 | 18.265,125 | 0,8525× |
+
+Warm CPython üstünlüğü sonraki profiling/JIT builtin çalışması için açık hedeftir.
+Cold CLI süreç başlangıcı dahil toplamdır. Ham örnekler ve provenance
+[min-max-stage-0090](benchmarks/min-max-stage-0090/) altındadır.

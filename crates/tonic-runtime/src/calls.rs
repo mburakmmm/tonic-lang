@@ -2,9 +2,9 @@
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
     ArgumentExpansion, AsyncGeneratorCompletion, AsyncWake, BoolReduceState, DictConstruction,
-    DictConstructionStart, DictPairConstruction, EventLoopReady, EventLoopState, Frame,
-    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, SumState,
-    SumTotal, Vm,
+    DictConstructionStart, DictPairConstruction, EventLoopReady, EventLoopState, ExtremumCandidate,
+    ExtremumConfig, ExtremumSource, ExtremumState, Frame, IterableCollection,
+    IterableCollectionKind, NativeSubclassFinish, ReturnAction, SumState, SumTotal, Vm,
 };
 use crate::{
     dict::Dict,
@@ -1686,6 +1686,11 @@ impl Vm {
                         output,
                     );
                 }
+                if matches!(builtin, Builtin::Min | Builtin::Max) {
+                    let (source, config) =
+                        self.bind_extremum_arguments(p, &args, matches!(builtin, Builtin::Max))?;
+                    return self.invoke_extremum(p, destination, source, config, output);
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -2517,6 +2522,9 @@ impl Vm {
             super::TruthAction::BoolReduce(state) => {
                 return self.finish_bool_reduce_truth(p, destination, truth, state, output)
             }
+            super::TruthAction::Extremum(candidate) => {
+                return self.finish_extremum_truth(p, destination, truth, candidate, output)
+            }
         }
         Ok(())
     }
@@ -2815,6 +2823,13 @@ impl Vm {
                     output,
                 )
             }
+            super::BinaryCompletion::Extremum(candidate) => self.invoke_truth(
+                p,
+                value,
+                destination,
+                super::TruthAction::Extremum(candidate),
+                output,
+            ),
         }
     }
     pub(super) fn invoke_unary_protocol(
@@ -4528,6 +4543,301 @@ impl Vm {
             Ok(())
         } else {
             self.continue_bool_reduce(p, destination, state, output)
+        }
+    }
+
+    pub(super) fn invoke_extremum(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        source: ExtremumSource,
+        config: ExtremumConfig,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if let ExtremumSource::Values { .. } = source {
+            return self.continue_extremum(
+                p,
+                destination,
+                ExtremumState {
+                    source,
+                    config,
+                    best_item: Value::UNBOUND,
+                    best_key: Value::UNBOUND,
+                    has_best: false,
+                },
+                output,
+            );
+        }
+        let ExtremumSource::Iterator(iterable) = source else {
+            unreachable!()
+        };
+        match self.heap.iterator(iterable) {
+            Ok(iterator) => self.continue_extremum(
+                p,
+                destination,
+                ExtremumState {
+                    source: ExtremumSource::Iterator(iterator),
+                    config,
+                    best_item: Value::UNBOUND,
+                    best_key: Value::UNBOUND,
+                    has_best: false,
+                },
+                output,
+            ),
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(iterable, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("extremum __iter__ frame")
+                        .action = ReturnAction::ExtremumIterStart(config);
+                    Ok(())
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_extremum(
+                        p,
+                        destination,
+                        ExtremumState {
+                            source: ExtremumSource::Iterator(iterator),
+                            config,
+                            best_item: Value::UNBOUND,
+                            best_key: Value::UNBOUND,
+                            has_best: false,
+                        },
+                        output,
+                    )
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn continue_extremum(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: ExtremumState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        loop {
+            let item = match &mut state.source {
+                ExtremumSource::Values { items, next } => {
+                    let Some(item) = items.get(*next).copied() else {
+                        return self.finish_extremum(destination, state);
+                    };
+                    *next += 1;
+                    item
+                }
+                ExtremumSource::Iterator(iterator) => {
+                    let iterator = *iterator;
+                    if let Some(resumable) = self.iterator_resumable(iterator) {
+                        return match self.resume_generator(
+                            p,
+                            resumable,
+                            destination,
+                            Value::NONE,
+                            ReturnAction::ExtremumNext(state.clone()),
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(error) if error.kind == "StopIteration" => {
+                                self.pending_exception = None;
+                                self.finish_extremum(destination, state)
+                            }
+                            Err(error) => Err(error),
+                        };
+                    }
+                    if self.heap.is_iterator(iterator) {
+                        let Some(item) = self.heap.next(iterator)? else {
+                            return self.finish_extremum(destination, state);
+                        };
+                        item
+                    } else {
+                        let Some(call) = self.heap.special_method_call(iterator, "__next__")?
+                        else {
+                            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                        };
+                        let depth = self.frames.len();
+                        match self.invoke_target(
+                            p,
+                            call.callable,
+                            destination,
+                            Arguments::Inline {
+                                receiver: call.receiver,
+                                positional: [Value::UNBOUND; 3],
+                                count: 0,
+                            },
+                            output,
+                        ) {
+                            Ok(()) => {}
+                            Err(error) if error.kind == "StopIteration" => {
+                                self.pending_exception = None;
+                                return self.finish_extremum(destination, state);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        if self.frames.len() > depth {
+                            self.frames
+                                .last_mut()
+                                .expect("extremum __next__ frame")
+                                .action = ReturnAction::ExtremumNext(state);
+                            return Ok(());
+                        }
+                        self.registers[destination]
+                    }
+                }
+            };
+            if let Some(key) = state.config.key {
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    key,
+                    destination,
+                    Arguments::Inline {
+                        receiver: None,
+                        positional: [item, Value::UNBOUND, Value::UNBOUND],
+                        count: 1,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("extremum key frame").action =
+                        ReturnAction::ExtremumKey { state, item };
+                    return Ok(());
+                }
+                let item_key = self.registers[destination];
+                match self.consider_extremum(p, destination, state, item, item_key, output)? {
+                    Some(next) => {
+                        state = next;
+                        continue;
+                    }
+                    None => return Ok(()),
+                }
+            }
+            if !state.has_best {
+                state.best_item = item;
+                state.best_key = item;
+                state.has_best = true;
+                continue;
+            }
+            let op = if state.config.is_max {
+                tonic_core::bytecode::Op::Gt
+            } else {
+                tonic_core::bytecode::Op::Lt
+            };
+            if let Some(mut protocol) = self.binary_protocol(op, item, state.best_key)? {
+                protocol.completion = super::BinaryCompletion::Extremum(ExtremumCandidate {
+                    state,
+                    item,
+                    key: item,
+                });
+                return self.continue_binary_protocol(p, destination, protocol, output);
+            }
+            let truth = self
+                .heap
+                .compare(op, item, state.best_key)?
+                .as_bool()
+                .expect("native comparison returns bool");
+            if truth {
+                state.best_item = item;
+                state.best_key = item;
+            }
+        }
+    }
+
+    pub(super) fn consider_extremum(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: ExtremumState,
+        item: Value,
+        key: Value,
+        output: &mut dyn Write,
+    ) -> Result<Option<ExtremumState>> {
+        if !state.has_best {
+            state.best_item = item;
+            state.best_key = key;
+            state.has_best = true;
+            return Ok(Some(state));
+        }
+        let op = if state.config.is_max {
+            tonic_core::bytecode::Op::Gt
+        } else {
+            tonic_core::bytecode::Op::Lt
+        };
+        if let Some(mut protocol) = self.binary_protocol(op, key, state.best_key)? {
+            protocol.completion =
+                super::BinaryCompletion::Extremum(ExtremumCandidate { state, item, key });
+            self.continue_binary_protocol(p, destination, protocol, output)?;
+            Ok(None)
+        } else {
+            let truth = self
+                .heap
+                .compare(op, key, state.best_key)?
+                .as_bool()
+                .expect("native comparison returns bool");
+            if truth {
+                state.best_item = item;
+                state.best_key = key;
+            }
+            Ok(Some(state))
+        }
+    }
+
+    pub(super) fn finish_extremum_truth(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        truth: bool,
+        candidate: ExtremumCandidate,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let ExtremumCandidate {
+            mut state,
+            item,
+            key,
+        } = candidate;
+        if truth {
+            state.best_item = item;
+            state.best_key = key;
+        }
+        self.continue_extremum(p, destination, state, output)
+    }
+
+    pub(super) fn finish_extremum(
+        &mut self,
+        destination: usize,
+        state: ExtremumState,
+    ) -> Result<()> {
+        if state.has_best {
+            self.registers[destination] = state.best_item;
+            Ok(())
+        } else if state.config.default != Value::UNBOUND {
+            self.registers[destination] = state.config.default;
+            Ok(())
+        } else {
+            Err(Diagnostic::new(
+                "ValueError",
+                if state.config.is_max {
+                    "max() arg is an empty sequence"
+                } else {
+                    "min() arg is an empty sequence"
+                },
+            ))
         }
     }
 
@@ -7077,6 +7387,73 @@ impl Vm {
         ))
     }
 
+    fn bind_extremum_arguments(
+        &self,
+        p: &Program,
+        args: &Arguments<'_>,
+        is_max: bool,
+    ) -> Result<(ExtremumSource, ExtremumConfig)> {
+        let name = if is_max { "max" } else { "min" };
+        if args.count() == 0 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                format!("{name} expected at least one argument"),
+            ));
+        }
+        let mut key = None;
+        let mut default = Value::UNBOUND;
+        for index in 0..args.keyword_count() {
+            let (keyword, value) = args.keyword(p, &self.registers, index);
+            match keyword {
+                "key" if key.replace(value).is_some() => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("{name} got multiple values for keyword argument 'key'"),
+                    ));
+                }
+                "key" => {}
+                "default" if default != Value::UNBOUND => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("{name} got multiple values for keyword argument 'default'"),
+                    ));
+                }
+                "default" => default = value,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("{name} got an unexpected keyword argument '{keyword}'"),
+                    ));
+                }
+            }
+        }
+        if args.count() > 1 && default != Value::UNBOUND {
+            return Err(Diagnostic::new(
+                "TypeError",
+                format!("Cannot specify a default for {name}() with multiple positional arguments"),
+            ));
+        }
+        let key = key.filter(|value| *value != Value::NONE);
+        let source = if args.count() == 1 {
+            ExtremumSource::Iterator(args.positional(&self.registers, 0))
+        } else {
+            ExtremumSource::Values {
+                items: (0..args.count())
+                    .map(|index| args.positional(&self.registers, index))
+                    .collect(),
+                next: 0,
+            }
+        };
+        Ok((
+            source,
+            ExtremumConfig {
+                key,
+                default,
+                is_max,
+            },
+        ))
+    }
+
     fn invoke_repr_builtin(
         &mut self,
         p: &Program,
@@ -7307,6 +7684,8 @@ impl Vm {
             | Builtin::Sum
             | Builtin::Any
             | Builtin::All
+            | Builtin::Min
+            | Builtin::Max
             | Builtin::IntRound
             | Builtin::FloatRound => {
                 unreachable!("builtin has a suspending protocol call path")

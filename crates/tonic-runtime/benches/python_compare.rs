@@ -47,6 +47,11 @@ const CASES: &[(&str, &str, &str)] = &[
         "100\n",
     ),
     (
+        "min_max",
+        include_str!("../../../benches/comparison/min_max.py"),
+        "99900\n",
+    ),
+    (
         "closure_calls",
         include_str!("../../../benches/comparison/closure_calls.py"),
         "10000\n",

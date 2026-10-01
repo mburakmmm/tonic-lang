@@ -1160,6 +1160,113 @@ except ValueError:
 }
 
 #[test]
+fn min_and_max_stream_iterables_keys_and_comparisons() {
+    let source = r#"print(min([3,1,2]),max([3,1,2]),min(3,1,2),max(3,1,2))
+print(min([],default=9),max((),default=None))
+print(min(['aaa','b','cc'],key=len),max(['aaa','b','cc'],key=len))
+def values():
+    print('generator-start')
+    yield 4
+    print('generator-middle')
+    yield 1
+    yield 3
+print('generator',min(values()),max(values()))
+class Counter:
+    def __init__(self): self.value=0
+    def __iter__(self):
+        print('counter-iter')
+        return self
+    def __next__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        if self.value>=4: raise StopIteration
+        value=3-self.value
+        self.value+=1
+        print('counter-next',value)
+        return value
+print('counter-min',min(Counter()))
+class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        print('truth',self.value)
+        return self.value
+class KeyValue:
+    def __init__(self,value): self.value=value
+    def __lt__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('lt',self.value,other.value)
+        return Truth(self.value<other.value)
+    def __gt__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('gt',self.value,other.value)
+        return Truth(self.value>other.value)
+class Item:
+    def __init__(self,name,value): self.name=name; self.value=value
+def keyed(item):
+    scratch=0.0
+    for i in range(20): scratch+=0.5
+    print('key',item.name)
+    return KeyValue(item.value)
+items=[Item('first',2),Item('second',1),Item('tie',1),Item('last',3)]
+print('keyed-min',min(items,key=keyed).name)
+print('keyed-max',max(items,key=keyed).name)
+class DefaultKey:
+    def __call__(self,value):
+        print('default-key-called')
+        return value
+print('default',min([],default='empty',key=DefaultKey()))
+def hot(items,use_max):
+    total=0
+    for i in range(30): total+=i
+    return max(items) if use_max else min(items)
+print('hot',hot([4,2,3],False),hot([4,2,3],True))
+print('large-key',min([[i] for i in range(5000)],key=len))
+class StopKey:
+    def __call__(self,value): raise StopIteration('key-stop')
+try:
+    min([1],key=StopKey())
+except StopIteration:
+    print('key-stop-escaped')
+class StopCompare:
+    def __lt__(self,other): raise StopIteration('compare-stop')
+try:
+    min([StopCompare(),StopCompare()])
+except StopIteration:
+    print('compare-stop-escaped')
+class BadNext:
+    def __iter__(self): return self
+    def __next__(self): raise LookupError('next-error')
+try:
+    max(BadNext())
+except LookupError:
+    print('next-error-escaped')"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"1 3 1 3\n9 None\nb aaa\ngenerator-start\ngenerator-middle\ngenerator-start\ngenerator-middle\ngenerator 1 4\ncounter-iter\ncounter-next 3\ncounter-next 2\ncounter-next 1\ncounter-next 0\ncounter-min 0\nkey first\nkey second\nlt 1 2\ntruth True\nkey tie\nlt 1 1\ntruth False\nkey last\nlt 3 1\ntruth False\nkeyed-min second\nkey first\nkey second\ngt 1 2\ntruth False\nkey tie\ngt 1 2\ntruth False\nkey last\ngt 3 2\ntruth True\nkeyed-max last\ndefault empty\nhot 2 4\nlarge-key [0]\nkey-stop-escaped\ncompare-stop-escaped\nnext-error-escaped\n",
+    );
+
+    for (source, kind) in [
+        ("min()", "TypeError"),
+        ("max()", "TypeError"),
+        ("min([])", "ValueError"),
+        ("max(())", "ValueError"),
+        ("min(1)", "TypeError"),
+        ("max([1],unknown=2)", "TypeError"),
+        ("min(1,2,default=0)", "TypeError"),
+        ("max([1],key=2)", "TypeError"),
+        ("min([1,'x'])", "TypeError"),
+        (
+            "class Bad:\n    def __iter__(self): return 1\nmin(Bad())",
+            "TypeError",
+        ),
+    ] {
+        assert_eq!(error(source).kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn list_and_tuple_constructors_consume_custom_iterators() {
     let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";
     let program = compile(source, "custom-constructor-iteration").unwrap();

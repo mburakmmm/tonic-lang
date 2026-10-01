@@ -173,6 +173,8 @@ pub(crate) enum Builtin {
     Sum,
     Any,
     All,
+    Min,
+    Max,
     IntRound,
     FloatRound,
     IsInstance,

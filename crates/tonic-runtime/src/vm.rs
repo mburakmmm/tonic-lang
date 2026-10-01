@@ -757,6 +757,12 @@ enum ReturnAction {
         any: bool,
     },
     BoolReduceNext(BoolReduceState),
+    ExtremumIterStart(ExtremumConfig),
+    ExtremumNext(ExtremumState),
+    ExtremumKey {
+        state: ExtremumState,
+        item: Value,
+    },
     ExpandIterableStart(Option<usize>),
     ExpandIterableNext(ArgumentExpansion),
     DictIterableStart(DictConstructionStart),
@@ -903,6 +909,7 @@ pub(super) enum BinaryCompletion {
     Value,
     Equality(EqualityAction),
     Sum { iterator: Value },
+    Extremum(ExtremumCandidate),
 }
 #[derive(Clone)]
 pub(super) enum EqualityAction {
@@ -1058,6 +1065,31 @@ pub(super) struct BoolReduceState {
     iterator: Value,
     any: bool,
 }
+#[derive(Clone)]
+pub(super) struct ExtremumConfig {
+    key: Option<Value>,
+    default: Value,
+    is_max: bool,
+}
+#[derive(Clone)]
+pub(super) enum ExtremumSource {
+    Iterator(Value),
+    Values { items: Vec<Value>, next: usize },
+}
+#[derive(Clone)]
+pub(super) struct ExtremumState {
+    source: ExtremumSource,
+    config: ExtremumConfig,
+    best_item: Value,
+    best_key: Value,
+    has_best: bool,
+}
+#[derive(Clone)]
+pub(super) struct ExtremumCandidate {
+    state: ExtremumState,
+    item: Value,
+    key: Value,
+}
 #[derive(Clone, Copy)]
 pub(super) struct ArgumentExpansion {
     iterator: Value,
@@ -1099,6 +1131,7 @@ pub(super) enum TruthAction {
     },
     Equality(EqualityAction),
     BoolReduce(BoolReduceState),
+    Extremum(ExtremumCandidate),
 }
 struct SetNameCall {
     call: DescriptorCall,
@@ -1353,6 +1386,7 @@ impl ReturnAction {
             Self::CollectIterableStart(kind) => kind.trace(visit),
             Self::SumIterStart(total) => visit(*total),
             Self::BoolReduceIterStart { .. } => {}
+            Self::ExtremumIterStart(config) => config.trace(visit),
             Self::AttributeGet(state) => {
                 visit(state.owner);
                 if let AttributeMissing::Default(value) = state.missing {
@@ -1398,6 +1432,11 @@ impl ReturnAction {
                 }
             }
             Self::BoolReduceNext(state) => visit(state.iterator),
+            Self::ExtremumNext(state) => state.trace(visit),
+            Self::ExtremumKey { state, item } => {
+                state.trace(&mut visit);
+                visit(*item);
+            }
             Self::ExpandIterableNext(state) => visit(state.iterator),
             Self::DictIterableStart(state) => state.trace(visit),
             Self::DictIterableNext(state)
@@ -1560,12 +1599,38 @@ impl Membership {
         visit(self.iterator);
     }
 }
+impl ExtremumConfig {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        self.key.iter().copied().for_each(&mut visit);
+        if self.default != Value::UNBOUND {
+            visit(self.default);
+        }
+    }
+}
+impl ExtremumState {
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match &self.source {
+            ExtremumSource::Iterator(iterator) => visit(*iterator),
+            ExtremumSource::Values { items, .. } => items.iter().copied().for_each(&mut visit),
+        }
+        self.config.trace(&mut visit);
+        if self.has_best {
+            visit(self.best_item);
+            visit(self.best_key);
+        }
+    }
+}
 impl BinaryCompletion {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
             Self::Value => {}
             Self::Equality(action) => action.trace(visit),
             Self::Sum { iterator } => visit(*iterator),
+            Self::Extremum(candidate) => {
+                candidate.state.trace(&mut visit);
+                visit(candidate.item);
+                visit(candidate.key);
+            }
         }
     }
 }
@@ -1576,6 +1641,11 @@ impl TruthAction {
             Self::Jump { original, .. } => visit(*original),
             Self::Equality(action) => action.trace(visit),
             Self::BoolReduce(state) => visit(state.iterator),
+            Self::Extremum(candidate) => {
+                candidate.state.trace(&mut visit);
+                visit(candidate.item);
+                visit(candidate.key);
+            }
         }
     }
 }
@@ -1766,6 +1836,8 @@ impl Vm {
             ("sum", Builtin::Sum),
             ("any", Builtin::Any),
             ("all", Builtin::All),
+            ("min", Builtin::Min),
+            ("max", Builtin::Max),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
@@ -4656,6 +4728,26 @@ impl Vm {
                     self.registers[destination] = Value::bool(!state.any);
                     return Ok(true);
                 }
+                if let ReturnAction::ExtremumNext(state) = &frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "extremum continuation has no destination")
+                    })?;
+                    let state = state.clone();
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.pending_exception = None;
+                    self.finish_extremum(destination, state)?;
+                    return Ok(true);
+                }
                 if let ReturnAction::ExpandIterableNext(state) = frame.action {
                     let unwind = (
                         frame.base,
@@ -5326,6 +5418,9 @@ impl Vm {
                         let mut sum_next = None;
                         let mut bool_reduce_iter_start = None;
                         let mut bool_reduce_next = None;
+                        let mut extremum_iter_start = None;
+                        let mut extremum_next = None;
+                        let mut extremum_key = None;
                         let mut expansion_start = None;
                         let mut expansion_next = None;
                         let mut dict_iterable_start = None;
@@ -5433,6 +5528,15 @@ impl Vm {
                             }
                             ReturnAction::BoolReduceNext(state) => {
                                 bool_reduce_next = Some((state, value));
+                            }
+                            ReturnAction::ExtremumIterStart(config) => {
+                                extremum_iter_start = Some((config, value));
+                            }
+                            ReturnAction::ExtremumNext(state) => {
+                                extremum_next = Some((state, value));
+                            }
+                            ReturnAction::ExtremumKey { state, item } => {
+                                extremum_key = Some((state, item, value));
                             }
                             ReturnAction::ExpandIterableStart(resume_pc) => {
                                 expansion_start = Some((value, resume_pc));
@@ -5651,6 +5755,9 @@ impl Vm {
                             || sum_next.is_some()
                             || bool_reduce_iter_start.is_some()
                             || bool_reduce_next.is_some()
+                            || extremum_iter_start.is_some()
+                            || extremum_next.is_some()
+                            || extremum_key.is_some()
                             || expansion_start.is_some()
                             || expansion_next.is_some()
                             || dict_iterable_start.is_some()
@@ -5758,6 +5865,58 @@ impl Vm {
                                 )?;
                             } else if let Some((state, item)) = bool_reduce_next {
                                 self.continue_bool_reduce_item(p, dest, state, item, output)?;
+                            } else if let Some((config, iterator)) = extremum_iter_start {
+                                self.validate_iterator(iterator)?;
+                                self.continue_extremum(
+                                    p,
+                                    dest,
+                                    ExtremumState {
+                                        source: ExtremumSource::Iterator(iterator),
+                                        config,
+                                        best_item: Value::UNBOUND,
+                                        best_key: Value::UNBOUND,
+                                        has_best: false,
+                                    },
+                                    output,
+                                )?;
+                            } else if let Some((state, item)) = extremum_next {
+                                if let Some(key) = state.config.key {
+                                    let depth = self.frames.len();
+                                    self.invoke_target(
+                                        p,
+                                        key,
+                                        dest,
+                                        calls::Arguments::Inline {
+                                            receiver: None,
+                                            positional: [item, Value::UNBOUND, Value::UNBOUND],
+                                            count: 1,
+                                        },
+                                        output,
+                                    )?;
+                                    if self.frames.len() > depth {
+                                        self.frames
+                                            .last_mut()
+                                            .expect("extremum key frame")
+                                            .action = ReturnAction::ExtremumKey { state, item };
+                                    } else {
+                                        let key = self.registers[dest];
+                                        if let Some(state) = self
+                                            .consider_extremum(p, dest, state, item, key, output)?
+                                        {
+                                            self.continue_extremum(p, dest, state, output)?;
+                                        }
+                                    }
+                                } else if let Some(state) =
+                                    self.consider_extremum(p, dest, state, item, item, output)?
+                                {
+                                    self.continue_extremum(p, dest, state, output)?;
+                                }
+                            } else if let Some((state, item, key)) = extremum_key {
+                                if let Some(state) =
+                                    self.consider_extremum(p, dest, state, item, key, output)?
+                                {
+                                    self.continue_extremum(p, dest, state, output)?;
+                                }
                             } else if let Some((iterator, resume_pc)) = expansion_start {
                                 self.validate_iterator(iterator)?;
                                 self.continue_argument_expansion(

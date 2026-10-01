@@ -43,10 +43,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 113, CPython bridge 15 ve HPy manifest 5; toplam 367 test.
+native handles 5, language/runtime 114, CPython bridge 15 ve HPy manifest 5; toplam 368 test.
 
-Differential corpus: 328 stdout vakası ve 240 exception türü vakası. Seed 42.
-`any`/`all` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 329 stdout vakası ve 250 exception türü vakası. Seed 42.
+`min`/`max` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,

@@ -1747,6 +1747,44 @@ try:
 except StopIteration:
     print('truth-stop-escaped')
 ''')
+
+CASES.append('''print(min([3,1,2]),max([3,1,2]),min(3,1,2),max(3,1,2))
+print(min([],default=9),max((),default=None))
+print(min(['aaa','b','cc'],key=len),max(['aaa','b','cc'],key=len))
+def values():
+    print('generator-start')
+    yield 4
+    print('generator-middle')
+    yield 1
+    yield 3
+print(min(values()),max(values()))
+class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        print('truth',self.value)
+        return self.value
+class KeyValue:
+    def __init__(self,value): self.value=value
+    def __lt__(self,other):
+        print('lt',self.value,other.value)
+        return Truth(self.value<other.value)
+    def __gt__(self,other):
+        print('gt',self.value,other.value)
+        return Truth(self.value>other.value)
+class Item:
+    def __init__(self,name,value): self.name=name; self.value=value
+def keyed(item):
+    print('key',item.name)
+    return KeyValue(item.value)
+items=[Item('first',2),Item('second',1),Item('tie',1),Item('last',3)]
+print(min(items,key=keyed).name,max(items,key=keyed).name)
+class StopKey:
+    def __call__(self,value): raise StopIteration('key-stop')
+try:
+    min([1],key=StopKey())
+except StopIteration:
+    print('key-stop-escaped')
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1810,6 +1848,16 @@ ERRORS = [
     ('class Bad:\n    def __bool__(self): return 1\nany([Bad()])', 'TypeError'),
     ('class Bad:\n    def __len__(self): return -1\nall([Bad()])', 'ValueError'),
     ("class Bad:\n    def __len__(self): raise LookupError('length')\nany([Bad()])", 'LookupError'),
+    ('min()', 'TypeError'),
+    ('max()', 'TypeError'),
+    ('min([])', 'ValueError'),
+    ('max(())', 'ValueError'),
+    ('min(1)', 'TypeError'),
+    ('max([1],unknown=2)', 'TypeError'),
+    ('min(1,2,default=0)', 'TypeError'),
+    ('max([1],key=2)', 'TypeError'),
+    ("min([1,'x'])", 'TypeError'),
+    ('class Bad:\n    def __iter__(self): return 1\nmin(Bad())', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

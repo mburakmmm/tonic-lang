@@ -121,6 +121,9 @@ sonra alınır.
       kısa devreli streaming iterator tüketimi, suspending `__iter__`/`__next__`,
       `__bool__`/`__len__`/`__index__` zinciri, kesin `StopIteration` sınırı,
       precise continuation root'ları ve JIT-caller generic fallback'i.
+    - [x] `min`/`max`; iterable ve variadic biçimler, keyword-only `key`/`default`,
+      streaming tüketim, ilk eşit öğeyi koruyan strict karşılaştırma, suspending
+      iterator/key/comparison/truth zinciri, precise roots ve JIT fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

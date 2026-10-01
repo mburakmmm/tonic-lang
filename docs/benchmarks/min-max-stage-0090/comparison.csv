@@ -1,0 +1,4 @@
+case,phase,tonic_median_us,cpython_median_us,tonic_p95_us,cpython_p95_us,tonic_over_cpython
+min_max,compile,21.062,19.146,21.542,20.791,1.1001
+min_max,warm_run,12168.771,1377.188,12401.708,1395.292,8.8360
+min_max,cold_cli,15571.042,18265.125,17966.291,19996.458,0.8525
