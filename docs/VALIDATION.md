@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 53,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 363 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 54,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 364 test.
 
-Differential corpus: 323 stdout vakası ve 194 exception türü vakası. Seed 42.
-`round` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 324 stdout vakası ve 206 exception türü vakası. Seed 42.
+`pow` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -510,6 +510,18 @@ Exact ratio motoru decimal ties-to-even, bigint negatif basamak, signed zero,
 NaN/infinity ve overflow sınırlarını kapsar. Kalıcı Python 3.14 vakalarına ek
 olarak seed'li 5.000 finite-f64/basamak ve 1.000 bigint/basamak birleşimi
 CPython'ın ürettiği sonuçlarla sıfır değer farkı vermiştir.
+
+`pow` testi iki/üç argümanlı ve positional/keyword çağrıları, explicit `None`,
+native int/float kuvvet, pozitif/negatif modulus, bool, BigInt, negatif üs ve
+modüler tersi kapsar. Suspended `__pow__`/`__rpow__`, Python 3.14 strict-subclass
+ternary reflected önceliği, `NotImplemented`, metaclass ve native int-subclass
+fallback'i interpreter/JIT-caller × allocation-stress GC altında çalıştırılır.
+Kalıcı differential vakaları arity/binder, sıfır modulus, terslenemeyen taban ve
+integer olmayan ternary operand hata sınıflarını da CPython ile karşılaştırır.
+Seed 20261001 ile 1.000 nonnegative ve 500 terslenebilir negative-exponent
+BigInt/modulus birleşimi debug/release × interpreter/JIT/JIT+`gc_every=1`
+yollarında Python 3.14.6 ile toplam 9.000 sonuç karşılaştırmasında sıfır değer
+farkı vermiştir.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

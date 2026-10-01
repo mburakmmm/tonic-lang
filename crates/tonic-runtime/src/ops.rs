@@ -63,6 +63,36 @@ impl Heap {
         self.alloc(Object::Tuple(vec![quotient, remainder]))
     }
 
+    pub fn pow_mod(&mut self, base: Value, exponent: Value, modulus: Value) -> Result<Value> {
+        if !self.is_integer(base) || !self.is_integer(exponent) || !self.is_integer(modulus) {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "pow() 3rd argument not allowed unless all arguments are integers",
+            ));
+        }
+        let base = self.integer(base)?;
+        let exponent = self.integer(exponent)?;
+        let modulus = self.integer(modulus)?;
+        if modulus.is_zero() {
+            return Err(Diagnostic::new(
+                "ValueError",
+                "pow() 3rd argument cannot be 0",
+            ));
+        }
+        if modulus.abs().is_one() {
+            return self.int(BigInt::zero());
+        }
+        let result = if exponent.is_negative() {
+            let inverse = base.modinv(&modulus).ok_or_else(|| {
+                Diagnostic::new("ValueError", "base is not invertible for the given modulus")
+            })?;
+            inverse.modpow(&(-exponent), &modulus)
+        } else {
+            base.modpow(&exponent, &modulus)
+        };
+        self.int(result)
+    }
+
     pub fn inplace_add(&mut self, a: Value, b: Value) -> Result<Value> {
         let storage = self.native_value(a);
         // Probe tags without constructing a TypeError on immediate arithmetic.

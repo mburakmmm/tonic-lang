@@ -43,8 +43,8 @@ The current implementation includes:
   integer/float/string format mini-language, and suspending user `__format__` hooks;
 - classes, C3 multiple inheritance, shapes, descriptors, properties and `super`;
 - canonical builtin constructors, native builtin subclasses, and suspending
-  numeric/index conversion, matrix-multiplication, `divmod`, and exact `round`
-  protocols;
+  numeric/index conversion, matrix-multiplication, `divmod`, exact `round`, and
+  two/three-argument `pow` protocols with modular inverse support;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
   coroutines, exact/custom-awaitable `await` delegation, `async for`, `async with`,
   async list/dict comprehensions and generator expressions, async generators with
@@ -158,8 +158,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 363 Rust tests and a differential corpus of
-323 output cases plus 194 exception cases. The documented local matrix covers
+The repository currently contains 364 Rust tests and a differential corpus of
+324 output cases plus 206 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

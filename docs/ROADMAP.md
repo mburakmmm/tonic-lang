@@ -104,6 +104,11 @@ sonra alınır.
       suspending kullanıcı/metaclass hook'u ve `__index__`, bigint decimal
       yuvarlama, exact IEEE-754 ratio üzerinden ties-to-even, signed zero,
       NaN/infinity sınırları, precise roots ve JIT-caller generic fallback'i.
+    - [x] İki/üç argümanlı `pow`; positional/keyword binder, suspending
+      `__pow__`/`__rpow__`, Python 3.14 ternary strict-subclass reflected
+      önceliği, `NotImplemented`, metaclass dispatch, BigInt modüler üs ve
+      negatif üs için modüler ters, negatif modül işareti, precise roots ve
+      JIT-caller generic fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

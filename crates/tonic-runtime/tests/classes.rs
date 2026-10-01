@@ -1225,6 +1225,74 @@ print((125).__round__(-1),(2.675).__round__(2),int.__round__(1350,-2),float.__ro
 }
 
 #[test]
+fn pow_builtin_supports_ternary_reflection_inverse_and_keywords() {
+    let source = r#"class Number:
+    def __init__(self,value): self.value=value
+    def __pow__(self,other,mod='missing'):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        return ('direct',self.value,other.value,mod,scratch)
+class Child(Number):
+    def __rpow__(self,other,mod='missing'):
+        return ('child',other.value,self.value,mod)
+class Maybe:
+    def __pow__(self,other,mod='missing'): return NotImplemented
+class Reverse:
+    def __rpow__(self,other,mod='missing'): return ('reverse',type(other).__name__,mod)
+class Meta(type):
+    def __pow__(cls,other,mod='missing'): return ('meta',cls.__name__,other,mod)
+class C(metaclass=Meta): pass
+class IntChild(int):
+    def __pow__(self,other,mod='missing'): return NotImplemented
+print(pow(2,10),pow(2,-3),pow(2,10,1000),pow(2,-1,5))
+print(pow(2,3,-5),pow(-2,3,5),pow(2,0,-5),pow(True,3,5),pow(2,3,True),pow(0,-1,1),pow(0,-1,-1),pow(2,-10**20,7))
+print(pow(123456789012345678901234567890,10**20,1000000007))
+print(pow(Number(8),Number(3)),pow(Number(8),Number(3),11))
+print(pow(Number(8),Child(2),13),pow(Maybe(),Reverse()),pow(Maybe(),Reverse(),17))
+print(pow(C,4),pow(C,4,19),pow(IntChild(2),3,5))
+print(pow(base=2,exp=11),pow(base=2,exp=11,mod=17),pow(**{'base':3,'exp':7,'mod':11}),pow(2,3,None))
+def hot_pow(base,exp,mod):
+    total=0
+    for i in range(20): total+=i
+    return pow(base,exp,mod)
+print(hot_pow(2,20,17),hot_pow(Maybe(),Reverse(),23))"#;
+    let expected = b"1024 0.125 24 3\n-2 2 -4 1 0 0 0 4\n252779678\n('direct', 8, 3, 'missing', 10.0) ('direct', 8, 3, 11, 10.0)\n('child', 8, 2, 13) ('reverse', 'Maybe', 'missing') ('reverse', 'Maybe', 17)\n('meta', 'C', 4, 'missing') ('meta', 'C', 4, 19) 3\n2048 8 9 8\n16 ('reverse', 'Maybe', 23)\n";
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&compile(source, "pow-builtin").unwrap(), &mut output)
+            .unwrap();
+        assert_eq!(output, expected);
+    }
+
+    for (source, kind) in [
+        ("pow()", "TypeError"),
+        ("pow(1)", "TypeError"),
+        ("pow(1,2,3,4)", "TypeError"),
+        ("pow(1,2,base=3)", "TypeError"),
+        ("pow(1,2,unknown=3)", "TypeError"),
+        ("pow(base=2)", "TypeError"),
+        ("pow(2,3,0)", "ValueError"),
+        ("pow(2,-1,4)", "ValueError"),
+        ("pow(2.0,3,5)", "TypeError"),
+        ("pow(2,3,5.0)", "TypeError"),
+        ("class C: pass\npow(C(),C(),7)", "TypeError"),
+        (
+            "class C:\n    def __pow__(self,other,mod): return NotImplemented\npow(C(),C(),7)",
+            "TypeError",
+        ),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(&compile(source, "invalid-pow").unwrap(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn power_bitwise_and_invert_protocols_reflect_and_suspend() {
     let source = r#"class Number:
     def __init__(self,value): self.value=value

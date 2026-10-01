@@ -1564,6 +1564,26 @@ impl Vm {
                     }
                     return Ok(());
                 }
+                if matches!(builtin, Builtin::Pow) {
+                    let (base, exponent, modulus) = self.bind_pow_arguments(p, &args)?;
+                    if let Some(modulus) = modulus {
+                        if let Some(state) = self.pow_mod_protocol(base, exponent, modulus)? {
+                            self.continue_binary_protocol(p, destination, state, output)?;
+                        } else {
+                            self.registers[destination] =
+                                self.heap.pow_mod(base, exponent, modulus)?;
+                        }
+                    } else if let Some(state) =
+                        self.binary_protocol(tonic_core::bytecode::Op::Pow, base, exponent)?
+                    {
+                        self.continue_binary_protocol(p, destination, state, output)?;
+                    } else {
+                        self.registers[destination] =
+                            self.heap
+                                .binary(tonic_core::bytecode::Op::Pow, base, exponent)?;
+                    }
+                    return Ok(());
+                }
                 if matches!(builtin, Builtin::Round) || native_round_kind(builtin).is_some() {
                     let (value, ndigits) = if let Some(kind) = native_round_kind(builtin) {
                         if args.keyword_count() != 0 || !(1..=2).contains(&args.count()) {
@@ -2506,9 +2526,8 @@ impl Vm {
             super::BinaryProtocolKind::Opcode(op),
             left,
             right,
-            inplace,
-            direct,
-            reflected,
+            None,
+            (inplace, direct, reflected),
         )
     }
 
@@ -2525,8 +2544,25 @@ impl Vm {
             left,
             right,
             None,
-            "__divmod__",
-            "__rdivmod__",
+            (None, "__divmod__", "__rdivmod__"),
+        )
+    }
+
+    pub(super) fn pow_mod_protocol(
+        &self,
+        base: Value,
+        exponent: Value,
+        modulus: Value,
+    ) -> Result<Option<super::BinaryProtocol>> {
+        if !self.operator_protocol_capable(base) && !self.operator_protocol_capable(exponent) {
+            return Ok(None);
+        }
+        self.binary_protocol_candidates(
+            super::BinaryProtocolKind::PowMod(modulus),
+            base,
+            exponent,
+            Some(modulus),
+            (None, "__pow__", "__rpow__"),
         )
     }
 
@@ -2535,16 +2571,17 @@ impl Vm {
         kind: super::BinaryProtocolKind,
         left: Value,
         right: Value,
-        inplace: Option<&str>,
-        direct: &str,
-        reflected: &str,
+        extra_argument: Option<Value>,
+        methods: (Option<&str>, &str, &str),
     ) -> Result<Option<super::BinaryProtocol>> {
+        let (inplace, direct, reflected) = methods;
         let mut candidates = Vec::with_capacity(3);
         if let Some(inplace) = inplace {
             if let Some(call) = self.operator_method_call(left, inplace)? {
                 candidates.push(super::BinaryCandidate {
                     call,
-                    argument: right,
+                    arguments: [right, Value::UNBOUND],
+                    count: 1,
                     negate: false,
                 });
             }
@@ -2566,7 +2603,8 @@ impl Vm {
             if let Some(call) = call {
                 candidates.push(super::BinaryCandidate {
                     call,
-                    argument,
+                    arguments: [argument, extra_argument.unwrap_or(Value::UNBOUND)],
+                    count: if extra_argument.is_some() { 2 } else { 1 },
                     negate,
                 });
             }
@@ -2620,8 +2658,12 @@ impl Vm {
                 destination,
                 Arguments::Inline {
                     receiver: candidate.call.receiver,
-                    positional: [candidate.argument, Value::UNBOUND, Value::UNBOUND],
-                    count: 1,
+                    positional: [
+                        candidate.arguments[0],
+                        candidate.arguments[1],
+                        Value::UNBOUND,
+                    ],
+                    count: usize::from(candidate.count),
                 },
                 output,
             )?;
@@ -2671,6 +2713,9 @@ impl Vm {
                     .binary(super::base_binary_op(op), state.left, state.right)?
             }
             super::BinaryProtocolKind::DivMod => self.heap.divmod(state.left, state.right)?,
+            super::BinaryProtocolKind::PowMod(modulus) => {
+                self.heap.pow_mod(state.left, state.right, modulus)?
+            }
         };
         Ok(())
     }
@@ -6473,6 +6518,51 @@ impl Vm {
         Ok((number, ndigits.filter(|value| *value != Value::NONE)))
     }
 
+    fn bind_pow_arguments(
+        &self,
+        p: &Program,
+        args: &Arguments<'_>,
+    ) -> Result<(Value, Value, Option<Value>)> {
+        if args.count() > 3 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "pow expects at most three arguments",
+            ));
+        }
+        let mut base = (args.count() >= 1).then(|| args.positional(&self.registers, 0));
+        let mut exponent = (args.count() >= 2).then(|| args.positional(&self.registers, 1));
+        let mut modulus = (args.count() >= 3).then(|| args.positional(&self.registers, 2));
+        for index in 0..args.keyword_count() {
+            let (name, value) = args.keyword(p, &self.registers, index);
+            let slot = match name {
+                "base" => &mut base,
+                "exp" => &mut exponent,
+                "mod" => &mut modulus,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        format!("pow got an unexpected keyword argument '{name}'"),
+                    ))
+                }
+            };
+            if slot.replace(value).is_some() {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    format!("pow got multiple values for argument '{name}'"),
+                ));
+            }
+        }
+        let base = base
+            .ok_or_else(|| Diagnostic::new("TypeError", "pow missing required argument 'base'"))?;
+        let exponent = exponent
+            .ok_or_else(|| Diagnostic::new("TypeError", "pow missing required argument 'exp'"))?;
+        Ok((
+            base,
+            exponent,
+            modulus.filter(|value| *value != Value::NONE),
+        ))
+    }
+
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -6551,7 +6641,11 @@ impl Vm {
             | Builtin::RangeHash => {
                 unreachable!("hash builtin has a suspending call path")
             }
-            Builtin::DivMod | Builtin::Round | Builtin::IntRound | Builtin::FloatRound => {
+            Builtin::DivMod
+            | Builtin::Pow
+            | Builtin::Round
+            | Builtin::IntRound
+            | Builtin::FloatRound => {
                 unreachable!("numeric builtin has a suspending call path")
             }
             Builtin::ObjectNew => {

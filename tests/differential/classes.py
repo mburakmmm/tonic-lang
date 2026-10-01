@@ -1596,6 +1596,33 @@ print(round(FloatChild(2.5)),round(C),round(C,2))
 print(round(**{'number':2.675,'ndigits':2}))
 print((125).__round__(-1),(2.675).__round__(2),int.__round__(1350,-2),float.__round__(1.005,2))
 ''')
+CASES.append('''class Number:
+    def __init__(self,value): self.value=value
+    def __pow__(self,other,mod='missing'): return ('direct',self.value,other.value,mod)
+class Child(Number):
+    def __rpow__(self,other,mod='missing'): return ('child',other.value,self.value,mod)
+class Maybe:
+    def __pow__(self,other,mod='missing'): return NotImplemented
+class Reverse:
+    def __rpow__(self,other,mod='missing'): return ('reverse',type(other).__name__,mod)
+class Meta(type):
+    def __pow__(cls,other,mod='missing'): return ('meta',cls.__name__,other,mod)
+class C(metaclass=Meta): pass
+class IntChild(int):
+    def __pow__(self,other,mod='missing'): return NotImplemented
+print(pow(2,10),pow(2,-3),pow(2,10,1000),pow(2,-1,5))
+print(pow(2,3,-5),pow(-2,3,5),pow(2,0,-5),pow(True,3,5),pow(2,3,True),pow(0,-1,1),pow(0,-1,-1),pow(2,-10**20,7))
+print(pow(123456789012345678901234567890,10**20,1000000007))
+print(pow(Number(8),Number(3)),pow(Number(8),Number(3),11))
+print(pow(Number(8),Child(2),13),pow(Maybe(),Reverse()),pow(Maybe(),Reverse(),17))
+print(pow(C,4),pow(C,4,19),pow(IntChild(2),3,5))
+print(pow(base=2,exp=11),pow(base=2,exp=11,mod=17),pow(**{'base':3,'exp':7,'mod':11}),pow(2,3,None))
+def hot_pow(base,exp,mod):
+    total=0
+    for i in range(20): total+=i
+    return pow(base,exp,mod)
+print(hot_pow(2,20,17),hot_pow(Maybe(),Reverse(),23))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1613,6 +1640,18 @@ ERRORS = [
     ('round(1.7e308,-308)', 'OverflowError'),
     ('(1).__round__(ndigits=2)', 'TypeError'),
     ('float.__round__(1,2)', 'TypeError'),
+    ('pow()', 'TypeError'),
+    ('pow(1)', 'TypeError'),
+    ('pow(1,2,3,4)', 'TypeError'),
+    ('pow(1,2,base=3)', 'TypeError'),
+    ('pow(1,2,unknown=3)', 'TypeError'),
+    ('pow(base=2)', 'TypeError'),
+    ('pow(2,3,0)', 'ValueError'),
+    ('pow(2,-1,4)', 'ValueError'),
+    ('pow(2.0,3,5)', 'TypeError'),
+    ('pow(2,3,5.0)', 'TypeError'),
+    ('class C: pass\npow(C(),C(),7)', 'TypeError'),
+    ('class C:\n    def __pow__(self,other,mod): return NotImplemented\npow(C(),C(),7)', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

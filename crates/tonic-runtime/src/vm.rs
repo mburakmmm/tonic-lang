@@ -866,13 +866,15 @@ pub(super) struct DictMergeState {
 #[derive(Clone, Copy)]
 pub(super) struct BinaryCandidate {
     call: DescriptorCall,
-    argument: Value,
+    arguments: [Value; 2],
+    count: u8,
     negate: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BinaryProtocolKind {
     Opcode(Op),
     DivMod,
+    PowMod(Value),
 }
 #[derive(Clone)]
 pub(super) struct BinaryProtocol {
@@ -1328,10 +1330,16 @@ impl ReturnAction {
             Self::BinaryProtocol(state) => {
                 visit(state.left);
                 visit(state.right);
+                if let BinaryProtocolKind::PowMod(modulus) = state.kind {
+                    visit(modulus);
+                }
                 for candidate in &state.candidates[state.next..] {
                     visit(candidate.call.callable);
                     candidate.call.receiver.iter().copied().for_each(&mut visit);
-                    visit(candidate.argument);
+                    candidate.arguments[..usize::from(candidate.count)]
+                        .iter()
+                        .copied()
+                        .for_each(&mut visit);
                 }
                 state.completion.trace(&mut visit);
             }
@@ -1708,6 +1716,7 @@ impl Vm {
             ("hash", Builtin::Hash),
             ("abs", Builtin::Abs),
             ("divmod", Builtin::DivMod),
+            ("pow", Builtin::Pow),
             ("round", Builtin::Round),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),

@@ -165,6 +165,7 @@ pub(crate) enum Builtin {
     Hash,
     Abs,
     DivMod,
+    Pow,
     Round,
     IntRound,
     FloatRound,

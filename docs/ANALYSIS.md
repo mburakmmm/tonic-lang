@@ -544,6 +544,23 @@ signed-zero ve overflow sınırlarını aynı kuralla taşır; bigint negatif ba
 da aynı exact ratio yuvarlayıcısını paylaşır. JIT caller builtin çağrıda exact
 PC'den generic VM'e çıkar ve dönüşte native yürütmeye devam eder.
 
+Global `pow` iki argümanda normal `**` protokolünü paylaşır; açık `None` üçüncü
+argümanı da Python gibi bu yola indirger. Üçüncü argüman verildiğinde ortak
+binary continuation her aday için iki positional değer taşıyarak
+`__pow__(exp, mod)` ve `__rpow__(base, mod)` çağrılarını askıya alabilir. Python
+3.14'ün ternary reflected dispatch'i, strict-subclass önceliği, aynı sınıfta
+reflected çağrıyı tekrarlamama, `NotImplemented` fallback'i ve metaclass
+dispatch'i korunur. Continuation base, exponent, modulus, kalan descriptor ve
+aday argümanlarını ayrı logical `Value` kökleri olarak izler.
+
+Native üç argümanlı yol yalnız int/bool ve native int alt sınıfı backing'lerini
+kabul eder. `num-bigint` modüler üs algoritması ara tam kuvveti üretmez; negatif
+üs önce modüler ters alır ve terslenemeyen tabanı `ValueError` ile reddeder.
+Sonuç işareti modulus'u izler, sıfır modulus reddedilir ve modulus `±1` doğrudan
+sıfır döndürür. Yeni bytecode veya JIT ABI'si gerekmez: JIT caller builtin
+çağrısında exact PC'den generic VM'e çıkar ve aynı native frame'e döner. Karar
+[ADR 0086](adr/0086-pow-builtin-protocol.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |
