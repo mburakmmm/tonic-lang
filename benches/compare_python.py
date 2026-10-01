@@ -97,6 +97,7 @@ def main():
         "list_iteration": b"20000\n",
         "sum_integer": b"49950000\n",
         "sum_float": b"24975000.0\n",
+        "any_all": b"100\n",
         "closure_calls": b"10000\n",
         "keyword_calls": b"50045000\n",
         "dict_lookup": b"20000\n",

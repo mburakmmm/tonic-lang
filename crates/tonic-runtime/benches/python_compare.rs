@@ -42,6 +42,11 @@ const CASES: &[(&str, &str, &str)] = &[
         "24975000.0\n",
     ),
     (
+        "any_all",
+        include_str!("../../../benches/comparison/any_all.py"),
+        "100\n",
+    ),
+    (
         "closure_calls",
         include_str!("../../../benches/comparison/closure_calls.py"),
         "10000\n",

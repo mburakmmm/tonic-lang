@@ -1057,6 +1057,109 @@ except ValueError:
 }
 
 #[test]
+fn any_and_all_stream_iterables_and_suspend_truth_protocols() {
+    let source = r#"print(any([]),all([]))
+print(any([0,'',None,3]),all([1,'x',[0]]))
+def values():
+    print('generator-start')
+    yield 0
+    print('generator-middle')
+    yield 4
+    print('generator-unreached')
+    yield 5
+print('generator-any',any(values()))
+class Truth:
+    def __init__(self,name,value): self.name=name; self.value=value
+    def __bool__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('bool',self.name)
+        return self.value
+print('truth-any',any([Truth('a',False),Truth('b',True),Truth('c',True)]))
+print('truth-all',all([Truth('d',True),Truth('e',False),Truth('f',True)]))
+class Index:
+    def __init__(self,value): self.value=value
+    def __index__(self):
+        print('index',self.value)
+        return self.value
+class Length:
+    def __init__(self,name,value): self.name=name; self.value=value
+    def __len__(self):
+        print('len',self.name)
+        return Index(self.value)
+print('length-any',any([Length('zero',0),Length('two',2)]))
+print('length-all',all([Length('one',1),Length('zero-again',0),Length('unreached',1)]))
+class Counter:
+    def __init__(self,start,limit): self.value=start; self.limit=limit
+    def __iter__(self):
+        print('counter-iter',self.value,self.limit)
+        return self
+    def __next__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        if self.value>=self.limit: raise StopIteration
+        value=self.value
+        self.value+=1
+        print('counter-next',value)
+        return value
+print('counter-any',any(Counter(0,4)))
+print('counter-all',all(Counter(1,4)))
+def hot(items,use_any):
+    total=0
+    for i in range(30): total+=i
+    return any(items) if use_any else all(items)
+print('hot',hot([0,0,1],True),hot([1,1,0],False))
+print('large',any([False for i in range(5000)]),all([True for i in range(5000)]))
+class StopTruth:
+    def __bool__(self): raise StopIteration('truth-stop')
+try:
+    any([StopTruth()])
+except StopIteration:
+    print('truth-stop-escaped')
+class BadNext:
+    def __iter__(self): return self
+    def __next__(self): raise ValueError('next-error')
+try:
+    all(BadNext())
+except ValueError:
+    print('next-error-escaped')"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"False True\nTrue True\ngenerator-start\ngenerator-middle\ngenerator-any True\nbool a\nbool b\ntruth-any True\nbool d\nbool e\ntruth-all False\nlen zero\nindex 0\nlen two\nindex 2\nlength-any True\nlen one\nindex 1\nlen zero-again\nindex 0\nlength-all False\ncounter-iter 0 4\ncounter-next 0\ncounter-next 1\ncounter-any True\ncounter-iter 1 4\ncounter-next 1\ncounter-next 2\ncounter-next 3\ncounter-all True\nhot True False\nlarge False True\ntruth-stop-escaped\nnext-error-escaped\n",
+    );
+
+    for (source, kind) in [
+        ("any()", "TypeError"),
+        ("all()", "TypeError"),
+        ("any([],1)", "TypeError"),
+        ("all(iterable=[])", "TypeError"),
+        ("any(1)", "TypeError"),
+        (
+            "class Bad:\n    def __iter__(self): return 1\nany(Bad())",
+            "TypeError",
+        ),
+        (
+            "class Bad:\n    def __iter__(self): return self\n    def __next__(self): raise ValueError('next')\nall(Bad())",
+            "ValueError",
+        ),
+        (
+            "class Bad:\n    def __bool__(self): return 1\nany([Bad()])",
+            "TypeError",
+        ),
+        (
+            "class Bad:\n    def __len__(self): return -1\nall([Bad()])",
+            "ValueError",
+        ),
+        (
+            "class Bad:\n    def __len__(self): raise LookupError('length')\nany([Bad()])",
+            "LookupError",
+        ),
+    ] {
+        assert_eq!(error(source).kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn list_and_tuple_constructors_consume_custom_iterators() {
     let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";
     let program = compile(source, "custom-constructor-iteration").unwrap();

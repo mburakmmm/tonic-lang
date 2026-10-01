@@ -1,0 +1,4 @@
+case,phase,tonic_median_us,cpython_median_us,tonic_p95_us,cpython_p95_us,tonic_over_cpython
+any_all,compile,28.750,28.896,29.292,29.750,0.9950
+any_all,warm_run,6788.479,341.438,6951.500,355.500,19.8821
+any_all,cold_cli,10046.125,16846.625,11712.333,17276.583,0.5963

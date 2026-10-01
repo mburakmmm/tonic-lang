@@ -1,7 +1,7 @@
 //! Call binding: ordinary calls read a register window; only actual expansion
 //! uses scratch vectors. Guest tuple/dict objects exist only for *args/**kwargs.
 use super::{
-    ArgumentExpansion, AsyncGeneratorCompletion, AsyncWake, DictConstruction,
+    ArgumentExpansion, AsyncGeneratorCompletion, AsyncWake, BoolReduceState, DictConstruction,
     DictConstructionStart, DictPairConstruction, EventLoopReady, EventLoopState, Frame,
     IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, SumState,
     SumTotal, Vm,
@@ -1665,6 +1665,27 @@ impl Vm {
                     let (source, start) = self.bind_sum_arguments(p, &args)?;
                     return self.invoke_sum(p, destination, source, start, output);
                 }
+                if matches!(builtin, Builtin::Any | Builtin::All) {
+                    if args.keyword_count() != 0 || args.count() != 1 {
+                        let name = if matches!(builtin, Builtin::Any) {
+                            "any"
+                        } else {
+                            "all"
+                        };
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            format!("{name} expects exactly one positional argument"),
+                        ));
+                    }
+                    let source = args.positional(&self.registers, 0);
+                    return self.invoke_bool_reduce(
+                        p,
+                        destination,
+                        source,
+                        matches!(builtin, Builtin::Any),
+                        output,
+                    );
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -2385,18 +2406,36 @@ impl Vm {
         action: super::TruthAction,
         output: &mut dyn Write,
     ) -> Result<()> {
-        let protocol_call = if let Some(call) = self.heap.special_method_call(value, "__bool__")? {
-            Some((call, super::TruthProtocol::Bool))
-        } else {
-            self.heap
-                .special_method_call(value, "__len__")?
-                .map(|call| (call, super::TruthProtocol::Length))
-        };
+        let protocol_call = self.truth_protocol_call(value)?;
         let Some((call, protocol)) = protocol_call else {
             let truth = self.heap.truth(value)?;
             self.apply_truth(p, destination, truth, action, output)?;
             return Ok(());
         };
+        self.invoke_truth_protocol_call(p, destination, call, protocol, action, output)
+    }
+    fn truth_protocol_call(
+        &self,
+        value: Value,
+    ) -> Result<Option<(crate::classes::DescriptorCall, super::TruthProtocol)>> {
+        if let Some(call) = self.heap.special_method_call(value, "__bool__")? {
+            Ok(Some((call, super::TruthProtocol::Bool)))
+        } else {
+            Ok(self
+                .heap
+                .special_method_call(value, "__len__")?
+                .map(|call| (call, super::TruthProtocol::Length)))
+        }
+    }
+    fn invoke_truth_protocol_call(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        call: crate::classes::DescriptorCall,
+        protocol: super::TruthProtocol,
+        action: super::TruthAction,
+        output: &mut dyn Write,
+    ) -> Result<()> {
         let depth = self.frames.len();
         self.invoke_target(
             p,
@@ -2474,6 +2513,9 @@ impl Vm {
             }
             super::TruthAction::Equality(action) => {
                 return self.complete_equality(p, destination, truth, action, output)
+            }
+            super::TruthAction::BoolReduce(state) => {
+                return self.finish_bool_reduce_truth(p, destination, truth, state, output)
             }
         }
         Ok(())
@@ -4313,6 +4355,179 @@ impl Vm {
                 Some(next) => state = next,
                 None => return Ok(()),
             }
+        }
+    }
+
+    pub(super) fn invoke_bool_reduce(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        source: Value,
+        any: bool,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => {
+                self.continue_bool_reduce(p, destination, BoolReduceState { iterator, any }, output)
+            }
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("boolean reduction __iter__ frame")
+                        .action = ReturnAction::BoolReduceIterStart { any };
+                    Ok(())
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    self.continue_bool_reduce(
+                        p,
+                        destination,
+                        BoolReduceState { iterator, any },
+                        output,
+                    )
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn continue_bool_reduce(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: BoolReduceState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        loop {
+            let item = if let Some(resumable) = self.iterator_resumable(state.iterator) {
+                return match self.resume_generator(
+                    p,
+                    resumable,
+                    destination,
+                    Value::NONE,
+                    ReturnAction::BoolReduceNext(state),
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind == "StopIteration" => {
+                        self.pending_exception = None;
+                        self.registers[destination] = Value::bool(!state.any);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+            } else if self.heap.is_iterator(state.iterator) {
+                let Some(item) = self.heap.next(state.iterator)? else {
+                    self.registers[destination] = Value::bool(!state.any);
+                    return Ok(());
+                };
+                item
+            } else {
+                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                };
+                let depth = self.frames.len();
+                match self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                ) {
+                    Ok(()) => {}
+                    Err(error) if error.kind == "StopIteration" => {
+                        self.pending_exception = None;
+                        self.registers[destination] = Value::bool(!state.any);
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+                if self.frames.len() > depth {
+                    self.frames
+                        .last_mut()
+                        .expect("boolean reduction __next__ frame")
+                        .action = ReturnAction::BoolReduceNext(state);
+                    return Ok(());
+                }
+                self.registers[destination]
+            };
+
+            if self.operator_protocol_capable(item) {
+                if let Some((call, protocol)) = self.truth_protocol_call(item)? {
+                    return self.invoke_truth_protocol_call(
+                        p,
+                        destination,
+                        call,
+                        protocol,
+                        super::TruthAction::BoolReduce(state),
+                        output,
+                    );
+                }
+            }
+            let truth = self.heap.truth(item)?;
+            if truth == state.any {
+                self.registers[destination] = Value::bool(truth);
+                return Ok(());
+            }
+        }
+    }
+
+    pub(super) fn continue_bool_reduce_item(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: BoolReduceState,
+        item: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if self.operator_protocol_capable(item) {
+            if let Some((call, protocol)) = self.truth_protocol_call(item)? {
+                return self.invoke_truth_protocol_call(
+                    p,
+                    destination,
+                    call,
+                    protocol,
+                    super::TruthAction::BoolReduce(state),
+                    output,
+                );
+            }
+        }
+        let truth = self.heap.truth(item)?;
+        self.finish_bool_reduce_truth(p, destination, truth, state, output)
+    }
+
+    pub(super) fn finish_bool_reduce_truth(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        truth: bool,
+        state: BoolReduceState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if truth == state.any {
+            self.registers[destination] = Value::bool(truth);
+            Ok(())
+        } else {
+            self.continue_bool_reduce(p, destination, state, output)
         }
     }
 
@@ -7090,6 +7305,8 @@ impl Vm {
             | Builtin::Ascii
             | Builtin::Format
             | Builtin::Sum
+            | Builtin::Any
+            | Builtin::All
             | Builtin::IntRound
             | Builtin::FloatRound => {
                 unreachable!("builtin has a suspending protocol call path")

@@ -117,6 +117,10 @@ sonra alınır.
       `NotImplemented`/strict-subclass sırası, BigInt sınırı ve Python 3.14
       Neumaier compensated exact-float sonucu, precise roots ve JIT-caller
       generic fallback'i.
+    - [x] `any(iterable, /)` ve `all(iterable, /)`; materialization yapmadan
+      kısa devreli streaming iterator tüketimi, suspending `__iter__`/`__next__`,
+      `__bool__`/`__len__`/`__index__` zinciri, kesin `StopIteration` sınırı,
+      precise continuation root'ları ve JIT-caller generic fallback'i.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

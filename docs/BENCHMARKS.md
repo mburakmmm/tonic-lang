@@ -107,3 +107,23 @@ profiling/JIT builtin çalışmalarına açık bir hedef verir. Cold CLI oranı 
 daha kısa process başlangıcını ölçer ve warm runtime üstünlüğü olarak okunmamalıdır.
 Ham 30 warm ve 15 cold örnek, p95 değerleri, binary/source hash'leri ve sınırlamalar
 [sum-stage-0088](benchmarks/sum-stage-0088/) altında saklanır.
+
+## `any`/`all` builtin ara kabul ölçümü
+
+ADR 0089'un kalıcı iş yükü, 1.000 `False` ve 1.000 `True` öğeyi `any` ve
+`all` ile 100 kez tam tarar. Release interpreter medianı 6.596,541 µs'dir;
+eşdeğer konuk `for` döngüleri 28.471,083 µs sürer. Builtin yol 4,32× daha hızlıdır
+ve bytecode dispatch sayısını 1.114.740'tan 14.340'a indirir. Her iki yol da
+kaynak listeler ve VM kurulumu dahil 208 guest allocation raporlar; builtin
+tarama öğe başına managed nesne üretmez.
+
+| İş yükü/faz | Tonic median µs | CPython 3.14.6 median µs | Tonic / CPython |
+|---|---:|---:|---:|
+| `any` + `all`, warm run | 6.788,479 | 341,438 | 19,8821× |
+| `any` + `all`, cold CLI | 10.046,125 | 16.846,625 | 0,5963× |
+
+Warm taramada CPython belirgin biçimde öndedir. Cold CLI sonucu süreç başlatma,
+parse, compile ve yürütmeyi birlikte ölçer; runtime throughput üstünlüğü olarak
+yorumlanmaz. Bu ölçüm nihai dil benchmark'ı değildir. Ham örnekler, p95 değerleri,
+binary/source hash'leri ve sınırlamalar
+[any-all-stage-0089](benchmarks/any-all-stage-0089/) altında saklanır.

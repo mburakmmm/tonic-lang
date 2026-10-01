@@ -69,6 +69,7 @@ biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
 `and/or` operand döndürür ve kısa devre yapar. Builtin isimleri yeniden bağlanabilir.
 `print`, `range`, `len`, `abs`, `divmod`, `round`, `pow`, `repr`, `ascii`,
 `format`, Python 3.14 compensated-float hızlı yoluna sahip streaming `sum`,
+iterator ve doğruluk protokollerini askıya alabilen kısa devreli `any`/`all`,
 `object`, `isinstance`, `issubclass`, `getattr`, `setattr`, `hasattr` sağlanır.
 Type-check builtin'lerinin classinfo argümanı
 Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlardan

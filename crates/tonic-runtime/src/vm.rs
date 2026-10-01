@@ -753,6 +753,10 @@ enum ReturnAction {
     CollectIterableNext(IterableCollection),
     SumIterStart(Value),
     SumNext(SumState),
+    BoolReduceIterStart {
+        any: bool,
+    },
+    BoolReduceNext(BoolReduceState),
     ExpandIterableStart(Option<usize>),
     ExpandIterableNext(ArgumentExpansion),
     DictIterableStart(DictConstructionStart),
@@ -1050,6 +1054,11 @@ pub(super) enum SumTotal {
     Generic(Value),
 }
 #[derive(Clone, Copy)]
+pub(super) struct BoolReduceState {
+    iterator: Value,
+    any: bool,
+}
+#[derive(Clone, Copy)]
 pub(super) struct ArgumentExpansion {
     iterator: Value,
     resume_pc: Option<usize>,
@@ -1089,6 +1098,7 @@ pub(super) enum TruthAction {
         original: Value,
     },
     Equality(EqualityAction),
+    BoolReduce(BoolReduceState),
 }
 struct SetNameCall {
     call: DescriptorCall,
@@ -1342,6 +1352,7 @@ impl ReturnAction {
             Self::Next(default) => default.iter().copied().for_each(visit),
             Self::CollectIterableStart(kind) => kind.trace(visit),
             Self::SumIterStart(total) => visit(*total),
+            Self::BoolReduceIterStart { .. } => {}
             Self::AttributeGet(state) => {
                 visit(state.owner);
                 if let AttributeMissing::Default(value) = state.missing {
@@ -1386,6 +1397,7 @@ impl ReturnAction {
                     visit(total);
                 }
             }
+            Self::BoolReduceNext(state) => visit(state.iterator),
             Self::ExpandIterableNext(state) => visit(state.iterator),
             Self::DictIterableStart(state) => state.trace(visit),
             Self::DictIterableNext(state)
@@ -1563,6 +1575,7 @@ impl TruthAction {
             Self::Not | Self::Return => {}
             Self::Jump { original, .. } => visit(*original),
             Self::Equality(action) => action.trace(visit),
+            Self::BoolReduce(state) => visit(state.iterator),
         }
     }
 }
@@ -1751,6 +1764,8 @@ impl Vm {
             ("ascii", Builtin::Ascii),
             ("format", Builtin::Format),
             ("sum", Builtin::Sum),
+            ("any", Builtin::Any),
+            ("all", Builtin::All),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
@@ -4619,6 +4634,28 @@ impl Vm {
                     self.registers[destination] = self.materialize_sum_total(state.total)?;
                     return Ok(true);
                 }
+                if let ReturnAction::BoolReduceNext(state) = frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new(
+                            "BytecodeError",
+                            "boolean reduction continuation has no destination",
+                        )
+                    })?;
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.pending_exception = None;
+                    self.registers[destination] = Value::bool(!state.any);
+                    return Ok(true);
+                }
                 if let ReturnAction::ExpandIterableNext(state) = frame.action {
                     let unwind = (
                         frame.base,
@@ -5287,6 +5324,8 @@ impl Vm {
                         let mut iterable_next = None;
                         let mut sum_iter_start = None;
                         let mut sum_next = None;
+                        let mut bool_reduce_iter_start = None;
+                        let mut bool_reduce_next = None;
                         let mut expansion_start = None;
                         let mut expansion_next = None;
                         let mut dict_iterable_start = None;
@@ -5388,6 +5427,12 @@ impl Vm {
                             }
                             ReturnAction::SumNext(state) => {
                                 sum_next = Some((state, value));
+                            }
+                            ReturnAction::BoolReduceIterStart { any } => {
+                                bool_reduce_iter_start = Some((value, any));
+                            }
+                            ReturnAction::BoolReduceNext(state) => {
+                                bool_reduce_next = Some((state, value));
                             }
                             ReturnAction::ExpandIterableStart(resume_pc) => {
                                 expansion_start = Some((value, resume_pc));
@@ -5604,6 +5649,8 @@ impl Vm {
                             || iterable_next.is_some()
                             || sum_iter_start.is_some()
                             || sum_next.is_some()
+                            || bool_reduce_iter_start.is_some()
+                            || bool_reduce_next.is_some()
                             || expansion_start.is_some()
                             || expansion_next.is_some()
                             || dict_iterable_start.is_some()
@@ -5701,6 +5748,16 @@ impl Vm {
                                 {
                                     self.continue_sum(p, dest, state, output)?;
                                 }
+                            } else if let Some((iterator, any)) = bool_reduce_iter_start {
+                                self.validate_iterator(iterator)?;
+                                self.continue_bool_reduce(
+                                    p,
+                                    dest,
+                                    BoolReduceState { iterator, any },
+                                    output,
+                                )?;
+                            } else if let Some((state, item)) = bool_reduce_next {
+                                self.continue_bool_reduce_item(p, dest, state, item, output)?;
                             } else if let Some((iterator, resume_pc)) = expansion_start {
                                 self.validate_iterator(iterator)?;
                                 self.continue_argument_expansion(

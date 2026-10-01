@@ -1700,6 +1700,53 @@ try:
 except ValueError:
     print('next-error-escaped')
 ''')
+
+CASES.append('''print(any([]),all([]),any([0,'',None,3]),all([1,'x',[0]]))
+def values():
+    print('generator-start')
+    yield 0
+    print('generator-middle')
+    yield 4
+    print('generator-unreached')
+    yield 5
+print(any(values()))
+class Truth:
+    def __init__(self,name,value): self.name=name; self.value=value
+    def __bool__(self):
+        print('bool',self.name)
+        return self.value
+print(any([Truth('a',False),Truth('b',True),Truth('c',True)]))
+print(all([Truth('d',True),Truth('e',False),Truth('f',True)]))
+class Index:
+    def __init__(self,value): self.value=value
+    def __index__(self):
+        print('index',self.value)
+        return self.value
+class Length:
+    def __init__(self,name,value): self.name=name; self.value=value
+    def __len__(self):
+        print('len',self.name)
+        return Index(self.value)
+print(any([Length('zero',0),Length('two',2)]))
+print(all([Length('one',1),Length('zero-again',0),Length('unreached',1)]))
+class Counter:
+    def __init__(self,start,limit): self.value=start; self.limit=limit
+    def __iter__(self): return self
+    def __next__(self):
+        if self.value>=self.limit: raise StopIteration
+        value=self.value
+        self.value+=1
+        print('next',value)
+        return value
+print(any(Counter(0,4)))
+print(all(Counter(1,4)))
+class StopTruth:
+    def __bool__(self): raise StopIteration('truth-stop')
+try:
+    any([StopTruth()])
+except StopIteration:
+    print('truth-stop-escaped')
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1753,6 +1800,16 @@ ERRORS = [
     ("class Bad:\n    def __iter__(self): return self\n    def __next__(self): raise ValueError('next')\nsum(Bad())", 'ValueError'),
     ("class Bad:\n    def __radd__(self,other): raise ValueError('add')\nsum([Bad()])", 'ValueError'),
     ('class Bad:\n    def __radd__(self,other): return NotImplemented\nsum([Bad()])', 'TypeError'),
+    ('any()', 'TypeError'),
+    ('all()', 'TypeError'),
+    ('any([],1)', 'TypeError'),
+    ('all(iterable=[])', 'TypeError'),
+    ('any(1)', 'TypeError'),
+    ('class Bad:\n    def __iter__(self): return 1\nany(Bad())', 'TypeError'),
+    ("class Bad:\n    def __iter__(self): return self\n    def __next__(self): raise ValueError('next')\nall(Bad())", 'ValueError'),
+    ('class Bad:\n    def __bool__(self): return 1\nany([Bad()])', 'TypeError'),
+    ('class Bad:\n    def __len__(self): return -1\nall([Bad()])', 'ValueError'),
+    ("class Bad:\n    def __len__(self): raise LookupError('length')\nany([Bad()])", 'LookupError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),
