@@ -109,6 +109,9 @@ sonra alınır.
       önceliği, `NotImplemented`, metaclass dispatch, BigInt modüler üs ve
       negatif üs için modüler ters, negatif modül işareti, precise roots ve
       JIT-caller generic fallback'i.
+    - [x] `repr`/`ascii`/`format`; positional-only arity, ortak suspending
+      `__repr__`/`__format__` continuation'ı, Unicode ASCII escaping, metaclass
+      dispatch, dönüş/spec tipi doğrulaması ve f-string ile tek protokol yolu.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

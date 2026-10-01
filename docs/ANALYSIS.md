@@ -561,6 +561,20 @@ sıfır döndürür. Yeni bytecode veya JIT ABI'si gerekmez: JIT caller builtin
 çağrısında exact PC'den generic VM'e çıkar ve aynı native frame'e döner. Karar
 [ADR 0086](adr/0086-pow-builtin-protocol.md) dosyasındadır.
 
+`repr`, `ascii` ve `format` builtin'leri f-string için zaten gereken conversion
+motorunu ayrı bir ikinci uygulama oluşturmadan kullanır. `repr` ve `ascii`
+`__repr__` descriptor'ını, `format` ise `__format__(spec)` çağrısını normal guest
+frame'inde askıya alabilir; dönüşler exact/native string backing üzerinden
+doğrulanıp yeni managed string olarak yayımlanır. `ascii`, descriptor sonucuna
+veya native fallback temsiline aynı Unicode escape dönüşümünü uygular.
+
+Class değerlerinde bu protokoller instance sınıfı yerine metaclass üzerinden
+aranır. Ortak alt yordam f-string `!s`/`!r`/`!a` ve `FORMAT_VALUE` yoluna da
+bağlandığı için builtin ile interpolation arasında dispatch farkı kalmaz. Bütün
+argümanlar caller veya callee register'larında logical `Value` kökü olarak
+kalır; JIT yeni opcode ya da ABI olmadan mevcut generic call side-exit'ini
+kullanır. Karar [ADR 0087](adr/0087-repr-ascii-format-builtins.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

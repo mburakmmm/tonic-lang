@@ -42,11 +42,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
-call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 54,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 364 test.
+call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
+native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 365 test.
 
-Differential corpus: 324 stdout vakası ve 206 exception türü vakası. Seed 42.
-`pow` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 325 stdout vakası ve 218 exception türü vakası. Seed 42.
+`repr`/`ascii`/`format` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -522,6 +522,14 @@ Seed 20261001 ile 1.000 nonnegative ve 500 terslenebilir negative-exponent
 BigInt/modulus birleşimi debug/release × interpreter/JIT/JIT+`gc_every=1`
 yollarında Python 3.14.6 ile toplam 9.000 sonuç karşılaştırmasında sıfır değer
 farkı vermiştir.
+
+Global `repr`/`ascii`/`format` testi user instance ve metaclass hook'larını,
+askıya alınan `__repr__`/`__format__` frame'lerini, nested Unicode ASCII
+escaping'i, native integer/float/string format-spec'lerini ve JIT caller dönüşünü
+interpreter/JIT × allocation-stress GC altında doğrular. F-string `!s`/`!r`/`!a`
+ve format-spec opkodları aynı alt yordamı kullanır; metaclass override'ları da bu
+yüzeyde karşılaştırılır. Differential hata vakaları positional-only arity,
+keyword reddi, string olmayan spec ve hook dönüşlerini Python 3.14 ile eşler.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

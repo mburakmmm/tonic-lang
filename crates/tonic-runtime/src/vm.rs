@@ -704,6 +704,12 @@ enum AsyncGeneratorCompletion {
         exception: Value,
     },
 }
+#[derive(Clone, Copy)]
+pub(super) enum StringConversionKind {
+    Str,
+    Repr,
+    Ascii,
+}
 enum ReturnAction {
     Value,
     Iterator,
@@ -1718,6 +1724,9 @@ impl Vm {
             ("divmod", Builtin::DivMod),
             ("pow", Builtin::Pow),
             ("round", Builtin::Round),
+            ("repr", Builtin::Repr),
+            ("ascii", Builtin::Ascii),
+            ("format", Builtin::Format),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
@@ -6156,76 +6165,18 @@ impl Vm {
                     }
                     Op::Convert => {
                         let source = self.read(b)?;
-                        let method = if i.c == 1 { "__str__" } else { "__repr__" };
-                        if let Some(call) = self.heap.special_method_call(source, method)? {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                call.callable,
-                                a,
-                                Arguments::Inline {
-                                    receiver: call.receiver,
-                                    positional: [Value::UNBOUND; 3],
-                                    count: 0,
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames.last_mut().expect("conversion frame").action =
-                                    ReturnAction::StringConversion {
-                                        ascii: i.c == 3,
-                                        repr: i.c != 1,
-                                    };
-                            } else {
-                                let result = self.read(a)?;
-                                self.registers[a] =
-                                    self.finish_string_conversion(result, i.c == 3, method)?;
-                            }
-                        } else {
-                            let mut text = self.heap.format(source, i.c != 1)?;
-                            if i.c == 3 {
-                                text = ascii_only(&text);
-                            }
-                            self.registers[a] = self.heap.alloc(Object::Str(text))?;
-                        }
+                        let conversion = match i.c {
+                            1 => StringConversionKind::Str,
+                            2 => StringConversionKind::Repr,
+                            3 => StringConversionKind::Ascii,
+                            _ => unreachable!("verified conversion kind"),
+                        };
+                        self.invoke_string_conversion(p, a, source, conversion, output)?;
                     }
                     Op::FormatValue => {
                         let value = self.read(b)?;
                         let spec_value = self.read(c)?;
-                        let spec = match self.heap.get(self.heap.native_value(spec_value))? {
-                            Object::Str(spec) => spec.clone(),
-                            _ => {
-                                return Err(Diagnostic::new(
-                                    "TypeError",
-                                    "format specifier must be a string",
-                                ))
-                            }
-                        };
-                        if let Some(call) = self.heap.special_method_call(value, "__format__")? {
-                            let depth = self.frames.len();
-                            self.invoke(
-                                p,
-                                call.callable,
-                                a,
-                                Arguments::Inline {
-                                    receiver: call.receiver,
-                                    positional: [spec_value, Value::UNBOUND, Value::UNBOUND],
-                                    count: 1,
-                                },
-                                output,
-                            )?;
-                            if self.frames.len() > depth {
-                                self.frames.last_mut().expect("format frame").action =
-                                    ReturnAction::FormatResult;
-                            } else {
-                                let result = self.read(a)?;
-                                self.registers[a] =
-                                    self.finish_string_conversion(result, false, "__format__")?;
-                            }
-                        } else {
-                            let text = self.heap.format_spec(value, &spec)?;
-                            self.registers[a] = self.heap.alloc(Object::Str(text))?;
-                        }
+                        self.invoke_format_value(p, a, value, spec_value, output)?;
                     }
                     Op::MatchSequence => {
                         let source = self.read(b)?;

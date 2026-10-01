@@ -1293,6 +1293,76 @@ print(hot_pow(2,20,17),hot_pow(Maybe(),Reverse(),23))"#;
 }
 
 #[test]
+fn repr_ascii_and_format_builtins_suspend_and_use_metaclasses() {
+    let source = r#"class Display:
+    def __repr__(self):
+        total=0.0
+        for i in range(20): total+=0.5
+        return 'répr-字-'+str(total)
+    def __format__(self,spec):
+        total=0.0
+        for i in range(20): total+=0.5
+        return '['+spec+':'+str(total)+']'
+class Meta(type):
+    def __repr__(cls): return 'méta-'+cls.__name__
+    def __format__(cls,spec): return '<'+cls.__name__+':'+spec+'>'
+class C(metaclass=Meta): pass
+value=Display()
+print(repr(value),ascii(value),format(value),format(value,'custom'))
+print(repr(C),ascii(C),format(C,'kind'),f'{C!r}',f'{C!a}',f'{C:spec}')
+print(format(12,'04d'),format(1.25,'.1f'),format('a','>3'))
+print(repr([1,'é']),ascii([1,'é']))
+def hot(value):
+    total=0
+    for i in range(20): total+=i
+    return (repr(value),ascii(value),format(value,'hot'))
+print(hot(value))"#;
+    let expected = "répr-字-10.0 r\\xe9pr-\\u5b57-10.0 [:10.0] [custom:10.0]\nméta-C m\\xe9ta-C <C:kind> méta-C m\\xe9ta-C <C:spec>\n0012 1.2   a\n[1, 'é'] [1, '\\xe9']\n('répr-字-10.0', 'r\\\\xe9pr-\\\\u5b57-10.0', '[hot:10.0]')\n";
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(
+            &compile(source, "repr-format-builtins").unwrap(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), expected);
+    }
+
+    for (source, kind) in [
+        ("repr()", "TypeError"),
+        ("repr(1,2)", "TypeError"),
+        ("repr(obj=1)", "TypeError"),
+        ("ascii()", "TypeError"),
+        ("ascii(obj=1)", "TypeError"),
+        ("format()", "TypeError"),
+        ("format(1,2,3)", "TypeError"),
+        ("format(value=1)", "TypeError"),
+        ("format(1,1)", "TypeError"),
+        (
+            "class Bad:\n    def __repr__(self): return 1\nrepr(Bad())",
+            "TypeError",
+        ),
+        (
+            "class Bad:\n    def __format__(self,spec): return 1\nformat(Bad())",
+            "TypeError",
+        ),
+        ("format(object(),'x')", "TypeError"),
+    ] {
+        let error = Vm::new()
+            .unwrap()
+            .run(
+                &compile(source, "invalid-repr-format").unwrap(),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn power_bitwise_and_invert_protocols_reflect_and_suspend() {
     let source = r#"class Number:
     def __init__(self,value): self.value=value

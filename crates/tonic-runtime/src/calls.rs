@@ -1648,6 +1648,18 @@ impl Vm {
                     self.registers[destination] = self.heap.round(value, None)?;
                     return Ok(());
                 }
+                if matches!(builtin, Builtin::Repr | Builtin::Ascii) {
+                    return self.invoke_repr_builtin(
+                        p,
+                        destination,
+                        &args,
+                        matches!(builtin, Builtin::Ascii),
+                        output,
+                    );
+                }
+                if matches!(builtin, Builtin::Format) {
+                    return self.invoke_format_builtin(p, destination, &args, output);
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -2461,7 +2473,7 @@ impl Vm {
         }
         Ok(())
     }
-    fn operator_method_call(
+    pub(super) fn operator_method_call(
         &self,
         value: Value,
         name: &str,
@@ -6563,6 +6575,149 @@ impl Vm {
         ))
     }
 
+    fn invoke_repr_builtin(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        args: &Arguments<'_>,
+        ascii: bool,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.keyword_count() != 0 || args.count() != 1 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                if ascii {
+                    "ascii expects exactly one positional argument"
+                } else {
+                    "repr expects exactly one positional argument"
+                },
+            ));
+        }
+        let value = args.positional(&self.registers, 0);
+        self.invoke_string_conversion(
+            p,
+            destination,
+            value,
+            if ascii {
+                super::StringConversionKind::Ascii
+            } else {
+                super::StringConversionKind::Repr
+            },
+            output,
+        )
+    }
+
+    pub(super) fn invoke_string_conversion(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        conversion: super::StringConversionKind,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let (method, ascii, repr) = match conversion {
+            super::StringConversionKind::Str => ("__str__", false, false),
+            super::StringConversionKind::Repr => ("__repr__", false, true),
+            super::StringConversionKind::Ascii => ("__repr__", true, true),
+        };
+        if let Some(call) = self.operator_method_call(value, method)? {
+            let depth = self.frames.len();
+            self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [Value::UNBOUND; 3],
+                    count: 0,
+                },
+                output,
+            )?;
+            if self.frames.len() > depth {
+                self.frames.last_mut().expect("conversion frame").action =
+                    super::ReturnAction::StringConversion { ascii, repr };
+            } else {
+                let result = self.registers[destination];
+                self.registers[destination] =
+                    self.finish_string_conversion(result, ascii, method)?;
+            }
+        } else {
+            let mut text = self.heap.format(value, repr)?;
+            if ascii {
+                text = super::ascii_only(&text);
+            }
+            self.registers[destination] = self.heap.alloc(Object::Str(text))?;
+        }
+        Ok(())
+    }
+
+    fn invoke_format_builtin(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        args: &Arguments<'_>,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        if args.keyword_count() != 0 || !(1..=2).contains(&args.count()) {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "format expects one or two positional arguments",
+            ));
+        }
+        let value = args.positional(&self.registers, 0);
+        let spec_value = if args.count() == 2 {
+            args.positional(&self.registers, 1)
+        } else {
+            self.heap.alloc(Object::Str(String::new()))?
+        };
+        self.invoke_format_value(p, destination, value, spec_value, output)
+    }
+
+    pub(super) fn invoke_format_value(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        value: Value,
+        spec_value: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        let spec = match self.heap.get(self.heap.native_value(spec_value))? {
+            Object::Str(spec) => spec.clone(),
+            _ => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "format specifier must be a string",
+                ))
+            }
+        };
+        if let Some(call) = self.operator_method_call(value, "__format__")? {
+            let depth = self.frames.len();
+            self.invoke_target(
+                p,
+                call.callable,
+                destination,
+                Arguments::Inline {
+                    receiver: call.receiver,
+                    positional: [spec_value, Value::UNBOUND, Value::UNBOUND],
+                    count: 1,
+                },
+                output,
+            )?;
+            if self.frames.len() > depth {
+                self.frames.last_mut().expect("format frame").action =
+                    super::ReturnAction::FormatResult;
+            } else {
+                let result = self.registers[destination];
+                self.registers[destination] =
+                    self.finish_string_conversion(result, false, "__format__")?;
+            }
+        } else {
+            let text = self.heap.format_spec(value, &spec)?;
+            self.registers[destination] = self.heap.alloc(Object::Str(text))?;
+        }
+        Ok(())
+    }
+
     fn call_builtin(
         &mut self,
         builtin: Builtin,
@@ -6644,9 +6799,12 @@ impl Vm {
             Builtin::DivMod
             | Builtin::Pow
             | Builtin::Round
+            | Builtin::Repr
+            | Builtin::Ascii
+            | Builtin::Format
             | Builtin::IntRound
             | Builtin::FloatRound => {
-                unreachable!("numeric builtin has a suspending call path")
+                unreachable!("builtin has a suspending protocol call path")
             }
             Builtin::ObjectNew => {
                 if count != 1 || args.keyword_count() != 0 {

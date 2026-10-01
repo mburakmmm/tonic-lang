@@ -1623,6 +1623,19 @@ def hot_pow(base,exp,mod):
     return pow(base,exp,mod)
 print(hot_pow(2,20,17),hot_pow(Maybe(),Reverse(),23))
 ''')
+CASES.append('''class Display:
+    def __repr__(self): return 'répr-字'
+    def __format__(self,spec): return '['+spec+']'
+class Meta(type):
+    def __repr__(cls): return 'méta-'+cls.__name__
+    def __format__(cls,spec): return '<'+cls.__name__+':'+spec+'>'
+class C(metaclass=Meta): pass
+value=Display()
+print(repr(value),ascii(value),format(value),format(value,'custom'))
+print(repr(C),ascii(C),format(C,'kind'),f'{C!r}',f'{C!a}',f'{C:spec}')
+print(format(12,'04d'),format(1.25,'.1f'),format('a','>3'))
+print(repr([1,'é']),ascii([1,'é']))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1652,6 +1665,18 @@ ERRORS = [
     ('pow(2,3,5.0)', 'TypeError'),
     ('class C: pass\npow(C(),C(),7)', 'TypeError'),
     ('class C:\n    def __pow__(self,other,mod): return NotImplemented\npow(C(),C(),7)', 'TypeError'),
+    ('repr()', 'TypeError'),
+    ('repr(1,2)', 'TypeError'),
+    ('repr(obj=1)', 'TypeError'),
+    ('ascii()', 'TypeError'),
+    ('ascii(obj=1)', 'TypeError'),
+    ('format()', 'TypeError'),
+    ('format(1,2,3)', 'TypeError'),
+    ('format(value=1)', 'TypeError'),
+    ('format(1,1)', 'TypeError'),
+    ('class Bad:\n    def __repr__(self): return 1\nrepr(Bad())', 'TypeError'),
+    ('class Bad:\n    def __format__(self,spec): return 1\nformat(Bad())', 'TypeError'),
+    ("format(object(),'x')", 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),
