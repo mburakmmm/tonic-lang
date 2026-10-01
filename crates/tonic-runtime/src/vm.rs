@@ -751,6 +751,8 @@ enum ReturnAction {
     },
     CollectIterableStart(IterableCollectionKind),
     CollectIterableNext(IterableCollection),
+    SumIterStart(Value),
+    SumNext(SumState),
     ExpandIterableStart(Option<usize>),
     ExpandIterableNext(ArgumentExpansion),
     DictIterableStart(DictConstructionStart),
@@ -896,6 +898,7 @@ pub(super) struct BinaryProtocol {
 pub(super) enum BinaryCompletion {
     Value,
     Equality(EqualityAction),
+    Sum { iterator: Value },
 }
 #[derive(Clone)]
 pub(super) enum EqualityAction {
@@ -1034,6 +1037,17 @@ pub(super) struct IterableCollection {
     kind: IterableCollectionKind,
     iterator: Value,
     items: Vec<Value>,
+}
+#[derive(Clone, Copy)]
+pub(super) struct SumState {
+    iterator: Value,
+    total: SumTotal,
+}
+#[derive(Clone, Copy)]
+pub(super) enum SumTotal {
+    Int(i64),
+    Float { hi: f64, lo: f64 },
+    Generic(Value),
 }
 #[derive(Clone, Copy)]
 pub(super) struct ArgumentExpansion {
@@ -1327,6 +1341,7 @@ impl ReturnAction {
             }
             Self::Next(default) => default.iter().copied().for_each(visit),
             Self::CollectIterableStart(kind) => kind.trace(visit),
+            Self::SumIterStart(total) => visit(*total),
             Self::AttributeGet(state) => {
                 visit(state.owner);
                 if let AttributeMissing::Default(value) = state.missing {
@@ -1364,6 +1379,12 @@ impl ReturnAction {
                 state.kind.trace(&mut visit);
                 visit(state.iterator);
                 state.items.iter().copied().for_each(visit);
+            }
+            Self::SumNext(state) => {
+                visit(state.iterator);
+                if let SumTotal::Generic(total) = state.total {
+                    visit(total);
+                }
             }
             Self::ExpandIterableNext(state) => visit(state.iterator),
             Self::DictIterableStart(state) => state.trace(visit),
@@ -1528,9 +1549,11 @@ impl Membership {
     }
 }
 impl BinaryCompletion {
-    fn trace(&self, visit: impl FnMut(Value)) {
-        if let Self::Equality(action) = self {
-            action.trace(visit);
+    fn trace(&self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Value => {}
+            Self::Equality(action) => action.trace(visit),
+            Self::Sum { iterator } => visit(*iterator),
         }
     }
 }
@@ -1727,6 +1750,7 @@ impl Vm {
             ("repr", Builtin::Repr),
             ("ascii", Builtin::Ascii),
             ("format", Builtin::Format),
+            ("sum", Builtin::Sum),
             ("isinstance", Builtin::IsInstance),
             ("issubclass", Builtin::IsSubclass),
             ("getattr", Builtin::GetAttr),
@@ -4576,6 +4600,25 @@ impl Vm {
                     }
                     return Ok(true);
                 }
+                if let ReturnAction::SumNext(state) = frame.action {
+                    let destination = frame.destination.ok_or_else(|| {
+                        Diagnostic::new("BytecodeError", "sum continuation has no destination")
+                    })?;
+                    let unwind = (
+                        frame.base,
+                        frame.cell_base,
+                        frame.argument_base,
+                        frame.pending_class_base,
+                    );
+                    self.frames.truncate(frame_index);
+                    self.registers.truncate(unwind.0);
+                    self.cells.truncate(unwind.1);
+                    self.arguments.truncate(unwind.2);
+                    self.pending_classes.truncate(unwind.3);
+                    self.pending_exception = None;
+                    self.registers[destination] = self.materialize_sum_total(state.total)?;
+                    return Ok(true);
+                }
                 if let ReturnAction::ExpandIterableNext(state) = frame.action {
                     let unwind = (
                         frame.base,
@@ -5242,6 +5285,8 @@ impl Vm {
                         let mut class_body = None;
                         let mut iterable_start = None;
                         let mut iterable_next = None;
+                        let mut sum_iter_start = None;
+                        let mut sum_next = None;
                         let mut expansion_start = None;
                         let mut expansion_next = None;
                         let mut dict_iterable_start = None;
@@ -5337,6 +5382,12 @@ impl Vm {
                                     state.items.push(value);
                                 }
                                 iterable_next = Some(state);
+                            }
+                            ReturnAction::SumIterStart(total) => {
+                                sum_iter_start = Some((total, value));
+                            }
+                            ReturnAction::SumNext(state) => {
+                                sum_next = Some((state, value));
                             }
                             ReturnAction::ExpandIterableStart(resume_pc) => {
                                 expansion_start = Some((value, resume_pc));
@@ -5551,6 +5602,8 @@ impl Vm {
                             || class_body.is_some()
                             || iterable_start.is_some()
                             || iterable_next.is_some()
+                            || sum_iter_start.is_some()
+                            || sum_next.is_some()
                             || expansion_start.is_some()
                             || expansion_next.is_some()
                             || dict_iterable_start.is_some()
@@ -5638,6 +5691,16 @@ impl Vm {
                                 )?;
                             } else if let Some(state) = iterable_next {
                                 self.continue_iterable_collection(p, dest, state, output)?;
+                            } else if let Some((total, iterator)) = sum_iter_start {
+                                self.validate_iterator(iterator)?;
+                                let total = self.sum_start_total(total)?;
+                                self.continue_sum(p, dest, SumState { iterator, total }, output)?;
+                            } else if let Some((state, item)) = sum_next {
+                                if let Some(state) =
+                                    self.add_sum_item(p, dest, state, item, output)?
+                                {
+                                    self.continue_sum(p, dest, state, output)?;
+                                }
                             } else if let Some((iterator, resume_pc)) = expansion_start {
                                 self.validate_iterator(iterator)?;
                                 self.continue_argument_expansion(

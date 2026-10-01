@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-30 Eylül 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+1 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -43,10 +43,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 111, CPython bridge 15 ve HPy manifest 5; toplam 365 test.
+native handles 5, language/runtime 112, CPython bridge 15 ve HPy manifest 5; toplam 366 test.
 
-Differential corpus: 325 stdout vakası ve 218 exception türü vakası. Seed 42.
-`repr`/`ascii`/`format` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 327 stdout vakası ve 230 exception türü vakası. Seed 42.
+`sum` protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -530,6 +530,18 @@ interpreter/JIT × allocation-stress GC altında doğrular. F-string `!s`/`!r`/`
 ve format-spec opkodları aynı alt yordamı kullanır; metaclass override'ları da bu
 yüzeyde karşılaştırılır. Differential hata vakaları positional-only arity,
 keyword reddi, string olmayan spec ve hook dönüşlerini Python 3.14 ile eşler.
+
+Global `sum` testi list/tuple/range, generator ve genel custom iterator'ları
+öğeleri materialize etmeden tüketir; explicit/keyword `start`, boş iterable,
+BigInt taşması, list birleştirme ve iterator-before-start-check değerlendirme
+sırasını kapsar. Suspended `__iter__`/`__next__` ile `__add__`/`__radd__`, strict
+subclass önceliği, `NotImplemented`, iterator sınırındaki `StopIteration` tüketimi
+ve toplama içinden kaçan `StopIteration` interpreter/JIT-caller × allocation-
+stress GC altında doğrulanır. Seed 42 ile üretilen 160 yüksek dinamik aralıklı
+int/float dizisi Python 3.14'ün Neumaier compensated sonucuyla sıfır fark vermiştir.
+Kalıcı interpreter ve Python-karşılaştırma benchmark'ları 1.000 öğelik integer ve
+float dizilerini 100 kez toplar; integer hızlı yolunda öğe başına guest allocation
+yoktur.
 
 Async comprehension dilimi eager list/dict sonuçlarını hidden coroutine'de,
 async generator expression'ı ise hidden async-generator frame'inde yürütür.

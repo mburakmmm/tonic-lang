@@ -1636,6 +1636,70 @@ print(repr(C),ascii(C),format(C,'kind'),f'{C!r}',f'{C!a}',f'{C:spec}')
 print(format(12,'04d'),format(1.25,'.1f'),format('a','>3'))
 print(repr([1,'é']),ascii([1,'é']))
 ''')
+CASES.append('''print(sum([1,2,3]),sum((),start=7),sum(range(5)),sum([],start=None))
+print(sum([9223372036854775807,1,2]))
+print(sum([1e16,1.0,-1e16]),sum([1.5,2,3.25],start=0.25))
+class IntChild(int):
+    def __radd__(self,other):
+        print('int-child-radd')
+        return 99
+class FloatChild(float):
+    def __radd__(self,other):
+        print('float-child-radd')
+        return 88.0
+print(sum([1.0,IntChild(2)]))
+print(sum([1.0,FloatChild(2.0)]))
+print(sum([[1],[2,3]],[]))
+def values():
+    print('generator-start')
+    yield 4
+    print('generator-middle')
+    yield 5
+print(sum(values(),start=6))
+class Number:
+    def __init__(self,value): self.value=value
+    def __add__(self,other):
+        print('add',self.value,other.value)
+        return Number(self.value+other.value)
+    def __radd__(self,other):
+        print('radd',other,self.value)
+        return Number(other+self.value)
+result=sum([Number(2),Number(3)])
+print('number',result.value)
+class Base:
+    def __init__(self,value): self.value=value
+    def __add__(self,other): return Number(self.value+other.value)
+class Child(Base):
+    def __radd__(self,other):
+        print('child-radd')
+        return Number(other.value+self.value)
+result=sum([Child(2)],Base(5))
+print('strict',result.value)
+class Counter:
+    def __init__(self,limit): self.i=0; self.limit=limit
+    def __iter__(self):
+        print('counter-iter')
+        return self
+    def __next__(self):
+        if self.i>=self.limit: raise StopIteration
+        value=self.i
+        self.i+=1
+        return value
+print('counter-total',sum(Counter(4),start=10))
+class StopAdd:
+    def __radd__(self,other): raise StopIteration('from-add')
+try:
+    sum([StopAdd()])
+except StopIteration:
+    print('add-stop-escaped')
+class BadNext:
+    def __iter__(self): return self
+    def __next__(self): raise ValueError('from-next')
+try:
+    sum(BadNext())
+except ValueError:
+    print('next-error-escaped')
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1677,6 +1741,18 @@ ERRORS = [
     ('class Bad:\n    def __repr__(self): return 1\nrepr(Bad())', 'TypeError'),
     ('class Bad:\n    def __format__(self,spec): return 1\nformat(Bad())', 'TypeError'),
     ("format(object(),'x')", 'TypeError'),
+    ('sum()', 'TypeError'),
+    ('sum([1],2,3)', 'TypeError'),
+    ('sum(iterable=[1])', 'TypeError'),
+    ('sum([1],2,start=3)', 'TypeError'),
+    ('sum([1],unknown=3)', 'TypeError'),
+    ('sum(1)', 'TypeError'),
+    ("sum([], '')", 'TypeError'),
+    ("sum(['x'])", 'TypeError'),
+    ('class Bad:\n    def __iter__(self): return 1\nsum(Bad())', 'TypeError'),
+    ("class Bad:\n    def __iter__(self): return self\n    def __next__(self): raise ValueError('next')\nsum(Bad())", 'ValueError'),
+    ("class Bad:\n    def __radd__(self,other): raise ValueError('add')\nsum([Bad()])", 'ValueError'),
+    ('class Bad:\n    def __radd__(self,other): return NotImplemented\nsum([Bad()])', 'TypeError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

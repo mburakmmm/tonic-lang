@@ -933,6 +933,129 @@ fn custom_iteration_consumes_only_escaping_stop_iteration() {
         assert_eq!(error(source).kind, "TypeError");
     }
 }
+
+#[test]
+fn sum_streams_iterables_and_suspends_numeric_protocols() {
+    let source = r#"print(sum([1,2,3]),sum((),start=7),sum(range(5)),sum([],start=None))
+print(sum([9223372036854775807,1,2]))
+print(sum([1e16,1.0,-1e16]),sum([1.5,2,3.25],start=0.25))
+class IntChild(int):
+    def __radd__(self,other):
+        print('int-child-radd')
+        return 99
+class FloatChild(float):
+    def __radd__(self,other):
+        print('float-child-radd')
+        return 88.0
+print(sum([1.0,IntChild(2)]))
+print(sum([1.0,FloatChild(2.0)]))
+print(sum([[1],[2,3]],[]))
+def values():
+    print('generator-start')
+    yield 4
+    print('generator-middle')
+    yield 5
+print(sum(values(),start=6))
+class Number:
+    def __init__(self,value): self.value=value
+    def __add__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('add',self.value,other.value)
+        return Number(self.value+other.value)
+    def __radd__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('radd',other,self.value)
+        return Number(other+self.value)
+result=sum([Number(2),Number(3)])
+print('number',result.value)
+class Base:
+    def __init__(self,value): self.value=value
+    def __add__(self,other):
+        print('base-add')
+        return Number(self.value+other.value)
+class Child(Base):
+    def __radd__(self,other):
+        print('child-radd')
+        return Number(other.value+self.value)
+result=sum([Child(2)],Base(5))
+print('strict',result.value)
+class Counter:
+    def __init__(self,limit): self.i=0; self.limit=limit
+    def __iter__(self):
+        print('counter-iter')
+        return self
+    def __next__(self):
+        scratch=0.0
+        for j in range(20): scratch+=0.5
+        if self.i>=self.limit: raise StopIteration
+        value=self.i
+        self.i+=1
+        print('counter-next',value)
+        return value
+print('counter-total',sum(Counter(4),start=10))
+def hot(items):
+    total=0
+    for i in range(30): total+=i
+    return sum(items,start=total)
+print('hot',hot([1,2,3]))
+class Mark:
+    def __iter__(self):
+        print('iter-before-start-check')
+        return iter([])
+try:
+    sum(Mark(),'')
+except TypeError:
+    print('string-start')
+class StopAdd:
+    def __radd__(self,other): raise StopIteration('from-add')
+try:
+    sum([StopAdd()])
+except StopIteration:
+    print('add-stop-escaped')
+class BadNext:
+    def __iter__(self): return self
+    def __next__(self): raise ValueError('from-next')
+try:
+    sum(BadNext())
+except ValueError:
+    print('next-error-escaped')"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"6 7 10 None\n9223372036854775810\n1.0 7.0\n3.0\nfloat-child-radd\n88.0\n[1, 2, 3]\ngenerator-start\ngenerator-middle\n15\nradd 0 2\nadd 2 3\nnumber 5\nchild-radd\nstrict 7\ncounter-iter\ncounter-next 0\ncounter-next 1\ncounter-next 2\ncounter-next 3\ncounter-total 16\nhot 441\niter-before-start-check\nstring-start\nadd-stop-escaped\nnext-error-escaped\n",
+    );
+
+    for (source, kind) in [
+        ("sum()", "TypeError"),
+        ("sum([1],2,3)", "TypeError"),
+        ("sum(iterable=[1])", "TypeError"),
+        ("sum([1],2,start=3)", "TypeError"),
+        ("sum([1],unknown=3)", "TypeError"),
+        ("sum(1)", "TypeError"),
+        ("sum([], '')", "TypeError"),
+        ("sum(['x'])", "TypeError"),
+        (
+            "class Bad:\n    def __iter__(self): return 1\nsum(Bad())",
+            "TypeError",
+        ),
+        (
+            "class Bad:\n    def __iter__(self): return self\n    def __next__(self): raise ValueError('next')\nsum(Bad())",
+            "ValueError",
+        ),
+        (
+            "class Bad:\n    def __radd__(self,other): raise ValueError('add')\nsum([Bad()])",
+            "ValueError",
+        ),
+        (
+            "class Bad:\n    def __radd__(self,other): return NotImplemented\nsum([Bad()])",
+            "TypeError",
+        ),
+    ] {
+        assert_eq!(error(source).kind, kind, "{source}");
+    }
+}
+
 #[test]
 fn list_and_tuple_constructors_consume_custom_iterators() {
     let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";

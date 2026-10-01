@@ -170,6 +170,7 @@ pub(crate) enum Builtin {
     Repr,
     Ascii,
     Format,
+    Sum,
     IntRound,
     FloatRound,
     IsInstance,

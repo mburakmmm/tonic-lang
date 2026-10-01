@@ -47,6 +47,8 @@ The current implementation includes:
   two/three-argument `pow` protocols with modular inverse support;
 - `repr`, `ascii`, and `format` builtins sharing the suspending f-string
   conversion pipeline, including metaclass hooks and Unicode escaping;
+- streaming `sum(iterable, /, start=0)` with suspending iterator/operator
+  protocols, BigInt accumulation, and Python 3.14 compensated exact-float sums;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
   coroutines, exact/custom-awaitable `await` delegation, `async for`, `async with`,
   async list/dict comprehensions and generator expressions, async generators with

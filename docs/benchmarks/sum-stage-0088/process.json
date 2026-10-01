@@ -1,0 +1,29 @@
+{
+  "scope": "ADR 0088 intermediate sum builtin acceptance; not the final language benchmark",
+  "date": "2026-10-01",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "rustc": "rustc 1.86.0 (05f9846f8 2025-03-31)",
+  "tonic_binary": "target/release/tonic",
+  "tonic_sha256": "79c3c185544ff33a69a2b62e04877850a84f91ddaa4993b8a21c3f242a5132ee",
+  "warm_binary": "target/release/deps/python_compare-204da8f4e4390c4a",
+  "warm_binary_sha256": "ccd785413b50073b85b61b478088f89b269890751d39c1840b764c04f94596fe",
+  "cargo_lock_sha256": "c94991eb31c4ed9e1062e7b4e62da0be423a6ee9e9fadf7381b2a02a716450e3",
+  "sum_integer_source_sha256": "7b1d4851883d187166dad4ce0b3321bdac00fef7d47087cfa457fdb0c079784f",
+  "sum_float_source_sha256": "cf3412b0b3e7f82497cfa258c77a37310e519b9b31894577306bf7c1397d649a",
+  "sample_file_sha256": "3573c5232d47ddb305ce55b3ab511e4cd0072dd25f4908b2222d8c0db760d88e",
+  "case_count": 2,
+  "warmup_per_warm_case": 5,
+  "samples_per_warm_case": 30,
+  "warmup_per_cold_case": 3,
+  "samples_per_cold_case": 15,
+  "limitations": [
+    "uncontrolled desktop load and CPU frequency",
+    "no CPU affinity or hardware performance counters",
+    "no per-workload RSS or host allocator counters",
+    "the warm comparison intentionally measures Tonic's interpreter path; JIT is not enabled",
+    "warm Tonic uses a fresh VM outside the timer; both engines execute into a fresh module namespace",
+    "results apply only to the two listed shared-syntax sum workloads"
+  ]
+}

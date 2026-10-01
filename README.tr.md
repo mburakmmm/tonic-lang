@@ -67,8 +67,10 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 Aritmetik: `+ - * / // %`, `divmod`, `round` ve bunların desteklenen tiplerde augmented assignment
 biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
 `and/or` operand döndürür ve kısa devre yapar. Builtin isimleri yeniden bağlanabilir.
-`print`, `range`, `len`, `abs`, `divmod`, `round`, `object`, `isinstance`, `issubclass`, `getattr`,
-`setattr`, `hasattr` sağlanır. Type-check builtin'lerinin classinfo argümanı
+`print`, `range`, `len`, `abs`, `divmod`, `round`, `pow`, `repr`, `ascii`,
+`format`, Python 3.14 compensated-float hızlı yoluna sahip streaming `sum`,
+`object`, `isinstance`, `issubclass`, `getattr`, `setattr`, `hasattr` sağlanır.
+Type-check builtin'lerinin classinfo argümanı
 Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlardan
 oluşan tuple'ları kabul eder. `object.__init__`, int/bool/float/str/list/tuple/
 dict/range `__new__` ve list/dict `__init__` descriptor'ları doğrudan çağrılabilir;

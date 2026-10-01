@@ -35,6 +35,22 @@ for _ in range(80):
     CASES.append(f'print({a}/({b}))\n')
 for a, b in [(10**400, 10**400), (1, 2**1075), (3, 2**1075), (1, 2**1074), (0, -10**400)]:
     CASES.append(f'print({a}/({b}))\n')
+# Python 3.12+ uses compensated exact-float accumulation in sum(). Keep one
+# deterministic high-dynamic-range oracle program so cancellation and the
+# generic fallback boundary cannot silently regress.
+sum_lines = []
+for _ in range(160):
+    scale = 10.0 ** rng.randint(-250, 250)
+    values = [scale, rng.choice([-1.0, 1.0]) * rng.random(), -scale]
+    values.extend(
+        rng.choice([-1.0, 1.0]) * rng.random() * (10.0 ** rng.randint(-200, 200))
+        for _ in range(rng.randint(0, 8))
+    )
+    if rng.randrange(3) == 0:
+        values.insert(rng.randrange(len(values) + 1), rng.randint(-(1 << 40), 1 << 40))
+    start = rng.choice([0, 0.25, -0.5, rng.randint(-1000, 1000)])
+    sum_lines.append(f'print(sum({values!r}, start={start!r}))')
+CASES.append('\n'.join(sum_lines) + '\n')
 ERRORS = [
     ('print(1//0)', 'ZeroDivisionError'),
     ('print(missing)', 'NameError'),

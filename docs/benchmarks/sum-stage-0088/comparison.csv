@@ -1,0 +1,7 @@
+case,phase,tonic_median_us,cpython_median_us,tonic_p95_us,cpython_p95_us,tonic_over_cpython
+sum_integer,compile,17.709,16.667,18.167,16.959,1.0625
+sum_integer,warm_run,1012.021,208.167,1045.250,232.583,4.8616
+sum_integer,cold_cli,3906.166,16742.000,4176.667,17154.250,0.2333
+sum_float,compile,21.146,20.896,23.292,21.334,1.0120
+sum_float,warm_run,1783.750,218.063,1838.834,223.583,8.1800
+sum_float,cold_cli,4734.125,16824.167,5120.666,17955.125,0.2814

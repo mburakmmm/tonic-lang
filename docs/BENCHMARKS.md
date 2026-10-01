@@ -79,3 +79,31 @@ bu bir semantik değişiklik değildir. Önceki kayıt
 Integer-loop median 4020.125 → 3498.416 µs; ancak min değerleri benzer ve
 örnekler arası gürültü yüksektir. Bu koşu tek başına belirli bir hızlanma oranını
 kanıtlamaz. Sonraki ciddi optimization öncesi stabil benchmark ve profiler gerekir.
+
+## `sum` builtin ara kabul ölçümü
+
+1 Ekim 2026'da ADR 0088 için aynı kontrolsüz macOS ARM64 hostunda iki kalıcı
+iş yükü eklendi. Her ikisi 1.000 öğelik diziyi 100 kez toplar. Bu bir nihai dil
+benchmark'ı değildir; tamamlanmış yol haritası sonrasında
+[FINAL_BENCHMARK_PLAN.md](FINAL_BENCHMARK_PLAN.md) ayrıca uygulanacaktır.
+
+Interpreter harness'ında integer builtin yolu 1.006,667 µs median verirken aynı
+işi guest `for` döngüsüyle yapan kontrol 12.882,500 µs verdi. Oran 12,80×'dir;
+bytecode dispatch sayısı 701.218'den 1.618'e iner. İki iş yükü de kaynak liste ve
+VM kurulumu dahil 103 guest allocation raporladı; builtin integer öğeleri için
+öğe başına managed sayı ayırmadı. Compensated-float builtin yolu 1.759,333 µs ve
+1.306 guest allocation verdi; bunların 1.000'i kaynak comprehension değerleri,
+geri kalanı VM/runtime kurulumu ile 100 materialized sonuçtur.
+
+| İş yükü/faz | Tonic median µs | CPython 3.14.6 median µs | Tonic / CPython |
+|---|---:|---:|---:|
+| integer `sum`, warm run | 1.012,021 | 208,167 | 4,8616× |
+| float `sum`, warm run | 1.783,750 | 218,063 | 8,1800× |
+| integer `sum`, cold CLI | 3.906,166 | 16.742,000 | 0,2333× |
+| float `sum`, cold CLI | 4.734,125 | 16.824,167 | 0,2814× |
+
+Warm throughput'ta CPython hâlâ belirgin biçimde öndedir; bu sonuç sonraki
+profiling/JIT builtin çalışmalarına açık bir hedef verir. Cold CLI oranı Tonic'in
+daha kısa process başlangıcını ölçer ve warm runtime üstünlüğü olarak okunmamalıdır.
+Ham 30 warm ve 15 cold örnek, p95 değerleri, binary/source hash'leri ve sınırlamalar
+[sum-stage-0088](benchmarks/sum-stage-0088/) altında saklanır.

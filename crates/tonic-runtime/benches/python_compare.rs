@@ -32,6 +32,16 @@ const CASES: &[(&str, &str, &str)] = &[
         "20000\n",
     ),
     (
+        "sum_integer",
+        include_str!("../../../benches/comparison/sum_integer.py"),
+        "49950000\n",
+    ),
+    (
+        "sum_float",
+        include_str!("../../../benches/comparison/sum_float.py"),
+        "24975000.0\n",
+    ),
+    (
         "closure_calls",
         include_str!("../../../benches/comparison/closure_calls.py"),
         "10000\n",

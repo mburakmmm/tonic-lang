@@ -3,7 +3,8 @@
 use super::{
     ArgumentExpansion, AsyncGeneratorCompletion, AsyncWake, DictConstruction,
     DictConstructionStart, DictPairConstruction, EventLoopReady, EventLoopState, Frame,
-    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, Vm,
+    IterableCollection, IterableCollectionKind, NativeSubclassFinish, ReturnAction, SumState,
+    SumTotal, Vm,
 };
 use crate::{
     dict::Dict,
@@ -1660,6 +1661,10 @@ impl Vm {
                 if matches!(builtin, Builtin::Format) {
                     return self.invoke_format_builtin(p, destination, &args, output);
                 }
+                if matches!(builtin, Builtin::Sum) {
+                    let (source, start) = self.bind_sum_arguments(p, &args)?;
+                    return self.invoke_sum(p, destination, source, start, output);
+                }
                 if matches!(
                     builtin,
                     Builtin::GetAttr
@@ -2708,7 +2713,7 @@ impl Vm {
                 output,
             );
         }
-        self.registers[destination] = match state.kind {
+        let value = match state.kind {
             super::BinaryProtocolKind::Opcode(tonic_core::bytecode::Op::InplaceAdd) => {
                 self.heap.inplace_add(state.left, state.right)?
             }
@@ -2729,7 +2734,8 @@ impl Vm {
                 self.heap.pow_mod(state.left, state.right, modulus)?
             }
         };
-        Ok(())
+        self.registers[destination] = value;
+        self.finish_binary_protocol_value(p, destination, value, false, state.completion, output)
     }
     pub(super) fn finish_binary_protocol_value(
         &mut self,
@@ -2752,6 +2758,18 @@ impl Vm {
                     value,
                     destination,
                     super::TruthAction::Equality(action),
+                    output,
+                )
+            }
+            super::BinaryCompletion::Sum { iterator } => {
+                debug_assert!(!negate, "sum uses the Add protocol");
+                self.continue_sum(
+                    p,
+                    destination,
+                    SumState {
+                        iterator,
+                        total: SumTotal::Generic(value),
+                    },
                     output,
                 )
             }
@@ -4185,6 +4203,241 @@ impl Vm {
             self.finish_builtin_value(p, destination, native, output)
         }
     }
+    pub(super) fn invoke_sum(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        source: Value,
+        total: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => {
+                let total = self.sum_start_total(total)?;
+                self.continue_sum(p, destination, SumState { iterator, total }, output)
+            }
+            Err(error) if error.kind == "TypeError" => {
+                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                    return Err(Diagnostic::new("TypeError", "value is not iterable"));
+                };
+                let depth = self.frames.len();
+                self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                )?;
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("sum __iter__ frame").action =
+                        ReturnAction::SumIterStart(total);
+                    Ok(())
+                } else {
+                    let iterator = self.registers[destination];
+                    self.validate_iterator(iterator)?;
+                    let total = self.sum_start_total(total)?;
+                    self.continue_sum(p, destination, SumState { iterator, total }, output)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn continue_sum(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        mut state: SumState,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        loop {
+            let item = if let Some(resumable) = self.iterator_resumable(state.iterator) {
+                return match self.resume_generator(
+                    p,
+                    resumable,
+                    destination,
+                    Value::NONE,
+                    ReturnAction::SumNext(state),
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind == "StopIteration" => {
+                        self.pending_exception = None;
+                        self.registers[destination] = self.materialize_sum_total(state.total)?;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+            } else if self.heap.is_iterator(state.iterator) {
+                let Some(item) = self.heap.next(state.iterator)? else {
+                    self.registers[destination] = self.materialize_sum_total(state.total)?;
+                    return Ok(());
+                };
+                item
+            } else {
+                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
+                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+                };
+                let depth = self.frames.len();
+                match self.invoke_target(
+                    p,
+                    call.callable,
+                    destination,
+                    Arguments::Inline {
+                        receiver: call.receiver,
+                        positional: [Value::UNBOUND; 3],
+                        count: 0,
+                    },
+                    output,
+                ) {
+                    Ok(()) => {}
+                    Err(error) if error.kind == "StopIteration" => {
+                        self.pending_exception = None;
+                        self.registers[destination] = self.materialize_sum_total(state.total)?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+                if self.frames.len() > depth {
+                    self.frames.last_mut().expect("sum __next__ frame").action =
+                        ReturnAction::SumNext(state);
+                    return Ok(());
+                }
+                self.registers[destination]
+            };
+
+            match self.add_sum_item(p, destination, state, item, output)? {
+                Some(next) => state = next,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    pub(super) fn sum_start_total(&self, value: Value) -> Result<SumTotal> {
+        if matches!(
+            self.heap.get(self.heap.native_value(value)),
+            Ok(Object::Str(_))
+        ) {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "sum() can't sum strings [use ''.join(seq) instead]",
+            ));
+        }
+        let class = self.runtime_class(value)?;
+        if class == self.runtime_types.int {
+            if let Some(integer) = self.heap.integer(value)?.to_i64() {
+                return Ok(SumTotal::Int(integer));
+            }
+        } else if class == self.runtime_types.float {
+            return Ok(SumTotal::Float {
+                hi: self.heap.float(value)?,
+                lo: 0.0,
+            });
+        }
+        Ok(SumTotal::Generic(value))
+    }
+
+    pub(super) fn materialize_sum_total(&mut self, total: SumTotal) -> Result<Value> {
+        match total {
+            SumTotal::Int(value) => self.heap.i64(value),
+            SumTotal::Float { hi, lo } => {
+                let value = if lo != 0.0 && lo.is_finite() {
+                    hi + lo
+                } else {
+                    hi
+                };
+                self.heap.alloc(Object::Float(value))
+            }
+            SumTotal::Generic(value) => Ok(value),
+        }
+    }
+
+    pub(super) fn add_sum_item(
+        &mut self,
+        p: &Program,
+        destination: usize,
+        state: SumState,
+        item: Value,
+        output: &mut dyn Write,
+    ) -> Result<Option<SumState>> {
+        let item_class = self.runtime_class(item)?;
+        match state.total {
+            SumTotal::Int(total) => {
+                if item_class == self.runtime_types.int || item_class == self.runtime_types.bool_ {
+                    let item = if let Some(value) = item.as_bool() {
+                        Some(i64::from(value))
+                    } else if let Some(value) = item.integer() {
+                        Some(value)
+                    } else {
+                        self.heap.integer(item)?.to_i64()
+                    };
+                    if let Some(next) = item.and_then(|item| total.checked_add(item)) {
+                        return Ok(Some(SumState {
+                            iterator: state.iterator,
+                            total: SumTotal::Int(next),
+                        }));
+                    }
+                } else if item_class == self.runtime_types.float {
+                    let value = total as f64 + self.heap.float(item)?;
+                    return Ok(Some(SumState {
+                        iterator: state.iterator,
+                        total: SumTotal::Float { hi: value, lo: 0.0 },
+                    }));
+                }
+            }
+            SumTotal::Float { hi, lo } => {
+                let item = if item_class == self.runtime_types.float {
+                    Some(self.heap.float(item)?)
+                } else if item.as_bool().is_some() || self.heap.is_integer(item) {
+                    Some(if let Some(value) = item.as_bool() {
+                        f64::from(value)
+                    } else {
+                        self.heap.float(item)?
+                    })
+                } else {
+                    None
+                };
+                if let Some(item) = item {
+                    let next = hi + item;
+                    let correction = if hi.abs() >= item.abs() {
+                        (hi - next) + item
+                    } else {
+                        (item - next) + hi
+                    };
+                    return Ok(Some(SumState {
+                        iterator: state.iterator,
+                        total: SumTotal::Float {
+                            hi: next,
+                            lo: lo + correction,
+                        },
+                    }));
+                }
+            }
+            SumTotal::Generic(_) => {}
+        }
+
+        let total = self.materialize_sum_total(state.total)?;
+        if let Some(mut protocol) =
+            self.binary_protocol(tonic_core::bytecode::Op::Add, total, item)?
+        {
+            protocol.completion = super::BinaryCompletion::Sum {
+                iterator: state.iterator,
+            };
+            self.continue_binary_protocol(p, destination, protocol, output)?;
+            return Ok(None);
+        }
+        let total = self
+            .heap
+            .binary(tonic_core::bytecode::Op::Add, total, item)?;
+        Ok(Some(SumState {
+            iterator: state.iterator,
+            total: SumTotal::Generic(total),
+        }))
+    }
+
     pub(super) fn invoke_iterable_collection(
         &mut self,
         p: &Program,
@@ -6575,6 +6828,40 @@ impl Vm {
         ))
     }
 
+    fn bind_sum_arguments(&self, p: &Program, args: &Arguments<'_>) -> Result<(Value, Value)> {
+        if args.count() > 2 {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "sum expects at most two positional arguments",
+            ));
+        }
+        let source = (args.count() >= 1)
+            .then(|| args.positional(&self.registers, 0))
+            .ok_or_else(|| {
+                Diagnostic::new("TypeError", "sum missing required argument 'iterable'")
+            })?;
+        let mut start = (args.count() >= 2).then(|| args.positional(&self.registers, 1));
+        for index in 0..args.keyword_count() {
+            let (name, value) = args.keyword(p, &self.registers, index);
+            if name != "start" {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    format!("sum got an unexpected keyword argument '{name}'"),
+                ));
+            }
+            if start.replace(value).is_some() {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "sum got multiple values for argument 'start'",
+                ));
+            }
+        }
+        Ok((
+            source,
+            start.unwrap_or_else(|| Value::int(0).expect("zero is immediate")),
+        ))
+    }
+
     fn invoke_repr_builtin(
         &mut self,
         p: &Program,
@@ -6802,6 +7089,7 @@ impl Vm {
             | Builtin::Repr
             | Builtin::Ascii
             | Builtin::Format
+            | Builtin::Sum
             | Builtin::IntRound
             | Builtin::FloatRound => {
                 unreachable!("builtin has a suspending protocol call path")
