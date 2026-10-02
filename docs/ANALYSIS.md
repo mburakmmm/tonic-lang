@@ -575,6 +575,15 @@ argümanlar caller veya callee register'larında logical `Value` kökü olarak
 kalır; JIT yeni opcode ya da ABI olmadan mevcut generic call side-exit'ini
 kullanır. Karar [ADR 0087](adr/0087-repr-ascii-format-builtins.md) dosyasındadır.
 
+İki argümanlı `iter(callable, sentinel)` ayrı managed `callable_iterator`
+nesnesidir. Callable, sentinel ve exhaustion biti heap nesnesinde kalır;
+`__iter__` kimliği korur, `__next__` ise mevcut native-callback reentry sınırında
+yalnız bir callable çağrısını ve sentinel-sol rich equality/truth zincirini
+tamamlar. Böylece user frame, JIT caller ve moving GC desteklenirken her öğede
+Rust stack büyümez. Callable veya eş sentinel kalıcı exhaustion üretir; equality
+hook hatası iterator'ı tüketmez. Karar ve kök invariants
+[ADR 0091](adr/0091-callable-sentinel-iterator.md) dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

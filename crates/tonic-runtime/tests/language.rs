@@ -1267,6 +1267,112 @@ except LookupError:
 }
 
 #[test]
+fn callable_sentinel_iterators_stream_through_all_protocol_layers() {
+    let source = r#"class Counter:
+    def __init__(self,start,stop):
+        self.value=start
+        self.stop=stop
+    def __call__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        value=self.value
+        self.value+=1
+        return value
+stream=iter(Counter(0,4),4)
+print(type(stream).__name__,iter(stream) is stream)
+print(next(stream),next(stream),list(stream),next(stream,'done'))
+print(tuple(iter(Counter(0,3),3)))
+print(sum(iter(Counter(1,5),5)))
+print(any(iter(Counter(0,3),2)),all(iter(Counter(1,4),4)))
+print(min(iter(Counter(2,6),6)),max(iter(Counter(2,6),6)))
+for_total=0
+for value in iter(Counter(0,4),4): for_total+=value
+print('for',for_total)
+class Verdict:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('truth',self.value)
+        return self.value
+class Item:
+    def __init__(self,value): self.value=value
+    def __eq__(self,other):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        print('eq',self.value,other.value)
+        return Verdict(self.value==other.value)
+class ItemSource:
+    def __init__(self): self.value=0
+    def __call__(self):
+        self.value+=1
+        return Item(self.value)
+objects=iter(ItemSource(),Item(3))
+print(next(objects).value,next(objects).value,next(objects,'done'))
+def make_counter(stop):
+    value=0
+    def pull():
+        nonlocal value
+        result=value
+        value+=1
+        return result
+    return pull
+print('large',sum(iter(make_counter(5000),5000)))
+class Stops:
+    def __init__(self): self.value=0
+    def __call__(self):
+        if self.value==2: raise StopIteration('callable-stop')
+        value=self.value
+        self.value+=1
+        return value
+print('callable-stop',list(iter(Stops(),99)))
+direct_stop=iter(Stops(),99)
+print('direct-stop',next(direct_stop),next(direct_stop))
+try:
+    next(direct_stop)
+except StopIteration as error:
+    print('normalized-stop',error.args)
+print('still-stopped',next(direct_stop,'done'))
+class EqualityStopsOnce:
+    def __init__(self): self.first=True
+    def __eq__(self,other):
+        if self.first:
+            self.first=False
+            raise StopIteration('equality-stop')
+        return False
+eq_stop=iter(Counter(0,99),EqualityStopsOnce())
+print('equality-stop',next(eq_stop,'default'),next(eq_stop))
+class Fails:
+    def __call__(self): raise LookupError('callable-error')
+try:
+    next(iter(Fails(),0))
+except LookupError:
+    print('callable-error')
+class BadItem:
+    def __eq__(self,other): raise ValueError('equality-error')
+class BadSource:
+    def __call__(self): return BadItem()
+try:
+    next(iter(BadSource(),0))
+except ValueError:
+    print('equality-error')"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"callable_iterator True\n0 1 [2, 3] done\n(0, 1, 2)\n10\nTrue True\n2 5\nfor 6\neq 3 1\ntruth False\neq 3 2\ntruth False\neq 3 3\ntruth True\n1 2 done\nlarge 12497500\ncallable-stop [0, 1]\ndirect-stop 0 1\nnormalized-stop ()\nstill-stopped done\nequality-stop default 1\ncallable-error\nequality-error\n",
+    );
+
+    for source in [
+        "iter()",
+        "iter(1,2)",
+        "iter(lambda: 1,2,3)",
+        "iter(callable=lambda: 1,sentinel=2)",
+        "iter(lambda: 1)",
+    ] {
+        assert_eq!(error(source).kind, "TypeError", "{source}");
+    }
+}
+
+#[test]
 fn list_and_tuple_constructors_consume_custom_iterators() {
     let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";
     let program = compile(source, "custom-constructor-iteration").unwrap();

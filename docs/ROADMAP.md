@@ -124,6 +124,10 @@ sonra alınır.
     - [x] `min`/`max`; iterable ve variadic biçimler, keyword-only `key`/`default`,
       streaming tüketim, ilk eşit öğeyi koruyan strict karşılaştırma, suspending
       iterator/key/comparison/truth zinciri, precise roots ve JIT fallback'i.
+    - [x] İki argümanlı `iter(callable, sentinel)`; managed ve kalıcı-exhaustion
+      durumlu callable iterator, sıfır argümanlı guest callable, sentinel-sol
+      rich equality/truth protokolü, bounded VM reentry, precise roots ve bütün
+      iterator tüketicilerinde interpreter/JIT-caller uyumu.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

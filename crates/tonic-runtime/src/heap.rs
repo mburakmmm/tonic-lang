@@ -123,6 +123,8 @@ pub(crate) enum Builtin {
     Len,
     Iter,
     Next,
+    CallIteratorIter,
+    CallIteratorNext,
     GeneratorIter,
     GeneratorNext,
     GeneratorSend,
@@ -332,6 +334,12 @@ pub(crate) enum Object {
         source: Value,
         index: usize,
     },
+    CallIterator {
+        class: Value,
+        callable: Value,
+        sentinel: Value,
+        exhausted: bool,
+    },
     DictIterator {
         source: Value,
         index: usize,
@@ -359,7 +367,8 @@ impl Object {
             | Self::AsyncFuture(AsyncFuture { class, .. })
             | Self::AsyncTask(AsyncTask { class, .. })
             | Self::AsyncFutureIterator { class, .. }
-            | Self::AsyncEventLoop { class, .. } => Some(*class),
+            | Self::AsyncEventLoop { class, .. }
+            | Self::CallIterator { class, .. } => Some(*class),
             _ => None,
         }
     }
@@ -449,6 +458,16 @@ impl Object {
             Self::Slice(v) => v.iter().copied().for_each(visit),
             Self::Module(m) => m.iter().for_each(|(_, v)| visit(*v)),
             Self::Iterator { source, .. } => visit(*source),
+            Self::CallIterator {
+                class,
+                callable,
+                sentinel,
+                ..
+            } => {
+                visit(*class);
+                visit(*callable);
+                visit(*sentinel);
+            }
             Self::Function {
                 captures,
                 defaults,
@@ -1901,6 +1920,7 @@ impl Heap {
                 }
             }
             Object::Iterator { .. }
+            | Object::CallIterator { .. }
             | Object::RangeIterator { .. }
             | Object::DictIterator { .. }
             | Object::MappingProxyIterator { .. } => "<iterator>".into(),

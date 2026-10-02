@@ -143,3 +143,25 @@ iner. Kaynak/VM dahil builtin 203 allocation raporlar ve öğe başına tahsis y
 Warm CPython üstünlüğü sonraki profiling/JIT builtin çalışması için açık hedeftir.
 Cold CLI süreç başlangıcı dahil toplamdır. Ham örnekler ve provenance
 [min-max-stage-0090](benchmarks/min-max-stage-0090/) altındadır.
+
+## Callable/sentinel iterator ara kabul ölçümü
+
+ADR 0091 iş yükü 100 ayrı callable iterator ile toplam 100.000 integer öğeyi
+`sum` içine stream eder. Release interpreter'da varsayılan GC ile builtin yol
+78.880,875 µs, aynı callable ve sentinel koşulunu açık konuk döngüsünde yapan
+kontrol 98.598,042 µs'dir; iterator yolu 1,25× daha hızlıdır. GC kapalı medyanlar
+sırasıyla 64.053,958 ve 112.206,417 µs, oran 1,75×'tir. Dispatch sayısı
+2.403.725'ten 1.003.725'e iner. Builtin yolun 308 allocation'ı kontrolün 208
+allocation'ına göre yalnız 100 managed iterator nesnesi ekler; 100.000 öğe için
+öğe başına allocation yoktur.
+
+| Faz | Tonic median µs | CPython 3.14.6 median µs | Tonic / CPython |
+|---|---:|---:|---:|
+| compile | 33,729 | 37,917 | 0,8895× |
+| warm run | 53.309,291 | 3.756,167 | 14,1925× |
+| cold CLI | 58.971,792 | 20.142,000 | 2,9278× |
+
+Bu sonuç dinamik guest-call reentry ve sentinel rich-comparison sınırının sonraki
+profiling/JIT optimizasyonları için açık maliyetini gösterir. Cold CLI süreç
+başlangıcını da içerir. Ham örnekler ve provenance
+[callable-iterator-stage-0091](benchmarks/callable-iterator-stage-0091/) altındadır.

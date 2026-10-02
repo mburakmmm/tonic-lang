@@ -1,0 +1,4 @@
+case,phase,tonic_median_us,cpython_median_us,tonic_p95_us,cpython_p95_us,tonic_over_cpython
+callable_iterator,compile,33.729,37.917,36.917,38.333,0.8895
+callable_iterator,warm_run,53309.291,3756.167,57267.917,4453.083,14.1925
+callable_iterator,cold_cli,58971.792,20142.000,65427.417,23250.167,2.9278

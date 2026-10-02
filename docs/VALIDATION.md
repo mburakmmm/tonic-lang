@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-1 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+2 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -43,10 +43,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 114, CPython bridge 15 ve HPy manifest 5; toplam 368 test.
+native handles 5, language/runtime 115, CPython bridge 15 ve HPy manifest 5; toplam 369 test.
 
-Differential corpus: 329 stdout vakası ve 250 exception türü vakası. Seed 42.
-`min`/`max` protokol diliminden sonra debug/release × interpreter/JIT ×
+Differential corpus: 330 stdout vakası ve 256 exception türü vakası. Seed 42.
+Callable/sentinel iterator protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
@@ -151,6 +151,12 @@ de sınanır; unpack uzunluk tanıları ile `StopIteration` dışındaki hatalar
 iterable'ında suspending protokolü, self/farklı iterator normalizasyonunu,
 source-before-keyword sırasını, çift indeksli uzunluk tanısını ve pair hatasının
 yayılımını aynı sekizli matris altında doğrular.
+İki argümanlı `iter(callable, sentinel)` corpus'u sıfır argümanlı guest callable'ı,
+sentinel-sol rich equality ve truth zincirini, kalıcı exhaustion'ı, callable kaynaklı
+`StopIteration` normalizasyonunu, equality hatasında iterator'ın kullanılabilir
+kalmasını ve bütün iterator tüketicilerini normal/stress GC ile interpreter/JIT
+caller yollarında doğrular. 5.000 öğelik tarama bounded reentry'nin Rust stack'ini
+öğe sayısıyla büyütmediğini sınar.
 `finally` corpus'u normal, handled/unhandled exception, `return`, `break`,
 `continue`, nested active exception, return/exception override ve finalizer
 içinden yükselen yeni hata yollarında exactly-once çalışma sırasını kapsar.

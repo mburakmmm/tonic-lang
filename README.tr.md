@@ -71,6 +71,8 @@ biçimleri; unary `+ - not`. Karşılaştırmalar `== != < <= > >=`.
 `format`, Python 3.14 compensated-float hızlı yoluna sahip streaming `sum`,
 iterator ve doğruluk protokollerini askıya alabilen kısa devreli `any`/`all`,
 streaming iterable/variadic ve `key`/`default` destekli `min`/`max`,
+kalıcı exhaustion ve guest callable/eşitlik/doğruluk protokollü iki argümanlı
+`iter(callable, sentinel)`,
 `object`, `isinstance`, `issubclass`, `getattr`, `setattr`, `hasattr` sağlanır.
 Type-check builtin'lerinin classinfo argümanı
 Tonic kullanıcı sınıflarını, canonical builtin type nesnelerini ve bunlardan
@@ -99,7 +101,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 363 Rust testi ile 323 stdout ve 194 exception türü
+Güncel yerel matris 369 Rust testi ile 330 stdout ve 256 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile

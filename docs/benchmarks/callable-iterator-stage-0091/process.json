@@ -1,0 +1,27 @@
+{
+  "scope": "ADR 0091 intermediate callable/sentinel iterator acceptance; not the final language benchmark",
+  "date": "2026-10-02",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.6 (main, Jun 10 2026, 10:03:53) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "rustc": "rustc 1.86.0 (05f9846f8 2025-03-31)",
+  "tonic_binary_sha256": "1e9a72065445f4d7e43e0dc3d414bd44c608e20fa2421bacd4a1681b4bf3bc46",
+  "warm_binary_sha256": "5134a32adff9ffd76699440577fd28668cec9ab37bd833de4cb045bbe5bbeef4",
+  "cargo_lock_sha256": "c94991eb31c4ed9e1062e7b4e62da0be423a6ee9e9fadf7381b2a02a716450e3",
+  "callable_iterator_source_sha256": "e339c0b6ce136d17d1a6761d59c128954b7427a8ae8b32cda34adc9137cd2855",
+  "sample_file_sha256": "f01744ad041467c8592bb505dac461176b0c260f945237dd29289ce7e94ba3ce",
+  "summary_file_sha256": "ec40ae3953a9a2e0395eaafcc68ac50f5a4184d553e19cb3071761aa6826705b",
+  "full_comparison_case_count": 18,
+  "recorded_case_count": 1,
+  "warmup_per_warm_case": 5,
+  "samples_per_warm_case": 30,
+  "warmup_per_cold_case": 3,
+  "samples_per_cold_case": 15,
+  "limitations": [
+    "uncontrolled desktop load and CPU frequency",
+    "no CPU affinity or hardware performance counters",
+    "no per-workload RSS or host allocator counters",
+    "warm comparison measures the interpreter path; JIT is not enabled",
+    "cold CLI includes process startup, parsing, compilation, and execution"
+  ]
+}

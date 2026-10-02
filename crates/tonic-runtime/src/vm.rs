@@ -1177,6 +1177,7 @@ struct RuntimeTypes {
     set: Value,
     range: Value,
     function: Value,
+    call_iterator: Value,
     generator: Value,
     coroutine: Value,
     coroutine_wrapper: Value,
@@ -1226,6 +1227,7 @@ impl RuntimeTypes {
             set: Value::UNBOUND,
             range: Value::UNBOUND,
             function: Value::UNBOUND,
+            call_iterator: Value::UNBOUND,
             generator: Value::UNBOUND,
             coroutine: Value::UNBOUND,
             coroutine_wrapper: Value::UNBOUND,
@@ -1263,6 +1265,7 @@ impl RuntimeTypes {
             self.set,
             self.range,
             self.function,
+            self.call_iterator,
             self.generator,
             self.coroutine,
             self.coroutine_wrapper,
@@ -2033,6 +2036,11 @@ impl Vm {
             function: vm
                 .heap
                 .builtin_class("function", vec![vm.object_class], vm.type_class)?,
+            call_iterator: vm.heap.builtin_class(
+                "callable_iterator",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
             generator: vm
                 .heap
                 .builtin_class("generator", vec![vm.object_class], vm.type_class)?,
@@ -2086,6 +2094,16 @@ impl Vm {
             (vm.runtime_types.dict, "__new__", Builtin::DictNew),
             (vm.runtime_types.dict, "__init__", Builtin::DictInit),
             (vm.runtime_types.range, "__new__", Builtin::RangeNew),
+            (
+                vm.runtime_types.call_iterator,
+                "__iter__",
+                Builtin::CallIteratorIter,
+            ),
+            (
+                vm.runtime_types.call_iterator,
+                "__next__",
+                Builtin::CallIteratorNext,
+            ),
             (
                 vm.runtime_types.generator,
                 "__iter__",
@@ -3652,6 +3670,7 @@ impl Vm {
             Object::AsyncFutureIterator { class, .. } | Object::AsyncEventLoop { class, .. } => {
                 *class
             }
+            Object::CallIterator { class, .. } => *class,
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -6982,6 +7001,7 @@ impl Vm {
                             ) {
                                 Ok(()) => {}
                                 Err(error) if error.kind == "StopIteration" => {
+                                    self.pending_exception = None;
                                     self.registers[a] = self
                                         .heap
                                         .generator_return_value(resumable)
@@ -7009,7 +7029,7 @@ impl Vm {
                             self.heap.special_method_call(iterator, "__next__")?
                         {
                             let depth = self.frames.len();
-                            self.invoke(
+                            match self.invoke(
                                 p,
                                 call.callable,
                                 a,
@@ -7019,7 +7039,16 @@ impl Vm {
                                     count: 0,
                                 },
                                 output,
-                            )?;
+                            ) {
+                                Ok(()) => {}
+                                Err(error) if error.kind == "StopIteration" => {
+                                    self.pending_exception = None;
+                                    self.registers[a] = Value::NONE;
+                                    self.jump(i.c as usize, pc);
+                                    return Ok(());
+                                }
+                                Err(error) => return Err(error),
+                            }
                             if self.frames.len() > depth {
                                 self.frames.last_mut().expect("__next__ frame").action =
                                     ReturnAction::IteratorNext {

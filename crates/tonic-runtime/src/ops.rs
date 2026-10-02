@@ -738,6 +738,7 @@ impl Heap {
                 size: self.class(*class)?.dictionary_len(),
             },
             Object::Iterator { .. }
+            | Object::CallIterator { .. }
             | Object::RangeIterator { .. }
             | Object::DictIterator { .. }
             | Object::MappingProxyIterator { .. }

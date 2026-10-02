@@ -1785,6 +1785,64 @@ try:
 except StopIteration:
     print('key-stop-escaped')
 ''')
+
+CASES.append('''class Counter:
+    def __init__(self,start,stop): self.value=start; self.stop=stop
+    def __call__(self):
+        value=self.value
+        self.value+=1
+        return value
+stream=iter(Counter(0,4),4)
+print(type(stream).__name__,iter(stream) is stream)
+print(next(stream),next(stream),list(stream),next(stream,'done'))
+print(tuple(iter(Counter(0,3),3)),sum(iter(Counter(1,5),5)))
+print(any(iter(Counter(0,3),2)),all(iter(Counter(1,4),4)))
+print(min(iter(Counter(2,6),6)),max(iter(Counter(2,6),6)))
+total=0
+for value in iter(Counter(0,4),4): total+=value
+print(total)
+class Truth:
+    def __init__(self,value): self.value=value
+    def __bool__(self):
+        print('truth',self.value)
+        return self.value
+class Item:
+    def __init__(self,value): self.value=value
+    def __eq__(self,other):
+        print('eq',self.value,other.value)
+        return Truth(self.value==other.value)
+class Source:
+    def __init__(self): self.value=0
+    def __call__(self):
+        self.value+=1
+        return Item(self.value)
+objects=iter(Source(),Item(3))
+print(next(objects).value,next(objects).value,next(objects,'done'))
+class Stops:
+    def __init__(self): self.value=0
+    def __call__(self):
+        if self.value==2: raise StopIteration
+        value=self.value
+        self.value+=1
+        return value
+stops=iter(Stops(),99)
+print(list(stops),next(stops,'done'))
+direct=iter(Stops(),99)
+print(next(direct),next(direct))
+try:
+    next(direct)
+except StopIteration as error:
+    print(error.args,next(direct,'done'))
+class EqualityStopsOnce:
+    def __init__(self): self.first=True
+    def __eq__(self,other):
+        if self.first:
+            self.first=False
+            raise StopIteration('equality-stop')
+        return False
+eq_stop=iter(Counter(0,99),EqualityStopsOnce())
+print(next(eq_stop,'default'),next(eq_stop))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1858,6 +1916,12 @@ ERRORS = [
     ('max([1],key=2)', 'TypeError'),
     ("min([1,'x'])", 'TypeError'),
     ('class Bad:\n    def __iter__(self): return 1\nmin(Bad())', 'TypeError'),
+    ('iter()', 'TypeError'),
+    ('iter(1,2)', 'TypeError'),
+    ('iter(lambda: 1,2,3)', 'TypeError'),
+    ('iter(callable=lambda: 1,sentinel=2)', 'TypeError'),
+    ('class Bad:\n    def __call__(self): raise ValueError("callable")\nnext(iter(Bad(),0))', 'ValueError'),
+    ('class Item:\n    def __eq__(self,other): raise LookupError("equal")\nclass Source:\n    def __call__(self): return Item()\nnext(iter(Source(),0))', 'LookupError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

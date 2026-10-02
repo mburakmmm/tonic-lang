@@ -198,6 +198,121 @@ fn native_round_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
 }
 
 impl Vm {
+    fn callable_for_sentinel_iterator(&self, mut value: Value) -> Result<bool> {
+        for _ in 0..=100 {
+            match self.heap.get(value)? {
+                Object::Class(_)
+                | Object::Function { .. }
+                | Object::Builtin(_)
+                | Object::Native(_)
+                | Object::PropertySetter(_)
+                | Object::PropertyDeleter(_) => return Ok(true),
+                Object::StaticMethod(function) | Object::BoundMethod { function, .. } => {
+                    value = *function;
+                }
+                Object::GenericAlias { origin, .. } => {
+                    return Ok(matches!(self.heap.get(*origin), Ok(Object::Class(_))));
+                }
+                object if object.instance_class().is_some() => {
+                    return Ok(self.heap.special_method_call(value, "__call__")?.is_some());
+                }
+                _ => return Ok(false),
+            }
+        }
+        Err(Diagnostic::new(
+            "RecursionError",
+            "callable protocol chain is too deep",
+        ))
+    }
+
+    fn call_sentinel_iterator_next(
+        &mut self,
+        p: &Program,
+        iterator: Value,
+        output: &mut dyn Write,
+    ) -> Result<Value> {
+        let (callable, sentinel, exhausted) = match self.heap.get(iterator)? {
+            Object::CallIterator {
+                callable,
+                sentinel,
+                exhausted,
+                ..
+            } => (*callable, *sentinel, *exhausted),
+            _ => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "callable_iterator descriptor requires a callable iterator",
+                ))
+            }
+        };
+        if exhausted {
+            return Err(Diagnostic::new("StopIteration", String::new()));
+        }
+
+        // The native callback reentry path is bounded to the callable's frame:
+        // every next() finishes before the consuming loop asks for another item.
+        // Root the iterator explicitly because its callable and sentinel remain
+        // live across guest execution and any GC safepoints reached from it.
+        let root_depth = self.finalizer_roots.len();
+        self.finalizer_roots.push(iterator);
+        let result = (|| {
+            let item = match self.reenter_from_native(p, callable, &[], output) {
+                Ok(item) => item,
+                Err(error) => {
+                    if error.kind == "StopIteration" {
+                        let Object::CallIterator { exhausted, .. } = self.heap.get_mut(iterator)?
+                        else {
+                            unreachable!("validated callable iterator")
+                        };
+                        *exhausted = true;
+                        self.pending_exception = None;
+                        return Err(Diagnostic::new("StopIteration", String::new()));
+                    }
+                    return Err(error);
+                }
+            };
+            self.finalizer_roots.push(item);
+
+            let register_len = self.registers.len();
+            let cell_len = self.cells.len();
+            let argument_depth = self.arguments.len();
+            let frame_depth = self.frames.len();
+            let pending_class_depth = self.pending_classes.len();
+            self.registers.push(item);
+            let destination = register_len;
+            let comparison = self
+                .invoke_equality(
+                    p,
+                    sentinel,
+                    item,
+                    destination,
+                    super::EqualityAction::Return { negate: false },
+                    output,
+                )
+                .and_then(|_| self.execute_until_depth(p, output, frame_depth))
+                .and_then(|_| self.read(destination));
+            self.frames.truncate(frame_depth);
+            self.registers.truncate(register_len);
+            self.cells.truncate(cell_len);
+            self.arguments.truncate(argument_depth);
+            self.pending_classes.truncate(pending_class_depth);
+            let equal = comparison?
+                .as_bool()
+                .ok_or_else(|| Diagnostic::new("BytecodeError", "equality did not return bool"))?;
+            if equal {
+                let Object::CallIterator { exhausted, .. } = self.heap.get_mut(iterator)? else {
+                    unreachable!("validated callable iterator")
+                };
+                *exhausted = true;
+                Err(Diagnostic::new("StopIteration", String::new()))
+            } else {
+                Ok(item)
+            }
+        })();
+        self.finalizer_roots.truncate(root_depth);
+        result
+    }
+
     fn alloc_async_generator_awaitable(
         &mut self,
         generator: Value,
@@ -620,13 +735,34 @@ impl Vm {
                     return self.invoke_type_new(p, destination, &args, output);
                 }
                 if matches!(builtin, Builtin::Iter | Builtin::GeneratorIter) {
-                    if args.keyword_count() != 0 || args.count() != 1 {
+                    let valid = if matches!(builtin, Builtin::Iter) {
+                        (1..=2).contains(&args.count())
+                    } else {
+                        args.count() == 1
+                    };
+                    if args.keyword_count() != 0 || !valid {
                         return Err(Diagnostic::new(
                             "TypeError",
-                            "iter expects exactly one argument",
+                            "iter expects one iterable or a callable and sentinel",
                         ));
                     }
                     let source = args.positional(&self.registers, 0);
+                    if matches!(builtin, Builtin::Iter) && args.count() == 2 {
+                        if !self.callable_for_sentinel_iterator(source)? {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "iter(v, sentinel): v must be callable",
+                            ));
+                        }
+                        let sentinel = args.positional(&self.registers, 1);
+                        self.registers[destination] = self.heap.alloc(Object::CallIterator {
+                            class: self.runtime_types.call_iterator,
+                            callable: source,
+                            sentinel,
+                            exhausted: false,
+                        })?;
+                        return Ok(());
+                    }
                     if matches!(builtin, Builtin::GeneratorIter)
                         && !self.heap.is_generator(source)
                         && self.heap.coroutine_iterator_source(source).is_none()
@@ -704,6 +840,7 @@ impl Vm {
                             Ok(()) => Ok(()),
                             Err(error) if error.kind == "StopIteration" => {
                                 if let Some(default) = default {
+                                    self.pending_exception = None;
                                     self.registers[destination] = default;
                                     Ok(())
                                 } else {
@@ -747,6 +884,7 @@ impl Vm {
                         Ok(()) => {}
                         Err(error) if error.kind == "StopIteration" => {
                             if let Some(default) = default {
+                                self.pending_exception = None;
                                 self.registers[destination] = default;
                                 return Ok(());
                             }
@@ -3995,7 +4133,8 @@ impl Vm {
                 ) {
                     Ok(()) => return Ok(()),
                     Err(error) if error.kind == "StopIteration" => {
-                        return self.finish_dict_construction(p, destination, state.start, output)
+                        self.pending_exception = None;
+                        return self.finish_dict_construction(p, destination, state.start, output);
                     }
                     Err(error) => return Err(error),
                 }
@@ -4022,7 +4161,8 @@ impl Vm {
                 ) {
                     Ok(()) => {}
                     Err(error) if error.kind == "StopIteration" => {
-                        return self.finish_dict_construction(p, destination, state.start, output)
+                        self.pending_exception = None;
+                        return self.finish_dict_construction(p, destination, state.start, output);
                     }
                     Err(error) => return Err(error),
                 }
@@ -4162,6 +4302,7 @@ impl Vm {
             ) {
                 Ok(()) => Ok(None),
                 Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
                     self.finish_dict_pair(p, destination, state, output)
                 }
                 Err(error) => Err(error),
@@ -4191,7 +4332,8 @@ impl Vm {
             ) {
                 Ok(()) => {}
                 Err(error) if error.kind == "StopIteration" => {
-                    return self.finish_dict_pair(p, destination, state, output)
+                    self.pending_exception = None;
+                    return self.finish_dict_pair(p, destination, state, output);
                 }
                 Err(error) => return Err(error),
             }
@@ -5037,6 +5179,7 @@ impl Vm {
             ) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
                     self.finish_iterable_collection(p, destination, state.kind, state.items, output)
                 }
                 Err(error) => Err(error),
@@ -5076,13 +5219,14 @@ impl Vm {
             ) {
                 Ok(()) => {}
                 Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
                     return self.finish_iterable_collection(
                         p,
                         destination,
                         state.kind,
                         state.items,
                         output,
-                    )
+                    );
                 }
                 Err(error) => return Err(error),
             }
@@ -7665,6 +7809,32 @@ impl Vm {
             | Builtin::AsyncioTaskAddDoneCallback => {
                 unreachable!("iterator builtin has a suspending call path")
             }
+            Builtin::CallIteratorIter => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "callable_iterator.__iter__ expects no arguments",
+                    ));
+                }
+                let iterator = args.positional(&self.registers, 0);
+                if !matches!(self.heap.get(iterator), Ok(Object::CallIterator { .. })) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "callable_iterator descriptor requires a callable iterator",
+                    ));
+                }
+                Ok(iterator)
+            }
+            Builtin::CallIteratorNext => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "callable_iterator.__next__ expects no arguments",
+                    ));
+                }
+                let iterator = args.positional(&self.registers, 0);
+                self.call_sentinel_iterator_next(p, iterator, output)
+            }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
             Builtin::Hash
             | Builtin::ObjectHash
@@ -8090,6 +8260,7 @@ impl Vm {
             ) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind == "StopIteration" => {
+                    self.pending_exception = None;
                     if let Some(resume_pc) = state.resume_pc {
                         self.frames
                             .last_mut()
@@ -8130,6 +8301,7 @@ impl Vm {
         ) {
             Ok(()) => {}
             Err(error) if error.kind == "StopIteration" => {
+                self.pending_exception = None;
                 if let Some(resume_pc) = state.resume_pc {
                     self.frames
                         .last_mut()

@@ -1314,6 +1314,8 @@ impl Heap {
                 | Builtin::FloatRound
                 | Builtin::ListInit
                 | Builtin::DictInit
+                | Builtin::CallIteratorIter
+                | Builtin::CallIteratorNext
                 | Builtin::GeneratorIter
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend
@@ -1385,6 +1387,8 @@ impl Heap {
                 | Builtin::FloatRound
                 | Builtin::ListInit
                 | Builtin::DictInit
+                | Builtin::CallIteratorIter
+                | Builtin::CallIteratorNext
                 | Builtin::GeneratorIter
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend
