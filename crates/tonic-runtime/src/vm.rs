@@ -1178,6 +1178,7 @@ struct RuntimeTypes {
     range: Value,
     function: Value,
     call_iterator: Value,
+    sequence_iterator: Value,
     generator: Value,
     coroutine: Value,
     coroutine_wrapper: Value,
@@ -1228,6 +1229,7 @@ impl RuntimeTypes {
             range: Value::UNBOUND,
             function: Value::UNBOUND,
             call_iterator: Value::UNBOUND,
+            sequence_iterator: Value::UNBOUND,
             generator: Value::UNBOUND,
             coroutine: Value::UNBOUND,
             coroutine_wrapper: Value::UNBOUND,
@@ -1266,6 +1268,7 @@ impl RuntimeTypes {
             self.range,
             self.function,
             self.call_iterator,
+            self.sequence_iterator,
             self.generator,
             self.coroutine,
             self.coroutine_wrapper,
@@ -2041,6 +2044,11 @@ impl Vm {
                 vec![vm.object_class],
                 vm.type_class,
             )?,
+            sequence_iterator: vm.heap.builtin_class(
+                "iterator",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
             generator: vm
                 .heap
                 .builtin_class("generator", vec![vm.object_class], vm.type_class)?,
@@ -2103,6 +2111,16 @@ impl Vm {
                 vm.runtime_types.call_iterator,
                 "__next__",
                 Builtin::CallIteratorNext,
+            ),
+            (
+                vm.runtime_types.sequence_iterator,
+                "__iter__",
+                Builtin::SequenceIteratorIter,
+            ),
+            (
+                vm.runtime_types.sequence_iterator,
+                "__next__",
+                Builtin::SequenceIteratorNext,
             ),
             (
                 vm.runtime_types.generator,
@@ -3671,6 +3689,7 @@ impl Vm {
                 *class
             }
             Object::CallIterator { class, .. } => *class,
+            Object::SequenceIterator { class, .. } => *class,
             Object::Exception { class, .. } => *class,
             _ => self.object_class,
         })
@@ -6956,11 +6975,10 @@ impl Vm {
                     }
                     Op::Iter => {
                         let source = self.read(b)?;
-                        match self.heap.iterator(source) {
+                        match self.iterator_with_sequence_fallback(source) {
                             Ok(iterator) => self.registers[a] = iterator,
                             Err(error) if error.kind == "TypeError" => {
-                                let Some(call) =
-                                    self.heap.special_method_call(source, "__iter__")?
+                                let Some(call) = self.operator_method_call(source, "__iter__")?
                                 else {
                                     return Err(error);
                                 };
@@ -7026,7 +7044,7 @@ impl Vm {
                                 self.jump(i.c as usize, pc);
                             }
                         } else if let Some(call) =
-                            self.heap.special_method_call(iterator, "__next__")?
+                            self.operator_method_call(iterator, "__next__")?
                         {
                             let depth = self.frames.len();
                             match self.invoke(

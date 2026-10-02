@@ -100,6 +100,7 @@ def main():
         "any_all": b"100\n",
         "min_max": b"99900\n",
         "callable_iterator": b"49950000\n",
+        "sequence_iterator": b"49950000\n",
         "closure_calls": b"10000\n",
         "keyword_calls": b"50045000\n",
         "dict_lookup": b"20000\n",

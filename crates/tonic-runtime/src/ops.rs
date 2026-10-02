@@ -739,6 +739,7 @@ impl Heap {
             },
             Object::Iterator { .. }
             | Object::CallIterator { .. }
+            | Object::SequenceIterator { .. }
             | Object::RangeIterator { .. }
             | Object::DictIterator { .. }
             | Object::MappingProxyIterator { .. }

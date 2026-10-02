@@ -1843,6 +1843,51 @@ class EqualityStopsOnce:
 eq_stop=iter(Counter(0,99),EqualityStopsOnce())
 print(next(eq_stop,'default'),next(eq_stop))
 ''')
+
+CASES.append('''class Sequence:
+    def __init__(self,start,stop): self.start=start; self.stop=stop
+    def __getitem__(self,index):
+        if index>=self.stop: raise IndexError('finished')
+        return self.start+index
+stream=iter(Sequence(10,4))
+print(type(stream).__name__,iter(stream) is stream)
+print(next(stream),next(stream),list(stream),next(stream,'done'))
+print(tuple(Sequence(0,3)),sum(Sequence(1,4)))
+print(any(Sequence(0,3)),all(Sequence(1,3)))
+print(min(Sequence(2,4)),max(Sequence(2,4)),2 in Sequence(0,4))
+class Pairs:
+    def __getitem__(self,index): return [('a',1),('b',2)][index]
+print(dict(Pairs()))
+def collect(*values): print(values)
+collect(*Sequence(0,3))
+class Meta(type):
+    def __getitem__(cls,index): return [20,21][index]
+class Managed(metaclass=Meta): pass
+print(list(Managed))
+class Retry:
+    def __init__(self): self.failed=False
+    def __getitem__(self,index):
+        if not self.failed:
+            self.failed=True
+            raise ValueError('retry')
+        return [30,31][index]
+retry=iter(Retry())
+try:
+    next(retry)
+except ValueError:
+    print('retry-error')
+print(next(retry),next(retry),next(retry,'done'))
+class Stops:
+    def __getitem__(self,index):
+        if index==2: raise StopIteration('source-stop')
+        return index
+stops=iter(Stops())
+print(next(stops),next(stops))
+try:
+    next(stops)
+except StopIteration as error:
+    print(error.args,next(stops,'done'))
+''')
 ERRORS = [
     ('1 @ 2', 'TypeError'),
     ('class C:\n    __class_getitem__=1\nC[0]', 'TypeError'),
@@ -1922,6 +1967,9 @@ ERRORS = [
     ('iter(callable=lambda: 1,sentinel=2)', 'TypeError'),
     ('class Bad:\n    def __call__(self): raise ValueError("callable")\nnext(iter(Bad(),0))', 'ValueError'),
     ('class Item:\n    def __eq__(self,other): raise LookupError("equal")\nclass Source:\n    def __call__(self): return Item()\nnext(iter(Source(),0))', 'LookupError'),
+    ('class Blocked:\n    __iter__=None\n    def __getitem__(self,index): return index\niter(Blocked())', 'TypeError'),
+    ('class Bad:\n    __getitem__=None\nnext(iter(Bad()))', 'TypeError'),
+    ('class Fails:\n    def __getitem__(self,index): raise LookupError("item")\nnext(iter(Fails()))', 'LookupError'),
     ('class C:\n    pass\nC(1)', 'TypeError'),
     ('class C:\n    def __init__(self):\n        return 3\nC()', 'TypeError'),
     ('class C:\n    def __init__(self,x):\n        pass\nC()', 'TypeError'),

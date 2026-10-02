@@ -55,6 +55,8 @@ The current implementation includes:
   and suspending iterator, callable, comparison, and truth protocols;
 - managed two-argument `iter(callable, sentinel)` with permanent exhaustion,
   guest-callable and rich-equality/truth protocol support across every iterator consumer;
+- Python-compatible `__getitem__(0..)` sequence iteration fallback with dynamic
+  instance/metaclass binding and precise consumer roots;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
   coroutines, exact/custom-awaitable `await` delegation, `async for`, `async with`,
   async list/dict comprehensions and generator expressions, async generators with
@@ -168,8 +170,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 369 Rust tests and a differential corpus of
-330 output cases plus 256 exception cases. The documented local matrix covers
+The repository currently contains 370 Rust tests and a differential corpus of
+331 output cases plus 259 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

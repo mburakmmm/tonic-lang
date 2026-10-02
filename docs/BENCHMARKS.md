@@ -165,3 +165,23 @@ Bu sonuç dinamik guest-call reentry ve sentinel rich-comparison sınırının s
 profiling/JIT optimizasyonları için açık maliyetini gösterir. Cold CLI süreç
 başlangıcını da içerir. Ham örnekler ve provenance
 [callable-iterator-stage-0091](benchmarks/callable-iterator-stage-0091/) altındadır.
+
+## Sequence iterator fallback ara kabul ölçümü
+
+ADR 0092 iş yükü 100 ayrı `__getitem__` sequence nesnesinden toplam 100.000
+integer öğeyi `sum` içine stream eder. Release interpreter'da varsayılan GC ile
+fallback yol 45.272,875 µs, açık guest `__iter__`/`__next__` kontrolü
+81.849,375 µs'dir; fallback 1,81× daha hızlıdır. GC kapalı medyanlar sırasıyla
+45.207,708 ve 81.495,584 µs'dir. Dispatch sayısı 1.604.642'den 703.125'e iner;
+508 allocation öğe başına tahsis olmadığını gösterir.
+
+| Faz | Tonic median µs | CPython 3.14.6 median µs | Tonic / CPython |
+|---|---:|---:|---:|
+| compile | 29,354 | 44,187 | 0,6643× |
+| warm run | 55.747,229 | 3.481,854 | 16,0108× |
+| cold CLI | 67.338,667 | 26.942,250 | 2,4994× |
+
+Warm sonuç guest method reentry ve dinamik protocol lookup maliyetini açık bir
+JIT optimizasyon hedefi olarak gösterir. Cold CLI süreç başlangıcını da içerir.
+Ham örnekler ve provenance
+[sequence-iterator-stage-0092](benchmarks/sequence-iterator-stage-0092/) altındadır.

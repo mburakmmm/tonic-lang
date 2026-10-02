@@ -128,6 +128,9 @@ sonra alınır.
       durumlu callable iterator, sıfır argümanlı guest callable, sentinel-sol
       rich equality/truth protokolü, bounded VM reentry, precise roots ve bütün
       iterator tüketicilerinde interpreter/JIT-caller uyumu.
+    - [x] `__iter__` yokluğunda ardışık integer `__getitem__` sequence fallback'i;
+      managed ve kalıcı-exhaustion durumlu iterator, instance/metaclass binding,
+      class rebinding, bounded VM reentry ve tüketici continuation root'ları.
     - [x] Canonical `object.__init__` ile int/bool/float/str/list/tuple/dict/range
       `__new__` descriptor'ları; list/dict `__init__`, custom native subclass
       `__new__`, yeniden başlatma semantiği ve precise continuation roots.

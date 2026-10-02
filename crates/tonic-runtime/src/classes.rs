@@ -1316,6 +1316,8 @@ impl Heap {
                 | Builtin::DictInit
                 | Builtin::CallIteratorIter
                 | Builtin::CallIteratorNext
+                | Builtin::SequenceIteratorIter
+                | Builtin::SequenceIteratorNext
                 | Builtin::GeneratorIter
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend
@@ -1389,6 +1391,8 @@ impl Heap {
                 | Builtin::DictInit
                 | Builtin::CallIteratorIter
                 | Builtin::CallIteratorNext
+                | Builtin::SequenceIteratorIter
+                | Builtin::SequenceIteratorNext
                 | Builtin::GeneratorIter
                 | Builtin::GeneratorNext
                 | Builtin::GeneratorSend

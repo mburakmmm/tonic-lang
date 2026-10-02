@@ -57,6 +57,11 @@ const CASES: &[(&str, &str, &str)] = &[
         "49950000\n",
     ),
     (
+        "sequence_iterator",
+        include_str!("../../../benches/comparison/sequence_iterator.py"),
+        "49950000\n",
+    ),
+    (
         "closure_calls",
         include_str!("../../../benches/comparison/closure_calls.py"),
         "10000\n",

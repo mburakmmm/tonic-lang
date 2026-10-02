@@ -584,6 +584,16 @@ Rust stack büyümez. Callable veya eş sentinel kalıcı exhaustion üretir; eq
 hook hatası iterator'ı tüketmez. Karar ve kök invariants
 [ADR 0091](adr/0091-callable-sentinel-iterator.md) dosyasındadır.
 
+`__iter__` bulunmayan fakat `__getitem__` sağlayan nesneler managed
+`SequenceIterator` üzerinden sıfırdan başlayan ardışık integer indekslerle
+tüketilir. Açık `__iter__` (çağrılamayan `None` dahil) fallback'i engeller;
+`IndexError`/`StopIteration` kalıcı tükenmeye dönüşür, diğer hatalar indeksi
+ilerletmeden yayılır. Instance veya metaclass `__getitem__` her adımda yeniden
+çözülür. Bounded guest reentry sırasında iterator kadar tüketicinin pending
+continuation durumu da köklenir; böylece kısmi dict/koleksiyon ve generic toplam
+moving GC altında korunur. Karar [ADR 0092](adr/0092-sequence-iterator-fallback.md)
+dosyasındadır.
+
 ## Uygulama sırası ve kabul kapıları
 
 | Aşama | Kabul koşulu |

@@ -1373,6 +1373,98 @@ except ValueError:
 }
 
 #[test]
+fn sequence_getitem_fallback_streams_through_all_protocol_layers() {
+    let source = r#"class Sequence:
+    def __init__(self,start,stop):
+        self.start=start
+        self.stop=stop
+    def __getitem__(self,index):
+        scratch=0.0
+        for i in range(20): scratch+=0.5
+        if index>=self.stop: raise IndexError('finished')
+        return self.start+index
+stream=iter(Sequence(10,4))
+print(type(stream).__name__,iter(stream) is stream)
+print(next(stream),next(stream),list(stream),next(stream,'done'))
+print(tuple(Sequence(0,3)),sum(Sequence(1,4)))
+print(any(Sequence(0,3)),all(Sequence(1,3)))
+print(min(Sequence(2,4)),max(Sequence(2,4)))
+total=0
+for value in Sequence(0,4): total+=value
+print('for',total,2 in Sequence(0,4))
+class Pairs:
+    def __getitem__(self,index):
+        return [('a',1),('b',2)][index]
+print(dict(Pairs()))
+def collect(*values): print('star',values)
+collect(*Sequence(0,3))
+a,b,c=Sequence(0,3)
+print('unpack',a,b,c)
+class Static:
+    __getitem__=staticmethod(lambda index:[7,8][index])
+class ByClass:
+    @classmethod
+    def __getitem__(cls,index): return [cls.__name__,index][index]
+print(list(Static()),list(ByClass()))
+class Meta(type):
+    def __getitem__(cls,index): return [20,21][index]
+class Managed(metaclass=Meta): pass
+print('meta',list(Managed))
+class Dynamic:
+    def __getitem__(self,index): return [10,11][index]
+dynamic=iter(Dynamic())
+print('dynamic',next(dynamic))
+Dynamic.__getitem__=lambda self,index:[20,21][index]
+print('dynamic',next(dynamic),next(dynamic,'done'))
+class Retry:
+    def __init__(self): self.failed=False
+    def __getitem__(self,index):
+        if not self.failed:
+            self.failed=True
+            raise ValueError('retry')
+        return [30,31][index]
+retry=iter(Retry())
+try:
+    next(retry)
+except ValueError:
+    print('retry-error')
+print('retry',next(retry),next(retry),next(retry,'done'))
+class Stops:
+    def __getitem__(self,index):
+        if index==2: raise StopIteration('source-stop')
+        return index
+stops=iter(Stops())
+print('stop-values',next(stops),next(stops))
+try:
+    next(stops)
+except StopIteration as error:
+    print('normalized-stop',error.args)
+print('still-stopped',next(stops,'done'))
+print('large',sum(Sequence(0,5000)))"#;
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"iterator True\n10 11 [12, 13] done\n(0, 1, 2) 10\nTrue True\n2 5\nfor 6 True\n{'a': 1, 'b': 2}\nstar (0, 1, 2)\nunpack 0 1 2\n[7, 8] ['ByClass', 1]\nmeta [20, 21]\ndynamic 10\ndynamic 21 done\nretry-error\nretry 30 31 done\nstop-values 0 1\nnormalized-stop ()\nstill-stopped done\nlarge 12497500\n",
+    );
+
+    for (source, kind) in [
+        (
+            "class Blocked:\n    __iter__=None\n    def __getitem__(self,index): return index\niter(Blocked())",
+            "TypeError",
+        ),
+        (
+            "class Bad:\n    __getitem__=None\nnext(iter(Bad()))",
+            "TypeError",
+        ),
+        (
+            "class Fails:\n    def __getitem__(self,index): raise LookupError('item')\nnext(iter(Fails()))",
+            "LookupError",
+        ),
+    ] {
+        assert_eq!(error(source).kind, kind, "{source}");
+    }
+}
+
+#[test]
 fn list_and_tuple_constructors_consume_custom_iterators() {
     let source = "class Counter:\n    def __init__(self,n):\n        self.i=0\n        self.n=n\n    def __iter__(self):\n        return self\n    def stop(self):\n        raise StopIteration\n    def __next__(self):\n        if self.i>=self.n:\n            self.stop()\n        value=str(self.i)\n        self.i+=1\n        return value\nclass Fresh:\n    def __iter__(self):\n        return Counter(2)\nprint(list(Counter(4)))\nprint(tuple(Counter(3)))\nprint(list(Fresh()))\na,b=Fresh()\nprint(a,b)\nfor count in [1,3]:\n    try:\n        a,b=Counter(count)\n    except ValueError as error:\n        print(str(error))\ndef collect(*values,marker):\n    print(values,marker)\ncollect(*Counter(3),marker='single')\ncollect(*Counter(1),*Counter(2),marker='multiple')\nclass Failing:\n    def __iter__(self):\n        return self\n    def __next__(self):\n        raise ValueError('iteration failed')\nfor operation in [0,1]:\n    try:\n        if operation==0:\n            list(Failing())\n        else:\n            collect(*Failing(),marker='failure')\n    except ValueError as error:\n        print(type(error).__name__)";
     let program = compile(source, "custom-constructor-iteration").unwrap();

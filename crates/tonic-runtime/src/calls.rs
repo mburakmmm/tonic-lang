@@ -198,6 +198,134 @@ fn native_round_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
 }
 
 impl Vm {
+    fn invoke_iterator_next_with_action(
+        &mut self,
+        p: &Program,
+        iterator: Value,
+        destination: usize,
+        action: super::ReturnAction,
+        output: &mut dyn Write,
+    ) -> Result<bool> {
+        let Some(call) = self.operator_method_call(iterator, "__next__")? else {
+            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
+        };
+        let root_depth = self.finalizer_roots.len();
+        action.trace(|value| self.finalizer_roots.push(value));
+        let frame_depth = self.frames.len();
+        let result = self.invoke_target(
+            p,
+            call.callable,
+            destination,
+            Arguments::Inline {
+                receiver: call.receiver,
+                positional: [Value::UNBOUND; 3],
+                count: 0,
+            },
+            output,
+        );
+        self.finalizer_roots.truncate(root_depth);
+        result?;
+        if self.frames.len() > frame_depth {
+            self.frames.last_mut().expect("__next__ frame").action = action;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub(super) fn iterator_with_sequence_fallback(&mut self, source: Value) -> Result<Value> {
+        match self.heap.iterator(source) {
+            Ok(iterator) => Ok(iterator),
+            Err(error) if error.kind == "TypeError" => {
+                // An explicit __iter__ (including __iter__ = None) owns the
+                // protocol decision. Python only falls back to successive
+                // integer __getitem__ calls when __iter__ is absent.
+                if self.operator_method_call(source, "__iter__")?.is_some() {
+                    return Err(error);
+                }
+                if self.operator_method_call(source, "__getitem__")?.is_none() {
+                    return Err(error);
+                }
+                self.heap.alloc(Object::SequenceIterator {
+                    class: self.runtime_types.sequence_iterator,
+                    source,
+                    index: 0,
+                    exhausted: false,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn sequence_iterator_next(
+        &mut self,
+        p: &Program,
+        iterator: Value,
+        output: &mut dyn Write,
+    ) -> Result<Value> {
+        let (source, index, exhausted) = match self.heap.get(iterator)? {
+            Object::SequenceIterator {
+                source,
+                index,
+                exhausted,
+                ..
+            } => (*source, *index, *exhausted),
+            _ => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "iterator descriptor requires a sequence iterator",
+                ))
+            }
+        };
+        if exhausted {
+            return Err(Diagnostic::new("StopIteration", String::new()));
+        }
+
+        let Some(call) = self.operator_method_call(source, "__getitem__")? else {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "sequence iterator source is no longer subscriptable",
+            ));
+        };
+        let index_value = self.heap.i64(index)?;
+        let arguments = [call.receiver.unwrap_or(index_value), index_value];
+        let arguments = if call.receiver.is_some() {
+            &arguments[..]
+        } else {
+            &arguments[1..]
+        };
+
+        // The iterator owns the source across guest __getitem__ execution.
+        // Reentry completes one index at a time, keeping Rust stack usage
+        // bounded independently of the sequence length.
+        let root_depth = self.finalizer_roots.len();
+        self.finalizer_roots.push(iterator);
+        let result = self.reenter_from_native(p, call.callable, arguments, output);
+        let result = (|| match result {
+            Ok(item) => {
+                let Object::SequenceIterator { index, .. } = self.heap.get_mut(iterator)? else {
+                    unreachable!("validated sequence iterator")
+                };
+                *index = index.checked_add(1).ok_or_else(|| {
+                    Diagnostic::new("OverflowError", "sequence iterator index overflow")
+                })?;
+                Ok(item)
+            }
+            Err(error) if matches!(error.kind.as_str(), "IndexError" | "StopIteration") => {
+                let Object::SequenceIterator { exhausted, .. } = self.heap.get_mut(iterator)?
+                else {
+                    unreachable!("validated sequence iterator")
+                };
+                *exhausted = true;
+                self.pending_exception = None;
+                Err(Diagnostic::new("StopIteration", String::new()))
+            }
+            Err(error) => Err(error),
+        })();
+        self.finalizer_roots.truncate(root_depth);
+        result
+    }
+
     fn callable_for_sentinel_iterator(&self, mut value: Value) -> Result<bool> {
         for _ in 0..=100 {
             match self.heap.get(value)? {
@@ -772,14 +900,13 @@ impl Vm {
                             "generator descriptor requires a generator",
                         ));
                     }
-                    return match self.heap.iterator(source) {
+                    return match self.iterator_with_sequence_fallback(source) {
                         Ok(iterator) => {
                             self.registers[destination] = iterator;
                             Ok(())
                         }
                         Err(error) if error.kind == "TypeError" => {
-                            let Some(call) = self.heap.special_method_call(source, "__iter__")?
-                            else {
+                            let Some(call) = self.operator_method_call(source, "__iter__")? else {
                                 return Err(error);
                             };
                             let depth = self.frames.len();
@@ -866,7 +993,7 @@ impl Vm {
                             }
                         };
                     }
-                    let Some(call) = self.heap.special_method_call(iterator, "__next__")? else {
+                    let Some(call) = self.operator_method_call(iterator, "__next__")? else {
                         return Err(Diagnostic::new("TypeError", "object is not an iterator"));
                     };
                     let depth = self.frames.len();
@@ -4066,7 +4193,7 @@ impl Vm {
         source: Value,
         output: &mut dyn Write,
     ) -> Result<()> {
-        match self.heap.iterator(source) {
+        match self.iterator_with_sequence_fallback(source) {
             Ok(iterator) => self.continue_dict_construction(
                 p,
                 destination,
@@ -4078,7 +4205,7 @@ impl Vm {
                 output,
             ),
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                let Some(call) = self.operator_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -4144,32 +4271,20 @@ impl Vm {
                 };
                 item
             } else {
-                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-                };
-                let depth = self.frames.len();
-                match self.invoke_target(
+                match self.invoke_iterator_next_with_action(
                     p,
-                    call.callable,
+                    state.iterator,
                     destination,
-                    Arguments::Inline {
-                        receiver: call.receiver,
-                        positional: [Value::UNBOUND; 3],
-                        count: 0,
-                    },
+                    ReturnAction::DictIterableNext(state.clone()),
                     output,
                 ) {
-                    Ok(()) => {}
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
                     Err(error) if error.kind == "StopIteration" => {
                         self.pending_exception = None;
                         return self.finish_dict_construction(p, destination, state.start, output);
                     }
                     Err(error) => return Err(error),
-                }
-                if self.frames.len() > depth {
-                    self.frames.last_mut().expect("dict __next__ frame").action =
-                        ReturnAction::DictIterableNext(state);
-                    return Ok(());
                 }
                 self.registers[destination]
             };
@@ -4187,10 +4302,10 @@ impl Vm {
         item: Value,
         output: &mut dyn Write,
     ) -> Result<Option<DictConstruction>> {
-        match self.heap.iterator(item) {
+        match self.iterator_with_sequence_fallback(item) {
             Ok(iterator) => self.invoke_dict_pair_iterator(p, destination, outer, iterator, output),
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(item, "__iter__")? else {
+                let Some(call) = self.operator_method_call(item, "__iter__")? else {
                     return Err(Diagnostic::new(
                         "TypeError",
                         format!(
@@ -4246,7 +4361,7 @@ impl Vm {
                 output,
             ),
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(iterator, "__iter__")? else {
+                let Some(call) = self.operator_method_call(iterator, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "object is not an iterator"));
                 };
                 let depth = self.frames.len();
@@ -4315,34 +4430,20 @@ impl Vm {
             return self.finish_dict_pair(p, destination, state, output);
         }
         loop {
-            let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-            };
-            let depth = self.frames.len();
-            match self.invoke_target(
+            match self.invoke_iterator_next_with_action(
                 p,
-                call.callable,
+                state.iterator,
                 destination,
-                Arguments::Inline {
-                    receiver: call.receiver,
-                    positional: [Value::UNBOUND; 3],
-                    count: 0,
-                },
+                ReturnAction::DictPairNext(state.clone()),
                 output,
             ) {
-                Ok(()) => {}
+                Ok(true) => return Ok(None),
+                Ok(false) => {}
                 Err(error) if error.kind == "StopIteration" => {
                     self.pending_exception = None;
                     return self.finish_dict_pair(p, destination, state, output);
                 }
                 Err(error) => return Err(error),
-            }
-            if self.frames.len() > depth {
-                self.frames
-                    .last_mut()
-                    .expect("dict pair __next__ frame")
-                    .action = ReturnAction::DictPairNext(state);
-                return Ok(None);
             }
             state.items.push(self.registers[destination]);
         }
@@ -4410,13 +4511,13 @@ impl Vm {
         total: Value,
         output: &mut dyn Write,
     ) -> Result<()> {
-        match self.heap.iterator(source) {
+        match self.iterator_with_sequence_fallback(source) {
             Ok(iterator) => {
                 let total = self.sum_start_total(total)?;
                 self.continue_sum(p, destination, SumState { iterator, total }, output)
             }
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                let Some(call) = self.operator_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -4477,33 +4578,21 @@ impl Vm {
                 };
                 item
             } else {
-                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-                };
-                let depth = self.frames.len();
-                match self.invoke_target(
+                match self.invoke_iterator_next_with_action(
                     p,
-                    call.callable,
+                    state.iterator,
                     destination,
-                    Arguments::Inline {
-                        receiver: call.receiver,
-                        positional: [Value::UNBOUND; 3],
-                        count: 0,
-                    },
+                    ReturnAction::SumNext(state),
                     output,
                 ) {
-                    Ok(()) => {}
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
                     Err(error) if error.kind == "StopIteration" => {
                         self.pending_exception = None;
                         self.registers[destination] = self.materialize_sum_total(state.total)?;
                         return Ok(());
                     }
                     Err(error) => return Err(error),
-                }
-                if self.frames.len() > depth {
-                    self.frames.last_mut().expect("sum __next__ frame").action =
-                        ReturnAction::SumNext(state);
-                    return Ok(());
                 }
                 self.registers[destination]
             };
@@ -4523,12 +4612,12 @@ impl Vm {
         any: bool,
         output: &mut dyn Write,
     ) -> Result<()> {
-        match self.heap.iterator(source) {
+        match self.iterator_with_sequence_fallback(source) {
             Ok(iterator) => {
                 self.continue_bool_reduce(p, destination, BoolReduceState { iterator, any }, output)
             }
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                let Some(call) = self.operator_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -4595,35 +4684,21 @@ impl Vm {
                 };
                 item
             } else {
-                let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-                    return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-                };
-                let depth = self.frames.len();
-                match self.invoke_target(
+                match self.invoke_iterator_next_with_action(
                     p,
-                    call.callable,
+                    state.iterator,
                     destination,
-                    Arguments::Inline {
-                        receiver: call.receiver,
-                        positional: [Value::UNBOUND; 3],
-                        count: 0,
-                    },
+                    ReturnAction::BoolReduceNext(state),
                     output,
                 ) {
-                    Ok(()) => {}
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
                     Err(error) if error.kind == "StopIteration" => {
                         self.pending_exception = None;
                         self.registers[destination] = Value::bool(!state.any);
                         return Ok(());
                     }
                     Err(error) => return Err(error),
-                }
-                if self.frames.len() > depth {
-                    self.frames
-                        .last_mut()
-                        .expect("boolean reduction __next__ frame")
-                        .action = ReturnAction::BoolReduceNext(state);
-                    return Ok(());
                 }
                 self.registers[destination]
             };
@@ -4713,7 +4788,7 @@ impl Vm {
         let ExtremumSource::Iterator(iterable) = source else {
             unreachable!()
         };
-        match self.heap.iterator(iterable) {
+        match self.iterator_with_sequence_fallback(iterable) {
             Ok(iterator) => self.continue_extremum(
                 p,
                 destination,
@@ -4727,7 +4802,7 @@ impl Vm {
                 output,
             ),
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(iterable, "__iter__")? else {
+                let Some(call) = self.operator_method_call(iterable, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -4809,35 +4884,20 @@ impl Vm {
                         };
                         item
                     } else {
-                        let Some(call) = self.heap.special_method_call(iterator, "__next__")?
-                        else {
-                            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-                        };
-                        let depth = self.frames.len();
-                        match self.invoke_target(
+                        match self.invoke_iterator_next_with_action(
                             p,
-                            call.callable,
+                            iterator,
                             destination,
-                            Arguments::Inline {
-                                receiver: call.receiver,
-                                positional: [Value::UNBOUND; 3],
-                                count: 0,
-                            },
+                            ReturnAction::ExtremumNext(state.clone()),
                             output,
                         ) {
-                            Ok(()) => {}
+                            Ok(true) => return Ok(()),
+                            Ok(false) => {}
                             Err(error) if error.kind == "StopIteration" => {
                                 self.pending_exception = None;
                                 return self.finish_extremum(destination, state);
                             }
                             Err(error) => return Err(error),
-                        }
-                        if self.frames.len() > depth {
-                            self.frames
-                                .last_mut()
-                                .expect("extremum __next__ frame")
-                                .action = ReturnAction::ExtremumNext(state);
-                            return Ok(());
                         }
                         self.registers[destination]
                     }
@@ -5113,7 +5173,7 @@ impl Vm {
         source: Value,
         output: &mut dyn Write,
     ) -> Result<()> {
-        match self.heap.iterator(source) {
+        match self.iterator_with_sequence_fallback(source) {
             Ok(iterator) => self.continue_iterable_collection(
                 p,
                 destination,
@@ -5125,7 +5185,7 @@ impl Vm {
                 output,
             ),
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                let Some(call) = self.operator_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -5202,22 +5262,15 @@ impl Vm {
             );
         }
         loop {
-            let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-            };
-            let depth = self.frames.len();
-            match self.invoke_target(
+            match self.invoke_iterator_next_with_action(
                 p,
-                call.callable,
+                state.iterator,
                 destination,
-                Arguments::Inline {
-                    receiver: call.receiver,
-                    positional: [Value::UNBOUND; 3],
-                    count: 0,
-                },
+                ReturnAction::CollectIterableNext(state.clone()),
                 output,
             ) {
-                Ok(()) => {}
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
                 Err(error) if error.kind == "StopIteration" => {
                     self.pending_exception = None;
                     return self.finish_iterable_collection(
@@ -5229,11 +5282,6 @@ impl Vm {
                     );
                 }
                 Err(error) => return Err(error),
-            }
-            if self.frames.len() > depth {
-                self.frames.last_mut().expect("__next__ frame").action =
-                    ReturnAction::CollectIterableNext(state);
-                return Ok(());
             }
             let item = self.registers[destination];
             if let IterableCollectionKind::ListInit { owner, .. } = &state.kind {
@@ -5622,7 +5670,7 @@ impl Vm {
                 output,
             );
         }
-        match self.heap.iterator(container) {
+        match self.iterator_with_sequence_fallback(container) {
             Ok(iterator) => {
                 self.continue_membership(
                     p,
@@ -5719,34 +5767,20 @@ impl Vm {
             };
             item
         } else {
-            let Some(call) = self.operator_method_call(state.iterator, "__next__")? else {
-                return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-            };
-            let depth = self.frames.len();
-            match self.invoke_target(
+            match self.invoke_iterator_next_with_action(
                 p,
-                call.callable,
+                state.iterator,
                 destination,
-                Arguments::Inline {
-                    receiver: call.receiver,
-                    positional: [Value::UNBOUND; 3],
-                    count: 0,
-                },
+                super::ReturnAction::MembershipNext(state.clone()),
                 output,
             ) {
-                Ok(()) => {}
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
                 Err(error) if error.kind == "StopIteration" => {
                     self.pending_exception = None;
                     return self.finish_membership(destination, false, state.negate);
                 }
                 Err(error) => return Err(error),
-            }
-            if self.frames.len() > depth {
-                self.frames
-                    .last_mut()
-                    .expect("membership __next__ frame")
-                    .action = super::ReturnAction::MembershipNext(state);
-                return Ok(());
             }
             self.registers[destination]
         };
@@ -7835,6 +7869,32 @@ impl Vm {
                 let iterator = args.positional(&self.registers, 0);
                 self.call_sentinel_iterator_next(p, iterator, output)
             }
+            Builtin::SequenceIteratorIter => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "iterator.__iter__ expects no arguments",
+                    ));
+                }
+                let iterator = args.positional(&self.registers, 0);
+                if !matches!(self.heap.get(iterator), Ok(Object::SequenceIterator { .. })) {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "iterator descriptor requires a sequence iterator",
+                    ));
+                }
+                Ok(iterator)
+            }
+            Builtin::SequenceIteratorNext => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "iterator.__next__ expects no arguments",
+                    ));
+                }
+                let iterator = args.positional(&self.registers, 0);
+                self.sequence_iterator_next(p, iterator, output)
+            }
             Builtin::RangeNew => unreachable!("builtin has a suspending call path"),
             Builtin::Hash
             | Builtin::ObjectHash
@@ -8185,7 +8245,7 @@ impl Vm {
         resume_pc: Option<usize>,
         output: &mut dyn Write,
     ) -> Result<bool> {
-        match self.heap.iterator(source) {
+        match self.iterator_with_sequence_fallback(source) {
             Ok(iterator) if self.iterator_resumable(iterator).is_some() => {
                 let depth = self.frames.len();
                 self.continue_argument_expansion(
@@ -8199,6 +8259,18 @@ impl Vm {
                 )?;
                 Ok(self.frames.len() > depth)
             }
+            Ok(iterator) if !self.heap.is_iterator(iterator) => {
+                self.continue_argument_expansion(
+                    p,
+                    destination,
+                    ArgumentExpansion {
+                        iterator,
+                        resume_pc: None,
+                    },
+                    output,
+                )?;
+                Ok(false)
+            }
             Ok(iterator) => {
                 while let Some(item) = self.heap.next(iterator)? {
                     self.push_expanded_positional(item)?;
@@ -8206,7 +8278,7 @@ impl Vm {
                 Ok(false)
             }
             Err(error) if error.kind == "TypeError" => {
-                let Some(call) = self.heap.special_method_call(source, "__iter__")? else {
+                let Some(call) = self.operator_method_call(source, "__iter__")? else {
                     return Err(Diagnostic::new("TypeError", "value is not iterable"));
                 };
                 let depth = self.frames.len();
@@ -8284,22 +8356,15 @@ impl Vm {
             }
             return Ok(());
         }
-        let Some(call) = self.heap.special_method_call(state.iterator, "__next__")? else {
-            return Err(Diagnostic::new("TypeError", "object is not an iterator"));
-        };
-        let depth = self.frames.len();
-        match self.invoke_target(
+        match self.invoke_iterator_next_with_action(
             p,
-            call.callable,
+            state.iterator,
             destination,
-            Arguments::Inline {
-                receiver: call.receiver,
-                positional: [Value::UNBOUND; 3],
-                count: 0,
-            },
+            ReturnAction::ExpandIterableNext(state),
             output,
         ) {
-            Ok(()) => {}
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
             Err(error) if error.kind == "StopIteration" => {
                 self.pending_exception = None;
                 if let Some(resume_pc) = state.resume_pc {
@@ -8312,13 +8377,8 @@ impl Vm {
             }
             Err(error) => return Err(error),
         }
-        if self.frames.len() > depth {
-            self.frames.last_mut().expect("__next__ frame").action =
-                ReturnAction::ExpandIterableNext(state);
-        } else {
-            self.push_expanded_positional(self.registers[destination])?;
-            self.continue_argument_expansion(p, destination, state, output)?;
-        }
+        self.push_expanded_positional(self.registers[destination])?;
+        self.continue_argument_expansion(p, destination, state, output)?;
         Ok(())
     }
 }
