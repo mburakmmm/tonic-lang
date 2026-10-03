@@ -1,10 +1,15 @@
-#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 //! Isolated HPy Universal adapter boundary.
 //!
-//! Milestone H0 deliberately contains metadata and validation only. In
-//! particular, [`CapabilityState::Unavailable`] means that no callable HPy
-//! implementation is present yet.
+//! Milestone H1a adds strict macOS/Linux shared-library validation and process
+//! pinning on top of the H0 inventory. It still does not provide an
+//! `HPyContext`; [`CapabilityState::Unavailable`] therefore means that no HPy
+//! operation is executable yet.
+
+mod loader;
+
+pub use loader::{LoadError, PinnedUniversalModule};
 
 use std::{error::Error, fmt};
 
@@ -69,6 +74,19 @@ impl Platform {
             Self::Windows => ".hpy0.pyd",
         }
     }
+
+    #[must_use]
+    pub const fn current() -> Option<Self> {
+        if cfg!(target_os = "linux") {
+            Some(Self::Linux)
+        } else if cfg!(target_os = "macos") {
+            Some(Self::MacOs)
+        } else if cfg!(target_os = "windows") {
+            Some(Self::Windows)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +122,7 @@ pub fn validate_module_name(module_name: &str) -> Result<(), ModuleNameError> {
     Ok(())
 }
 
-/// Validate only the filename contract. Loading begins in milestone H1.
+/// Validate the Universal module filename contract.
 pub fn validate_universal_filename(
     module_name: &str,
     file_name: &str,
@@ -161,7 +179,7 @@ const fn unavailable(id: &'static str, planned_milestone: &'static str) -> Capab
     }
 }
 
-/// Exhaustive coarse-grained H0 capability inventory.
+/// Exhaustive coarse-grained capability inventory.
 ///
 /// APIs not represented here are also unavailable: lookup is fail-closed.
 pub const CAPABILITIES: &[Capability] = &[
@@ -183,8 +201,8 @@ pub const CAPABILITIES: &[Capability] = &[
 
 /// HPy functions that Tonic can currently execute.
 ///
-/// H0 is inventory-only, so this list must remain empty until H1 supplies a
-/// real context and runtime implementation.
+/// H1a validates and pins libraries but supplies no context, so this list must
+/// remain empty until H1b provides real runtime implementations.
 pub const IMPLEMENTED_FUNCTIONS: &[&str] = &[];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,8 +223,8 @@ const fn unavailable_function(
     }
 }
 
-/// First callable context surface planned for H1. Every entry still fails
-/// closed in H0.
+/// First callable context surface planned for H1b. Every entry still fails
+/// closed while only the H1a loader is present.
 pub const PLANNED_FUNCTIONS: &[FunctionCapability] = &[
     unavailable_function("HPy_Dup", "H1"),
     unavailable_function("HPy_Close", "H1"),
@@ -244,7 +262,7 @@ pub fn capability(id: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|capability| capability.id == id)
 }
 
-/// Require a capability while preserving H0's fail-closed behavior.
+/// Require a capability while preserving fail-closed behavior.
 pub fn require_capability(id: &str) -> Result<&'static Capability, CapabilityError> {
     let capability = capability(id).ok_or(CapabilityError::Unknown)?;
     match capability.state {

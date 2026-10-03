@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "inventory-only"
+implementation_status = "h1a-loader-validation"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -46,12 +46,12 @@ module_init_prefix = "HPyInit_"
 [[platform_suffixes]]
 platform = "linux"
 suffix = ".hpy0.so"
-state = "inventory-only"
+state = "loader-validation"
 
 [[platform_suffixes]]
 platform = "macos"
 suffix = ".hpy0.so"
-state = "inventory-only"
+state = "loader-validation"
 
 [[platform_suffixes]]
 platform = "windows"

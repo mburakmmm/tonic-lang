@@ -140,6 +140,14 @@ tag'ini, `hpy0` ABI/context slot düzenini, PyPI source hash'ini ve aHPy
 module/suffix sözleşmeleri fail-closed reddedilir. Bu kayıt loader veya context
 uygulandığı anlamına gelmez.
 
+H1a alt aşaması macOS/Linux için tamamlanmıştır. Loader yalnız tam
+`<module>.hpy0.so` adını kabul eder; HPy'nin iki sürüm, global-context ve module
+init sembolünün dördünü yüklemeden önce doğrular; extension'ın istediği ABI'yi
+host `0.0` ile karşılaştırır ve başarılı yüklemede library mapping'ini süreç
+ömrü boyunca pinler. Windows, `HPyContext` kurulumu ve herhangi bir HPy çağrısı
+bu alt aşamada fail-closed kalır. Bu sınır ve güvenlik gerekçesi
+[ADR 0095](adr/0095-hpy-universal-loader.md) içinde kayıtlıdır.
+
 İlk uçtan uca kanıt:
 
 ```text

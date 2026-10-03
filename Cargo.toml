@@ -23,6 +23,7 @@ cranelift-codegen = "=0.119.0"
 cranelift-frontend = "=0.119.0"
 cranelift-jit = "=0.119.0"
 cranelift-module = "=0.119.0"
+libloading = "=0.8.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
