@@ -206,7 +206,7 @@ sonra alınır.
     cancellation ve temel native `asyncio` modülü (`run`, `create_task`,
     `current_task`, `get_running_loop`, `sleep`, `Future`). Gerçek zamanlı I/O
     selector ve thread-safe scheduling standart kütüphane kapsamında kalır.
-- [ ] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
+- [x] Kapsamlı syntax conformance korpusu: comprehensions, match, f-strings, annotations vb.
   - [x] Bytecode v22 senkron list/dict comprehensions ve generator expressions;
     gizli lexical scope, dış scope'ta eager outer `iter`, iç içe `for`/`if`,
     closure cell'leri, geçici guest-list üretmeyen `LIST_APPEND`, precise
@@ -247,8 +247,10 @@ sonra alınır.
     ParamSpec `__default__`, `typing.NoDefault`, starred tuple metadata'sı,
     default-order doğrulaması, generic-class argument tamamlama, bytecode v33
     verifier ve interpreter/JIT-caller stress-GC uyumu.
-  - [ ] PEP 649/749 deferred-annotation modu için açık dil kararı; mevcut eager
-    Tonic annotation/bound/default semantiği bu karar verilene kadar korunur.
+  - [x] PEP 649/749 dil kararı: Tonic 0.x annotation/bound/type-parameter-default
+    ifadelerini eager değerlendirir; `__annotate__`, `annotationlib` formatları
+    ve fake-globals thunk'ları çekirdek runtime sözleşmesine alınmaz. Bu bilinçli
+    Python 3.14 uyumluluk farkı ADR 0094 ile sabitlenmiştir.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

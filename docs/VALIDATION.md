@@ -503,6 +503,12 @@ ve generic sınıfın eksik trailing argümanlarını doğrular. Interpreter/JIT
 Python 3.14 differential vakası gözlenebilir metadata ve alias argümanlarını
 karşılaştırır. Tonic'in eager değerlendirme tercihi ADR 0093'te belgelenmiştir.
 
+PEP 649/749 incelemesi sonucunda Tonic 0.x için eager annotation sözleşmesi ADR
+0094 ile kabul edilmiştir. Mevcut function/module/class/type-parameter testleri
+definition-time evaluation sırasını ve kesin GC edge'lerini doğrular. Python
+3.14'ün `__annotate__`, `annotationlib` formatları, ForwardRef ve fake-globals
+mekanizması desteklenmiş gibi raporlanmaz; bu yüzey bilinçli uyumluluk farkıdır.
+
 Matrix multiplication dilimi bytecode v32 `MAT_MUL`/`INPLACE_MAT_MUL`
 operandlarını iki verifier'da sınar. Compiler testi Tonic-owned AST ve iki opcode
 lowering'ini; runtime testi direct/reflected/in-place yolları, strict subclass

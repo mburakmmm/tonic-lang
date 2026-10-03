@@ -30,10 +30,9 @@ allocation path. Bound methods forward this attribute to their underlying
 function. The function object traces the optional dictionary, and dict mutation
 continues through the existing generational write barrier.
 
-Annotation expressions currently use eager definition-time evaluation. This is
-an explicit Tonic semantic choice for the initial surface; deferred annotation
-thunks can be added later without exposing parser nodes or changing the public
-value ABI.
+Annotation expressions use eager definition-time evaluation. ADR 0094 makes
+this the explicit Tonic 0.x language contract; Python 3.14 deferred annotation
+thunks are not part of the core runtime surface.
 
 ## JIT and GC consequences
 

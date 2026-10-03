@@ -13,8 +13,9 @@ parser owns Python 3.12 type-parameter syntax but its AST has no
 parser-specific types would violate the replaceable parser boundary.
 
 Python evaluates type-parameter bounds and defaults lazily. Tonic already has a
-documented eager annotation and bound policy. The roadmap explicitly keeps that
-policy until the combined PEP 649/749 deferred-annotation design is selected.
+documented eager annotation and bound policy. ADR 0094 retains that policy as
+the Tonic 0.x language contract after evaluating the combined PEP 649/749
+deferred-annotation design.
 
 ## Decision
 
@@ -59,4 +60,5 @@ interpreter and JIT callers with collection after every allocation. The Python
 3.14 differential corpus compares `__default__`, `typing.NoDefault` identity,
 starred metadata, class aliases and type-alias arguments.
 
-Deferred evaluation remains part of the open PEP 649/749 roadmap item.
+ADR 0094 retains eager evaluation as the Tonic 0.x language contract and marks
+Python 3.14 deferred thunk behavior as an explicit compatibility difference.

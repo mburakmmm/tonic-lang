@@ -78,7 +78,8 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Deferred annotation thunks,
+The unsupported surface is reported explicitly. Tonic 0.x deliberately keeps
+eager annotation evaluation instead of Python 3.14 `__annotate__` thunks;
 OS-backed async I/O, a full standard library, and several remaining protocols are still tracked in the
 [roadmap](docs/ROADMAP.md).
 

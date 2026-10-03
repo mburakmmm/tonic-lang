@@ -513,8 +513,10 @@ tekil `typing.NoDefault` kullanır ve `*tuple[...]` metadata'sını origin/args 
 korur. Generic class subscription eksik trailing parametreleri default'larla
 tamamlarken type alias `__args__` Python gibi yalnız açık argümanları taşır.
 Mevcut annotation politikasıyla uyumlu olarak default ifadeler eager
-değerlendirilir; PEP 649/749 ile ortak deferred thunk kararı ayrı açık aşamadır.
-Ayrıntılar [ADR 0093](adr/0093-type-parameter-defaults.md) dosyasındadır.
+değerlendirilir. PEP 649/749 `__annotate__` thunk'larının Tonic 0.x çekirdek
+sözleşmesine alınmaması [ADR 0094](adr/0094-eager-annotation-semantics.md) ile
+kararlaştırılmıştır. Type-parameter default ayrıntıları
+[ADR 0093](adr/0093-type-parameter-defaults.md) dosyasındadır.
 
 Bytecode v32, Python'ın `@` ve `@=` işlemlerini ayrı `MAT_MUL` ve
 `INPLACE_MAT_MUL` opkodlarıyla taşır. Her üç operand verifier tarafından register

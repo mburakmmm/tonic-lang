@@ -61,5 +61,5 @@ complex target evaluation, class-held annotation values, interpreter/JIT
 callers and collection at every allocation. Differential cases compare the
 shared class, local-binding and complex-target behavior with Python 3.14.
 
-Type parameters, type aliases and deferred annotation thunks remain separate
-roadmap work.
+Type parameters and type aliases are specified by ADR 0085 and ADR 0093. ADR
+0094 records the decision to retain eager annotation semantics in Tonic 0.x.
