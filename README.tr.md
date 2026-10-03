@@ -103,7 +103,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 372 Rust testi ile 332 stdout ve 261 exception türü
+Güncel yerel matris 374 Rust testi ile 332 stdout ve 261 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -175,10 +175,12 @@ terfi eder. Owner-aware mutation API'leri old→young kenarlarını remembered s
 yazar; her 32. otomatik collection full-heap major collection'dır. Varsayılan
 collection aralığı 1024 allocation'dır. `--gc-every 1` stress, `--no-gc`
 karşılaştırma içindir. Collection instruction/JIT safepoint sınırlarında çalışır,
-native Context scope'u içinde çalışmaz. Henüz bounded-pause garantisi veya
-tam finalization-order garantisi yoktur; kullanıcı `__del__` çağrıları bounded
-kuyruk, resurrection ve exactly-once yürütmeyle desteklenir. Foreign payload destructor'ları sweep
-sonrasında ayrı queue'da çalışır. Float ve büyük integer sonuçları heap'e ayrılır;
+native Context scope'u içinde çalışmaz. Tam heap taramasının henüz bounded-pause
+garantisi yoktur. Logical finalization bounded kuyruk, resurrection,
+exactly-once `__del__` ve `sys.unraisablehook` ile desteklenir; sıralama suspended
+generator → kullanıcı nesnesi → foreign payload destructor biçimindedir. Aynı
+kategorideki nesneler arasında dil düzeyinde sıra garantisi verilmez. Float ve
+büyük integer sonuçları heap'e ayrılır;
 küçük integer döngüleri ayrılmaz. Kalıcı native handle açıkça serbest bırakılmalıdır.
 Heap metadata kapasitesi bırakılmayabilir; native kod uzun çalışırken GC gecikir.
 Bu sürüm kaynak sınırlı sandbox veya production runtime garantisi vermez.

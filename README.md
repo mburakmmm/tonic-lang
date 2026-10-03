@@ -172,7 +172,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 372 Rust tests and a differential corpus of
+The repository currently contains 374 Rust tests and a differential corpus of
 332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
@@ -222,9 +222,9 @@ and production hardening are incomplete. In particular:
 - CPython ABI compatibility is intentionally outside the core runtime;
 - HPy Universal loading and aHPy-generated extension execution are planned and
   not implemented yet;
-- GC pauses are not yet bounded; user `__del__` finalization now has a bounded
-  queue, resurrection and exactly-once execution, while ordering/unraisable
-  hook policy remains open;
+- GC pauses are not yet bounded; logical finalization uses bounded queues,
+  exactly-once `__del__`, resurrection, `sys.unraisablehook`, and a documented
+  generator → object → foreign ordering;
 - JIT coverage is focused on profiled numeric loops and guarded call paths;
 - the native C ABI remains versioned but pre-stable;
 - this release does not provide a resource-isolation sandbox.

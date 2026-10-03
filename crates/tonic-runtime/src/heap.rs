@@ -191,6 +191,7 @@ pub(crate) enum Builtin {
     ClassMethod,
     Property,
     Super,
+    SysUnraisableHook,
     ObjectNew,
     ObjectInit,
     ObjectHash,
@@ -724,6 +725,10 @@ impl Heap {
 
     pub(crate) fn has_pending_object_finalizers(&self) -> bool {
         !self.pending_finalizers.is_empty()
+    }
+
+    pub(crate) fn has_pending_foreign_finalizers(&self) -> bool {
+        !self.pending_foreign.is_empty()
     }
 
     pub(crate) fn pop_object_finalizer(&mut self) -> Option<Value> {

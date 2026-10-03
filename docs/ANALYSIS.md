@@ -305,8 +305,12 @@ silmek yerine logical handle'ıyla finalization kökü olarak kuyruğa alır. VM
 dışında `GeneratorExit` enjekte eder; delege `yield from` zinciri içten dışa kapanır,
 `finally` çalışır ve fiziksel reclamation sonraki collection'a kalır. Normal instruction
 sınırında en fazla sekiz finalizer çalıştırılır; idle explicit collection ve shutdown
-kuyruğu tamamen boşaltır. Finalizer'dan kaçan guest exception ana yürütmeden yalıtılır
-ve sayaçlanır. Kullanıcı `__del__`/resurrection açık kalır. Ayrıntı
+kuyruğu tamamen boşaltır. Finalizer'dan kaçan guest exception ana yürütmeden
+yalıtılır ve sayaçlanır. Hata `sys.unraisablehook` üzerinden precise-rooted
+`UnraisableHookArgs` ile kullanıcı hook'una aktarılır; hook hatası da ana
+yürütmeyi değiştirmeden ayrıca sayaçlanır. GC ve shutdown sınırları kategorileri
+suspended generator, kullanıcı `__del__`, foreign payload destructor sırasında
+boşaltır; aynı kategori içinde dil düzeyinde sıra garantisi yoktur. Ayrıntı
 [ADR 0072](adr/0072-generator-frame-state-machine.md) dosyasındadır.
 
 ## Coroutine ilk dilimi

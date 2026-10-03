@@ -202,6 +202,8 @@ fn generator_finalization_closes_delegates_and_contains_unraisable_errors() {
         );
         assert_eq!(vm.stats.generator_finalizers, 2);
         assert_eq!(vm.stats.generator_finalizer_errors, 1);
+        assert_eq!(vm.stats.unraisable_hook_calls, 1);
+        assert_eq!(vm.stats.unraisable_hook_errors, 0);
     }
 }
 
@@ -220,11 +222,61 @@ fn user_finalizers_run_once_support_resurrection_and_keep_gc_errors_unraisable()
         assert_eq!(out, b"True\nbroken-finalizer\nrescue-finalizer\n");
         assert_eq!(vm.stats.object_finalizers, 2);
         assert_eq!(vm.stats.object_finalizer_errors, 1);
+        assert_eq!(vm.stats.unraisable_hook_calls, 1);
+        assert_eq!(vm.stats.unraisable_hook_errors, 0);
 
         // The surviving object was resurrected, but its finalizer is never
         // scheduled a second time while that root remains live.
         vm.collect_garbage().unwrap();
         assert_eq!(vm.stats.object_finalizers, 2);
+    }
+}
+
+#[test]
+fn user_unraisable_hook_receives_rooted_exception_metadata_and_hook_errors_are_contained() {
+    let source = "import sys\ndef capture(args):\n    print(type(args).__name__,args.exc_type.__name__,str(args.exc_value),args.exc_traceback is not None,args.err_msg is None,args.object is Broken.__del__)\n    raise RuntimeError('hook failure')\nsys.unraisablehook=capture\nclass Broken:\n    def __del__(self):\n        raise ValueError('ignored')\nvalue=Broken()\nvalue=None\nprint('body-complete')";
+    let program = compile(source, "unraisable-hook").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"body-complete\n");
+        // The hook-argument instance is allocated after the explicit collection.
+        // Collect again before its first guest instruction to prove every field
+        // is retained through `finalizer_roots` rather than native stack luck.
+        vm.gc_interval = Some(1);
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(
+            out,
+            b"body-complete\nUnraisableHookArgs ValueError ignored True True True\n"
+        );
+        assert_eq!(vm.stats.object_finalizers, 1);
+        assert_eq!(vm.stats.object_finalizer_errors, 1);
+        assert_eq!(vm.stats.unraisable_hook_calls, 1);
+        assert_eq!(vm.stats.unraisable_hook_errors, 1);
+    }
+}
+
+#[test]
+fn finalization_categories_run_generators_then_objects() {
+    let source = "class Finalized:\n    def __del__(self):\n        print('object-finalizer')\ndef closing():\n    try:\n        yield 'ready'\n    finally:\n        print('generator-finalizer')\ndef abandon():\n    generator=closing()\n    next(generator)\n    value=Finalized()\nabandon()\nprint('body-complete')";
+    let program = compile(source, "finalization-order").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = None;
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"body-complete\n");
+        vm.collect_garbage_with_output(&mut out).unwrap();
+        assert_eq!(
+            out,
+            b"body-complete\ngenerator-finalizer\nobject-finalizer\n"
+        );
+        assert_eq!(vm.stats.generator_finalizers, 1);
+        assert_eq!(vm.stats.object_finalizers, 1);
     }
 }
 

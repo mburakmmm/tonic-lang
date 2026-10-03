@@ -50,7 +50,7 @@ sonra alınır.
     eşitlik tabanlı mappingproxy lookup/iteration ve precise GC ile korunması.
   - [x] Dict dışı özel `__prepare__` namespace mapping'leri; VM `__getitem__`/
     `__setitem__` dispatch'i, global fallback ve `type.__new__` için dict dönüşümü.
-- [ ] Type nesneleri ve kalan özel numeric/operator/attribute/iteration protokolleri.
+- [x] Type nesneleri ve kalan özel numeric/operator/attribute/iteration protokolleri.
   - [x] Instance `__getitem__`/`__setitem__`/`__delitem__`; special-method MRO
     lookup, static/class binding, suspending frame ve mutation-return discard.
   - [x] Class subscription `__class_getitem__`; metaclass `__getitem__`
@@ -78,7 +78,7 @@ sonra alınır.
     canonical `object`/`type` delegasyonu, data/non-data descriptor önceliği,
     suspending `AttributeError`→`__getattr__`, `getattr` default/`hasattr`,
     `delattr`, precise roots ve attribute/direct-method cache güvenliği.
-  - [ ] Builtin type alt sınıflarının native storage kurucuları ve kalan
+  - [x] Builtin type alt sınıflarının native storage kurucuları ve kalan
     numeric/comparison protokolleri.
     - [x] Varsayılan kurucu yolunda `int`/`float`/`str`/`list`/`tuple`/`dict`
       alt sınıfları için class identity ve instance slotlarını koruyan, exact
@@ -259,17 +259,19 @@ sonra alınır.
 - [x] Precise full-heap tracing GC, cycle toplama, compaction; slot/generation doğrulaması.
 - [x] Stress GC, generation exhaustion, cycle/movement, native roots ve mutation graph testleri.
 - [x] Nursery/old-generation ayrımı, write barrier ve remembered set; minor/major collection testleri.
-- [ ] Genel finalizer semantiği ve finalization roots; bounded pause tasarımı.
+- [x] Genel finalizer semantiği ve finalization roots; bounded pause tasarımı.
   - [x] Suspended generator finalization queue, precise roots ve safepoint başına
     bounded logical close; fiziksel reclamation sonraki collection'a ayrılır.
-  - [ ] Kullanıcı `__del__`, resurrection, unraisable hook ve genel nesne
+  - [x] Kullanıcı `__del__`, resurrection, unraisable hook ve genel nesne
     finalization sırası.
     - [x] Erişilemez user instance/exception nesneleri için collector-dışı
       `__del__` kuyruğu, precise finalizer roots, bounded safepoint drain,
       resurrection ve exactly-once çağrı; finalizer hataları ölçülerek
       unraisable biçimde yalıtılır.
-    - [ ] Kullanıcı unraisable hook ve tüm nesne türleri için belgelenmiş
-      finalization ordering.
+    - [x] `sys.unraisablehook`/`sys.__unraisablehook__`, precise rooted
+      `UnraisableHookArgs`, hook hata yalıtımı ve bütün GC girişlerinde suspended
+      generator → user object → foreign payload finalization sırası. Aynı kategori
+      içinde dil düzeyinde sıra garantisi verilmez.
 - [x] Sabitlenmiş Cranelift 0.119 backend; immediate integer leaf numeric-loop bytecode'u, `--jit`, guard ve register-materialized deopt.
 - [x] Leaf JIT differential korpusu; guard/fallback, entry hotness ve ölçümlü küçük-fonksiyon kârlılık eşiği, bounded de-specialization, compile-time/code-size sayaçları.
 - [x] Opak runtime helper ABI; allocation üreten true division, kesin hata türü/PC dönüşü ve panic'in FFI sınırını aşmasını engelleyen trampoline.
@@ -355,9 +357,9 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler kalan builtin protokolleri, kapsamlı syntax korpusu,
-genel kullanıcı finalizer semantiği, OS destekli async I/O ve HPy H1
-shared-library loader/handle yüzeyidir. JIT'in desteklenen tier'ı
+Sıradaki çekirdek işler REPL/bytecode cache/stdlib, coverage-guided güvenlik
+testleri, OS destekli async I/O ve HPy H1 shared-library loader/handle yüzeyidir.
+JIT'in desteklenen tier'ı
 x86-64/AArch64 debug-release, normal/stress
 GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;
 desteklenmeyen bytecode generic interpreter fallback'inde kalır.

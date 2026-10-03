@@ -7971,6 +7971,15 @@ impl Vm {
                 }
                 Ok(Value::NONE)
             }
+            Builtin::SysUnraisableHook => {
+                if count != 1 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "sys.unraisablehook expects one argument",
+                    ));
+                }
+                Ok(Value::NONE)
+            }
             Builtin::Super => {
                 let (start_class, receiver) = match count {
                     0 => {

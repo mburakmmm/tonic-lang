@@ -61,6 +61,8 @@ pub struct Stats {
     pub generator_finalizer_errors: u64,
     pub object_finalizers: u64,
     pub object_finalizer_errors: u64,
+    pub unraisable_hook_calls: u64,
+    pub unraisable_hook_errors: u64,
     pub backedges: u64,
     pub heap_allocations: u64,
     pub estimated_heap_bytes: usize,
@@ -274,9 +276,6 @@ impl JitRuntime<'_> {
                 self.heap.collect_young(roots)
             }
             .map_err(runtime_failure)?;
-            let (destructors, panics) = self.heap.drain_foreign_finalizers(self.handles);
-            self.stats.foreign_destructor_calls += destructors;
-            self.stats.foreign_destructor_panics += panics;
             record_collection(self.stats, self.heap, collection, started);
             self.stats.jit_gc_collections += 1;
         }
@@ -1190,6 +1189,7 @@ struct RuntimeTypes {
     async_task: Value,
     async_future_iterator: Value,
     async_event_loop: Value,
+    unraisable_hook_args: Value,
     base_exception: Value,
     exception: Value,
     type_error: Value,
@@ -1242,6 +1242,7 @@ impl RuntimeTypes {
             async_task: Value::UNBOUND,
             async_future_iterator: Value::UNBOUND,
             async_event_loop: Value::UNBOUND,
+            unraisable_hook_args: Value::UNBOUND,
             base_exception: Value::UNBOUND,
             exception: Value::UNBOUND,
             type_error: Value::UNBOUND,
@@ -1282,6 +1283,7 @@ impl RuntimeTypes {
             self.async_task,
             self.async_future_iterator,
             self.async_event_loop,
+            self.unraisable_hook_args,
             self.base_exception,
             self.exception,
             self.type_error,
@@ -2119,6 +2121,12 @@ impl Vm {
         let async_event_loop =
             vm.heap
                 .builtin_class("EventLoop", vec![vm.object_class], vm.type_class)?;
+        let unraisable_hook_args =
+            vm.heap
+                .builtin_class("UnraisableHookArgs", vec![vm.object_class], vm.type_class)?;
+        let sys_module_name = vm.heap.alloc(Object::Str("sys".into()))?;
+        vm.heap
+            .set_attr(unraisable_hook_args, "__module__", sys_module_name)?;
         let no_default = vm.heap.alloc(Object::TypeNoDefault)?;
         vm.runtime_types = RuntimeTypes {
             none: vm
@@ -2196,6 +2204,7 @@ impl Vm {
             async_task,
             async_future_iterator,
             async_event_loop,
+            unraisable_hook_args,
             base_exception,
             exception,
             type_error,
@@ -2484,6 +2493,18 @@ impl Vm {
         ] {
             vm.heap.add_module_member(asyncio, name, value)?;
         }
+        let sys = vm.heap.alloc(Object::Module(Vec::new()))?;
+        let unraisable_hook = vm.heap.alloc(Object::Builtin(Builtin::SysUnraisableHook))?;
+        vm.heap
+            .add_module_member(sys, "unraisablehook", unraisable_hook)?;
+        vm.heap
+            .add_module_member(sys, "__unraisablehook__", unraisable_hook)?;
+        vm.heap.add_module_member(
+            sys,
+            "UnraisableHookArgs",
+            vm.runtime_types.unraisable_hook_args,
+        )?;
+        vm.modules.insert("sys".into(), sys);
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
             (vm.runtime_types.bool_, Builtin::IntHash),
@@ -2953,10 +2974,6 @@ impl Vm {
         let mut roots = Vec::new();
         self.append_gc_roots(None, true, &mut roots);
         let stats = self.heap.collect(roots)?;
-        let (destructors, panics) = self.heap.drain_foreign_finalizers(&mut self.handles);
-        self.stats.foreign_destructor_calls += destructors;
-        self.stats.foreign_destructor_panics += panics;
-        self.drain_deferred_persistent_releases()?;
         self.minor_collections = 0;
         record_collection(&mut self.stats, &self.heap, stats, start);
         if let Some(program) = self.active_program.clone() {
@@ -2967,6 +2984,7 @@ impl Vm {
                 self.drain_object_finalizers(&program, output, usize::MAX)?;
             }
         }
+        self.drain_foreign_finalizers()?;
         Ok(stats)
     }
     fn collect_automatic(&mut self) -> Result<crate::CollectionStats> {
@@ -2983,22 +3001,15 @@ impl Vm {
             self.minor_collections += 1;
             self.heap.collect_young(roots)?
         };
+        record_collection(&mut self.stats, &self.heap, stats, start);
+        Ok(stats)
+    }
+
+    fn drain_foreign_finalizers(&mut self) -> Result<()> {
         let (destructors, panics) = self.heap.drain_foreign_finalizers(&mut self.handles);
         self.stats.foreign_destructor_calls += destructors;
         self.stats.foreign_destructor_panics += panics;
-        self.drain_deferred_persistent_releases()?;
-        record_collection(&mut self.stats, &self.heap, stats, start);
-        if let Some(program) = self.active_program.clone() {
-            if !self.draining_object_finalizers && self.heap.has_pending_object_finalizers() {
-                let mut output = std::io::sink();
-                self.drain_object_finalizers(
-                    &program,
-                    &mut output,
-                    OBJECT_FINALIZERS_PER_SAFEPOINT,
-                )?;
-            }
-        }
-        Ok(stats)
+        self.drain_deferred_persistent_releases()
     }
     pub fn register_native(
         &mut self,
@@ -3141,7 +3152,11 @@ impl Vm {
             while self.heap.has_pending_generator_finalizers() {
                 self.drain_generator_finalizers(&program, output, usize::MAX)?;
             }
+            while self.heap.has_pending_object_finalizers() {
+                self.drain_object_finalizers(&program, output, usize::MAX)?;
+            }
         }
+        self.drain_foreign_finalizers()?;
         self.execution = self
             .execution
             .checked_add(1)
@@ -4090,11 +4105,14 @@ impl Vm {
         program: &Program,
         generator: Value,
         output: &mut dyn Write,
-    ) -> Result<()> {
+    ) -> Result<Option<Value>> {
         match self.heap.generator_state(generator) {
             Some(GeneratorState::Suspended) => {}
-            Some(GeneratorState::Created) => return self.heap.complete_generator(generator),
-            Some(GeneratorState::Completed | GeneratorState::Running) | None => return Ok(()),
+            Some(GeneratorState::Created) => {
+                self.heap.complete_generator(generator)?;
+                return Ok(None);
+            }
+            Some(GeneratorState::Completed | GeneratorState::Running) | None => return Ok(None),
         }
         let register_len = self.registers.len();
         let cell_len = self.cells.len();
@@ -4136,6 +4154,10 @@ impl Vm {
             }
             self.execute_until_depth(program, output, frame_depth)
         })();
+        let escaped_exception = result
+            .as_ref()
+            .err()
+            .and_then(|_| self.pending_exception.take());
         self.frames.truncate(frame_depth);
         self.registers.truncate(register_len);
         self.cells.truncate(cell_len);
@@ -4143,7 +4165,90 @@ impl Vm {
         self.pending_classes.truncate(pending_class_depth);
         self.pending_exception = saved_exception;
         self.finalizer_roots.truncate(finalizer_root_depth);
-        result
+        match result {
+            Ok(()) => Ok(None),
+            Err(error) if error.kind == "BytecodeError" => Err(error),
+            Err(error) => Ok(Some(match escaped_exception {
+                Some(exception) => exception,
+                None => self.exception_from_diagnostic(&error)?,
+            })),
+        }
+    }
+
+    fn report_unraisable(
+        &mut self,
+        program: &Program,
+        exception: Value,
+        object: Value,
+        output: &mut dyn Write,
+    ) -> Result<()> {
+        self.stats.unraisable_hook_calls += 1;
+        let Some(sys) = self.modules.get("sys").copied() else {
+            self.stats.unraisable_hook_errors += 1;
+            return Ok(());
+        };
+        let hook = match self.heap.attr(sys, "unraisablehook") {
+            Ok(hook) => hook,
+            Err(_) => {
+                self.stats.unraisable_hook_errors += 1;
+                return Ok(());
+            }
+        };
+        let arguments = self
+            .heap
+            .instance(self.runtime_types.unraisable_hook_args)?;
+        let exception_type = self.runtime_class(exception)?;
+        let traceback = match self.heap.get(exception)? {
+            Object::Exception { traceback, .. } => traceback.unwrap_or(Value::NONE),
+            _ => Value::NONE,
+        };
+        for (name, value) in [
+            ("exc_type", exception_type),
+            ("exc_value", exception),
+            ("exc_traceback", traceback),
+            ("err_msg", Value::NONE),
+            ("object", object),
+        ] {
+            self.heap.set_attr(arguments, name, value)?;
+        }
+
+        let register_len = self.registers.len();
+        let cell_len = self.cells.len();
+        let argument_depth = self.arguments.len();
+        let frame_depth = self.frames.len();
+        let pending_class_depth = self.pending_classes.len();
+        let finalizer_root_depth = self.finalizer_roots.len();
+        let saved_exception = self.pending_exception.take();
+        self.finalizer_roots.extend([hook, arguments]);
+        if let Some(exception) = saved_exception {
+            self.finalizer_roots.push(exception);
+        }
+        self.registers.push(Value::UNBOUND);
+        let destination = register_len;
+        let result = self
+            .invoke_target(
+                program,
+                hook,
+                destination,
+                Arguments::Inline {
+                    receiver: None,
+                    positional: [arguments, Value::UNBOUND, Value::UNBOUND],
+                    count: 1,
+                },
+                output,
+            )
+            .and_then(|_| self.execute_until_depth(program, output, frame_depth));
+        self.frames.truncate(frame_depth);
+        self.registers.truncate(register_len);
+        self.cells.truncate(cell_len);
+        self.arguments.truncate(argument_depth);
+        self.pending_classes.truncate(pending_class_depth);
+        self.pending_exception = saved_exception;
+        self.finalizer_roots.truncate(finalizer_root_depth);
+        if result.is_err() {
+            self.stats.unraisable_hook_errors += 1;
+        }
+        Ok(())
     }
 
     fn drain_generator_finalizers(
@@ -4165,11 +4270,9 @@ impl Vm {
                     continue;
                 }
                 self.stats.generator_finalizers += 1;
-                if let Err(error) = self.finalize_one_generator(program, generator, output) {
-                    if error.kind == "BytecodeError" {
-                        return Err(error);
-                    }
+                if let Some(exception) = self.finalize_one_generator(program, generator, output)? {
                     self.stats.generator_finalizer_errors += 1;
+                    self.report_unraisable(program, exception, generator, output)?;
                 }
             }
             Ok(())
@@ -4226,6 +4329,10 @@ impl Vm {
                         output,
                     )
                     .and_then(|_| self.execute_until_depth(program, output, frame_depth));
+                let escaped_exception = result
+                    .as_ref()
+                    .err()
+                    .and_then(|_| self.pending_exception.take());
                 self.frames.truncate(frame_depth);
                 self.registers.truncate(register_len);
                 self.cells.truncate(cell_len);
@@ -4233,8 +4340,13 @@ impl Vm {
                 self.pending_classes.truncate(pending_class_depth);
                 self.pending_exception = saved_exception;
                 self.finalizer_roots.truncate(finalizer_root_depth);
-                if result.is_err() {
+                if let Err(error) = result {
                     self.stats.object_finalizer_errors += 1;
+                    let exception = match escaped_exception {
+                        Some(exception) => exception,
+                        None => self.exception_from_diagnostic(&error)?,
+                    };
+                    self.report_unraisable(program, exception, call.callable, output)?;
                 }
             }
             Ok(())
@@ -5057,6 +5169,7 @@ impl Vm {
         while self.heap.has_pending_object_finalizers() {
             self.drain_object_finalizers(p, output, usize::MAX)?;
         }
+        self.drain_foreign_finalizers()?;
         Ok(())
     }
     pub(crate) fn execute_until_depth(
@@ -5066,16 +5179,33 @@ impl Vm {
         depth: usize,
     ) -> Result<()> {
         while self.frames.len() > depth {
-            if !self.draining_generator_finalizers && self.heap.has_pending_generator_finalizers() {
+            let mut generators_pending = self.heap.has_pending_generator_finalizers();
+            if !self.draining_generator_finalizers && generators_pending {
                 self.drain_generator_finalizers(p, output, GENERATOR_FINALIZERS_PER_SAFEPOINT)?;
+                generators_pending = self.heap.has_pending_generator_finalizers();
             }
-            if !self.draining_object_finalizers && self.heap.has_pending_object_finalizers() {
+            let mut objects_pending = self.heap.has_pending_object_finalizers();
+            if !generators_pending
+                && !self.draining_generator_finalizers
+                && !self.draining_object_finalizers
+                && objects_pending
+            {
                 self.drain_object_finalizers(p, output, OBJECT_FINALIZERS_PER_SAFEPOINT)?;
+                objects_pending = self.heap.has_pending_object_finalizers();
+            }
+            if !generators_pending
+                && !objects_pending
+                && self.heap.has_pending_foreign_finalizers()
+                && !self.draining_generator_finalizers
+                && !self.draining_object_finalizers
+            {
+                self.drain_foreign_finalizers()?;
             }
             if self.gc_interval.is_some_and(|interval| {
                 self.heap.allocations - self.heap.last_collection_allocations >= interval.max(1)
             }) {
                 self.collect_automatic()?;
+                continue;
             }
             if self.execution_mode == ExecutionMode::Jit
                 && self.frames.last().is_some_and(|frame| {

@@ -43,7 +43,7 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 117, CPython bridge 15 ve HPy manifest 5; toplam 372 test.
+native handles 5, language/runtime 119, CPython bridge 15 ve HPy manifest 5; toplam 374 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -79,7 +79,9 @@ generator'ların collector-dışı logical close'unu, delege kapanma sırasını
 unraisable hata yalıtımını ve shutdown finalization'ını doğrular. User
 `__del__` testleri erişilemez nesne kuyruğunu, resurrection'ı, exactly-once
 çağrıyı ve finalizer hatasının programdan yalıtılmasını interpreter/JIT-caller
-ile doğrular.
+ile doğrular. Ek test user-rebound `sys.unraisablehook` için exception type/value,
+traceback, `err_msg` ve kaynak callable alanlarını; hook'un kendi hatasının
+yalıtılmasını ve generator → user object kategori sırasını doğrular.
 Coroutine corpus'u tembel `async def` çağrısını, nested exact-coroutine `await`
 delegasyonunu, özel `__await__` iterator'larını, `coroutine_wrapper` protokolünü,
 `send`/`throw`/`close`, geçersiz awaitable hata türlerini ve askıdaki coroutine'in
@@ -271,8 +273,9 @@ exact error PC/türü ve explicit materialized register roots kullanır. Ardış
 helper arasında yalnız JIT register'ında yaşayan float, helper-triggered stress
 collection'dan sağ çıkar. Bu boxed-register ABI'sinin allocation safepoint testidir;
 unboxed machine deopt map kapsamı ayrı JIT testlerinde doğrulanır. Suspended generator
-logical finalization'ı uygulanmıştır; genel kullanıcı `__del__`/resurrection/
-unraisable-hook semantiği henüz uygulanmamıştır. CPython bridge'in iki-collector
+ve kullanıcı `__del__` logical finalization'ı; resurrection, exactly-once çağrı,
+`sys.unraisablehook` ve generator → user object → foreign payload sırası ile
+uygulanmıştır. CPython bridge'in iki-collector
 cycle/finalizer sırası yukarıdaki on beş integration testiyle sınırlanır.
 Recursive JIT testi `CALL` side exit'i, explicit child frame, arbitrary-PC native
 resume ve direct bound `LOAD_GLOBAL` yolunu birlikte çalıştırır. Global rebinding
@@ -458,7 +461,10 @@ matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
 
 User finalizer testi erişilemeyen `__del__` sahibi nesnelerin collector dışında
 bounded kuyrukla çalıştırılmasını, resurrection'ı, exactly-once çağrıyı ve
-unraisable hataların yalıtılmasını interpreter/JIT-caller altında doğrular.
+unraisable hataların yalıtılmasını interpreter/JIT-caller altında doğrular. Hook
+testi `UnraisableHookArgs` kenarlarının moving-GC güvenliğini, kullanıcı hook'una
+dispatch'i ve hook hatasının sayaçlanarak bastırılmasını kapsar; ayrı sıra testi
+generator finalizer'ın user object'ten önce çalıştığını doğrular.
 
 Fonksiyon annotation dilimi positional-only/positional, `*args`, keyword-only,
 `**kwargs` ve dönüş annotation ifadelerini Tonic-owned AST'ten doğrulanmış

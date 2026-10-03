@@ -69,8 +69,9 @@ logical handle'ıyla finalization kuyruğuna alır ve bütün frame grafiğini p
 olarak işaretler. Collector guest kodu çalıştırmaz. VM instruction sınırında kuyruktan
 en fazla sekiz öğe alır, collector dışında `GeneratorExit` enjekte eder ve mevcut
 `close`/`yield from` unwind yolunu kullanır. Delege generator önce, dış generator
-sonra kapanır. Finalizer'dan kaçan guest exception ana yürütmeyi bozmaz; stats içinde
-sayılır. Explicit idle collection ve shutdown kuyruğu tamamen boşaltır. Logical close
+sonra kapanır. Finalizer'dan kaçan guest exception ana yürütmeyi bozmaz; stats
+içinde sayılır ve ADR 0078'deki `sys.unraisablehook` yoluna aktarılır. Explicit
+idle collection ve shutdown kuyruğu tamamen boşaltır. Logical close
 ile fiziksel reclamation ayrı collection adımlarıdır. `Created`, `Running` ve zaten
 `Completed` generator'lar bu kuyruğa girmez.
 
@@ -78,8 +79,8 @@ ile fiziksel reclamation ayrı collection adımlarıdır. `Created`, `Running` v
 
 - Async generator ve async context protokolü ADR 0073 sonrasında ayrı
   genişletmeler olarak eklenecektir.
-- Genel kullanıcı `__del__`, resurrection ve unraisable hook politikası ayrı
-  finalizer tasarımında ele alınacaktır.
+- Genel kullanıcı `__del__`, resurrection, unraisable hook ve kategoriler arası
+  sıra ADR 0078 tarafından tanımlanır.
 - Generator code'unun JIT edilmesi ancak deopt metadata ve suspended-root stack
   map tasarımı hazır olduğunda değerlendirilecektir.
 
