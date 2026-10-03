@@ -102,6 +102,11 @@ pub enum StmtKind {
 pub struct TypeParam {
     pub name: SymbolId,
     pub kind: TypeParamKind,
+    pub default: Option<Expr>,
+    /// `*Ts = *tuple[int, str]` preserves the unpack marker separately from
+    /// the default expression so lowering never needs a general starred
+    /// expression node outside an expansion context.
+    pub unpacked_default: bool,
     pub span: Span,
 }
 #[derive(Clone, Debug)]

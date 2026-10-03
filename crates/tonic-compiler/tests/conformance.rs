@@ -504,6 +504,62 @@ fn type_parameters_and_aliases_are_owned_and_lowered() {
 }
 
 #[test]
+fn type_parameter_defaults_are_owned_validated_and_lowered() {
+    let source = "def generic[T = int, U = list[T], *Ts = *tuple[str, bool], **P = [float, dict]]():\n    pass\nclass Box[T, U = int]:\n    pass\ntype Alias[T, U = int] = tuple[T, U]\n";
+    let ast = parse(source, "type-parameter-defaults").unwrap();
+    let StmtKind::Function { type_params, .. } = &ast.body[0].kind else {
+        panic!("generic function")
+    };
+    assert_eq!(type_params.len(), 4);
+    assert!(type_params
+        .iter()
+        .all(|parameter| parameter.default.is_some()));
+    assert!(!type_params[0].unpacked_default);
+    assert!(type_params[2].unpacked_default);
+    assert!(matches!(
+        type_params[3].default.as_ref().map(|value| &value.kind),
+        Some(ExprKind::List(_))
+    ));
+    let list_default = type_params[1].default.as_ref().unwrap();
+    assert_eq!(
+        list_default.span.start as usize,
+        source.find("list[T]").unwrap()
+    );
+    let ExprKind::Subscript(_, parameter) = &list_default.kind else {
+        panic!("generic alias default")
+    };
+    assert_eq!(
+        parameter.span.start as usize,
+        source.find("T], *Ts").unwrap()
+    );
+
+    let program = compile(source, "type-parameter-defaults").unwrap();
+    let defaults = program
+        .program()
+        .code
+        .iter()
+        .flat_map(|code| &code.instructions)
+        .filter(|instruction| Op::try_from(instruction.opcode) == Ok(Op::TypeParamDefault))
+        .collect::<Vec<_>>();
+    assert_eq!(defaults.len(), 6);
+    assert!(defaults.iter().any(|instruction| instruction.c == 1));
+    program.program().clone().verify().unwrap();
+
+    for invalid in [
+        "def bad[T = int, U]():\n    pass\n",
+        "class Bad[*Ts, T = int]:\n    pass\n",
+        "type Bad[T =] = T\n",
+    ] {
+        assert_eq!(
+            compile(invalid, "invalid-type-parameter-default")
+                .unwrap_err()
+                .kind,
+            "SyntaxError"
+        );
+    }
+}
+
+#[test]
 fn matrix_multiplication_is_owned_and_lowered() {
     let source = "result = left @ right\nresult @= next_value\n";
     let ast = parse(source, "matrix-multiplication").unwrap();

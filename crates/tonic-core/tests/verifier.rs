@@ -153,15 +153,25 @@ fn type_parameter_operands_and_metadata_are_verified() {
     valid.code[0]
         .instructions
         .insert(2, Instr::new(Op::TypeAlias, 0, 0, 1));
+    valid.code[0]
+        .instructions
+        .insert(2, Instr::new(Op::TypeParamDefault, 0, 1, 1));
     valid.code[0].spans.insert(1, Span::default());
     valid.code[0].spans.insert(2, Span::default());
+    valid.code[0].spans.insert(3, Span::default());
     valid.clone().verify().unwrap();
 
     let mut bad = valid.clone();
     bad.code[0].instructions[1].c = 4;
     assert!(bad.verify().is_err());
     let mut bad = valid.clone();
-    bad.code[0].instructions[2].c = bad.code[0].registers;
+    bad.code[0].instructions[3].c = bad.code[0].registers;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].instructions[2].c = 2;
+    assert!(bad.verify().is_err());
+    let mut bad = valid.clone();
+    bad.code[0].instructions[2].b = bad.code[0].registers;
     assert!(bad.verify().is_err());
     let mut bad = valid.clone();
     bad.code[0].type_params[0].0 = SymbolId(1);

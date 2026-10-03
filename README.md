@@ -57,6 +57,8 @@ The current implementation includes:
   guest-callable and rich-equality/truth protocol support across every iterator consumer;
 - Python-compatible `__getitem__(0..)` sequence iteration fallback with dynamic
   instance/metaclass binding and precise consumer roots;
+- Python 3.13 type-parameter defaults for functions, classes, and type aliases,
+  including `typing.NoDefault`, starred tuple metadata, and generic-class default filling;
 - synchronous generators with full `yield from` delegation, plus lazy `async def`
   coroutines, exact/custom-awaitable `await` delegation, `async for`, `async with`,
   async list/dict comprehensions and generator expressions, async generators with
@@ -76,9 +78,8 @@ libpython while preserving Tonic's object layout and moving GC. This is planned
 work, not a current compatibility claim; see the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
-The unsupported surface is reported explicitly. Python 3.13 type-parameter
-defaults, deferred annotation thunks, OS-backed async I/O, a full standard
-library, and several remaining protocols are still tracked in the
+The unsupported surface is reported explicitly. Deferred annotation thunks,
+OS-backed async I/O, a full standard library, and several remaining protocols are still tracked in the
 [roadmap](docs/ROADMAP.md).
 
 ## Architecture
@@ -170,8 +171,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 370 Rust tests and a differential corpus of
-331 output cases plus 259 exception cases. The documented local matrix covers
+The repository currently contains 372 Rust tests and a differential corpus of
+332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

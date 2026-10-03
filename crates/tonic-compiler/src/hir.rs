@@ -512,6 +512,9 @@ impl<'a> Scan<'a> {
                         if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
                             self.type_expr(bound, type_params);
                         }
+                        if let Some(default) = &param.default {
+                            self.type_expr(default, type_params);
+                        }
                     }
                     self.type_expr(value, type_params);
                     self.bind(*name);
@@ -597,6 +600,9 @@ impl<'a> Scan<'a> {
                         if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
                             self.type_expr(bound, type_params);
                         }
+                        if let Some(default) = &param.default {
+                            self.type_expr(default, type_params);
+                        }
                     }
                     for parameter in params.positional.iter().chain(&params.keyword_only) {
                         if let Some(annotation) = &parameter.annotation {
@@ -634,6 +640,9 @@ impl<'a> Scan<'a> {
                     for param in type_params {
                         if let TypeParamKind::TypeVar { bound: Some(bound) } = &param.kind {
                             self.type_expr(bound, type_params);
+                        }
+                        if let Some(default) = &param.default {
+                            self.type_expr(default, type_params);
                         }
                     }
                     for base in bases {

@@ -1702,6 +1702,23 @@ fn type_parameters_aliases_and_lexical_cells_survive_jit_and_stress_gc() {
         );
     }
 }
+
+#[test]
+fn type_parameter_defaults_survive_jit_and_stress_gc() {
+    let source = "def generic[T = int, U = list[T], *Ts = *tuple[str, bool], **P = [float, dict]]():\n    pass\ndef bare[T, U = int]():\n    pass\nclass Box[T, U = int]:\n    pass\nclass Spread[T, *Ts = *tuple[int, str]]:\n    pass\ntype Alias[T, U = int] = tuple[T, U]\nprint(generic.__type_params__)\nprint(generic.__type_params__[0].__default__,generic.__type_params__[1].__default__)\nprint(generic.__type_params__[2].__default__,generic.__type_params__[3].__default__)\nprint(generic.__type_params__[2].__default__.__origin__,generic.__type_params__[2].__default__.__args__,generic.__type_params__[2].__default__.__unpacked__)\nprint(bare.__type_params__[0].__default__,bare.__type_params__[0].__default__ is bare.__type_params__[0].__default__)\nprint(Box[str].__args__)\nprint(Spread[bool].__args__)\nprint(Alias[str].__args__)";
+    let program = compile(source, "type-parameter-defaults").unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(
+            out,
+            b"(T, U, Ts, P)\n<class 'int'> list[T]\n*tuple[str, bool] [<class 'float'>, <class 'dict'>]\n<class 'tuple'> (<class 'str'>, <class 'bool'>) True\ntyping.NoDefault True\n(<class 'str'>, <class 'int'>)\n(<class 'bool'>, <class 'int'>, <class 'str'>)\n(<class 'str'>,)\n"
+        );
+    }
+}
 #[test]
 fn short_circuit_and_chains() {
     assert_eq!(output("def tick(n):\n    print(n)\n    return n\nprint(3 < tick(2) < tick(1))\nprint(0 and missing, 5 or missing, not [])\nprint(tick(1) if True else missing)\n"),"2\nFalse\n0 5 True\n1\n1\n");

@@ -1,11 +1,200 @@
 //! Replaceable parser adapter. No RustPython types escape this module.
 use py::Ranged;
 use rustpython_parser::{ast as py, lexer, Mode, Parse, Tok};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tonic_core::{
     ast::*,
     diagnostic::{Diagnostic, Result, Span},
 };
+
+#[derive(Debug)]
+struct RawTypeParamDefault {
+    source: String,
+    span: Span,
+    unpacked: bool,
+}
+
+/// RustPython 0.4 owns the replaceable bootstrap grammar but predates PEP 696.
+/// Mask only type-parameter defaults, preserving every byte offset, and feed
+/// their expressions through the same adapter after the surrounding 3.12 AST
+/// has been parsed. This keeps the compatibility shim local to the parser
+/// boundary and lets it disappear when the upstream AST grows `default_value`.
+fn type_param_defaults(
+    source: &str,
+    filename: &str,
+) -> Result<(String, VecDeque<Vec<Option<RawTypeParamDefault>>>)> {
+    let mut tokens = Vec::new();
+    for token in lexer::lex(source, Mode::Module) {
+        let Ok(token) = token else { break };
+        tokens.push(token);
+    }
+    let mut masked = source.as_bytes().to_vec();
+    let mut groups = VecDeque::new();
+    let mut i = 0;
+    while i + 2 < tokens.len() {
+        if !matches!(tokens[i].0, Tok::Def | Tok::Class | Tok::Type)
+            || !matches!(tokens[i + 1].0, Tok::Name { .. })
+            || !matches!(tokens[i + 2].0, Tok::Lsqb)
+        {
+            i += 1;
+            continue;
+        }
+        let open = i + 2;
+        let mut depth = 1usize;
+        let mut lambda_parameters = false;
+        let mut segments = Vec::new();
+        let mut segment_start = open + 1;
+        let mut close = None;
+        let mut cursor = open + 1;
+        while cursor < tokens.len() {
+            let token = &tokens[cursor].0;
+            if depth == 1 {
+                if matches!(token, Tok::Lambda) {
+                    lambda_parameters = true;
+                } else if lambda_parameters && matches!(token, Tok::Colon) {
+                    lambda_parameters = false;
+                } else if !lambda_parameters && matches!(token, Tok::Comma) {
+                    segments.push((segment_start, cursor));
+                    segment_start = cursor + 1;
+                    cursor += 1;
+                    continue;
+                }
+            }
+            match token {
+                Tok::Lpar | Tok::Lsqb | Tok::Lbrace => depth += 1,
+                Tok::Rpar | Tok::Rbrace => depth = depth.saturating_sub(1),
+                Tok::Rsqb => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        segments.push((segment_start, cursor));
+                        close = Some(cursor);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let Some(close) = close else {
+            break;
+        };
+        let mut defaults = Vec::new();
+        let mut saw_default = false;
+        let mut previous_was_variadic = false;
+        for (start, end) in segments {
+            if start == end {
+                continue;
+            }
+            let mut nested = 0usize;
+            let mut equal = None;
+            let mut name = None;
+            let mut prefix = 0u8;
+            for (offset, (token, _)) in tokens[start..end].iter().enumerate() {
+                if offset == 0 {
+                    prefix = match token {
+                        Tok::Star => 1,
+                        Tok::DoubleStar => 2,
+                        _ => 0,
+                    };
+                }
+                if name.is_none() {
+                    if let Tok::Name { name: value } = token {
+                        name = Some(value.as_str());
+                    }
+                }
+                if nested == 0 && matches!(token, Tok::Equal) {
+                    equal = Some(start + offset);
+                    break;
+                }
+                match token {
+                    Tok::Lpar | Tok::Lsqb | Tok::Lbrace => nested += 1,
+                    Tok::Rpar | Tok::Rsqb | Tok::Rbrace => nested = nested.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            let default = if let Some(equal) = equal {
+                if previous_was_variadic && prefix == 0 {
+                    return Err(Diagnostic::new(
+                        "SyntaxError",
+                        "type parameter with a default follows TypeVarTuple",
+                    )
+                    .in_file(filename)
+                    .at(Span {
+                        start: tokens[start].1.start().into(),
+                        end: tokens[end - 1].1.end().into(),
+                    }));
+                }
+                saw_default = true;
+                let mut expression_start: usize = tokens[equal].1.end().into();
+                let expression_end: usize = tokens[end - 1].1.end().into();
+                let mut unpacked = false;
+                if prefix == 1 && equal + 1 < end && matches!(tokens[equal + 1].0, Tok::Star) {
+                    unpacked = true;
+                    expression_start = tokens[equal + 1].1.end().into();
+                }
+                while expression_start < expression_end
+                    && source.as_bytes()[expression_start].is_ascii_whitespace()
+                {
+                    expression_start += 1;
+                }
+                if expression_start == expression_end {
+                    return Err(
+                        Diagnostic::new("SyntaxError", "expected type parameter default")
+                            .in_file(filename)
+                            .at(Span {
+                                start: tokens[equal].1.start().into(),
+                                end: tokens[equal].1.end().into(),
+                            }),
+                    );
+                }
+                let mask_start: usize = tokens[equal].1.start().into();
+                for byte in &mut masked[mask_start..expression_end] {
+                    if !matches!(*byte, b'\n' | b'\r') {
+                        *byte = b' ';
+                    }
+                }
+                Some(RawTypeParamDefault {
+                    source: source[expression_start..expression_end]
+                        .trim_end()
+                        .to_owned(),
+                    span: Span {
+                        start: expression_start as u32,
+                        end: expression_end as u32,
+                    },
+                    unpacked,
+                })
+            } else {
+                if saw_default {
+                    return Err(Diagnostic::new(
+                        "SyntaxError",
+                        "non-default type parameter follows default type parameter",
+                    )
+                    .in_file(filename)
+                    .at(Span {
+                        start: tokens[start].1.start().into(),
+                        end: tokens[end - 1].1.end().into(),
+                    }));
+                }
+                None
+            };
+            if name.is_none() {
+                return Err(
+                    Diagnostic::new("SyntaxError", "expected type parameter name")
+                        .in_file(filename),
+                );
+            }
+            previous_was_variadic = prefix == 1;
+            defaults.push(default);
+        }
+        groups.push_back(defaults);
+        i = close + 1;
+    }
+    // Only ASCII spaces replace source bytes, so valid UTF-8 remains valid.
+    Ok((
+        String::from_utf8(masked).expect("masked UTF-8 source"),
+        groups,
+    ))
+}
 
 pub fn parse(source: &str, filename: &str) -> Result<Module> {
     if source.len() > 1_048_576 {
@@ -42,7 +231,8 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
             }));
         }
     }
-    let suite = py::Suite::parse(source, filename).map_err(|e| {
+    let (parser_source, type_param_defaults) = type_param_defaults(source, filename)?;
+    let suite = py::Suite::parse(&parser_source, filename).map_err(|e| {
         let start = u32::from(e.offset);
         Diagnostic::new("SyntaxError", e.error.to_string())
             .in_file(filename)
@@ -54,6 +244,9 @@ pub fn parse(source: &str, filename: &str) -> Result<Module> {
         depth: 0,
         async_function: false,
         class_name: None,
+        type_param_defaults,
+        filename: filename.to_owned(),
+        span_offset: 0,
     };
     let body = adapter
         .block(suite)
@@ -82,8 +275,17 @@ struct Adapter {
     depth: usize,
     async_function: bool,
     class_name: Option<String>,
+    type_param_defaults: VecDeque<Vec<Option<RawTypeParamDefault>>>,
+    filename: String,
+    span_offset: u32,
 }
 impl Adapter {
+    fn node_span(&self, node: &impl Ranged) -> Span {
+        let mut span = span(node);
+        span.start = span.start.saturating_add(self.span_offset);
+        span.end = span.end.saturating_add(self.span_offset);
+        span
+    }
     fn symbol(&mut self, name: &str) -> Result<SymbolId> {
         let mangled;
         let name = if name.starts_with("__") && !name.ends_with("__") && !name.contains('.') {
@@ -116,7 +318,7 @@ impl Adapter {
         suite.into_iter().map(|s| self.stmt(s)).collect()
     }
     fn stmt(&mut self, node: py::Stmt) -> Result<Stmt> {
-        let s = span(&node);
+        let s = self.node_span(&node);
         let kind = match node {
             py::Stmt::Assign(a) => StmtKind::Assign(
                 a.targets
@@ -155,7 +357,7 @@ impl Adapter {
             py::Stmt::Delete(d) => {
                 let mut targets = Vec::new();
                 for target in d.targets {
-                    let target_span = span(&target);
+                    let target_span = self.node_span(&target);
                     let target = self.target(target)?;
                     if !matches!(target, Target::Attribute(..) | Target::Item(..)) {
                         return Err(unsupported(target_span, "delete target"));
@@ -328,7 +530,7 @@ impl Adapter {
                     .into_iter()
                     .map(|handler| {
                         let py::ExceptHandler::ExceptHandler(handler) = handler;
-                        let handler_span = span(&handler);
+                        let handler_span = self.node_span(&handler);
                         Ok(ExceptHandler {
                             type_: handler.type_.map(|value| self.expr(*value)).transpose()?,
                             name: handler
@@ -433,7 +635,7 @@ impl Adapter {
                     .cases
                     .into_iter()
                     .map(|case| {
-                        let case_span = span(&case.pattern);
+                        let case_span = self.node_span(&case.pattern);
                         Ok(MatchCase {
                             pattern: self.pattern(case.pattern)?,
                             guard: case.guard.map(|guard| self.expr(*guard)).transpose()?,
@@ -501,7 +703,7 @@ impl Adapter {
         Ok(Stmt { kind, span: s })
     }
     fn pattern(&mut self, node: py::Pattern) -> Result<Pattern> {
-        let s = span(&node);
+        let s = self.node_span(&node);
         let kind = match node {
             py::Pattern::MatchValue(value) => PatternKind::Value(self.expr(*value.value)?),
             py::Pattern::MatchSingleton(singleton) => {
@@ -632,7 +834,7 @@ impl Adapter {
         Ok(params)
     }
     fn target(&mut self, node: py::Expr) -> Result<Target> {
-        let s = span(&node);
+        let s = self.node_span(&node);
         match node {
             py::Expr::Name(n) => Ok(Target::Name(self.symbol(n.id.as_str())?)),
             py::Expr::Attribute(a) => Ok(Target::Attribute(
@@ -665,10 +867,20 @@ impl Adapter {
     }
 
     fn type_params(&mut self, params: Vec<py::TypeParam>, s: Span) -> Result<Vec<TypeParam>> {
+        let mut defaults = if params.is_empty() {
+            Vec::new()
+        } else {
+            self.type_param_defaults.pop_front().ok_or_else(|| {
+                Diagnostic::new("SyntaxError", "missing type parameter metadata").at(s)
+            })?
+        };
+        if defaults.len() != params.len() {
+            return Err(Diagnostic::new("SyntaxError", "invalid type parameter metadata").at(s));
+        }
         let mut result = Vec::with_capacity(params.len());
         let mut seen = std::collections::HashSet::new();
-        for param in params {
-            let param_span = span(&param);
+        for (param, default) in params.into_iter().zip(defaults.drain(..)) {
+            let param_span = self.node_span(&param);
             let (name, kind) = match param {
                 py::TypeParam::TypeVar(param) => (
                     self.symbol(param.name.as_str())?,
@@ -691,9 +903,24 @@ impl Adapter {
             if !seen.insert(name) {
                 return Err(Diagnostic::new("SyntaxError", "duplicate type parameter").at(s));
             }
+            let (default, unpacked_default) = if let Some(default) = default {
+                let parsed = py::Expr::parse(&default.source, &self.filename).map_err(|error| {
+                    Diagnostic::new("SyntaxError", error.error.to_string()).at(default.span)
+                })?;
+                let previous_offset = std::mem::replace(&mut self.span_offset, default.span.start);
+                let expression = self.expr(parsed);
+                self.span_offset = previous_offset;
+                let mut expression = expression?;
+                expression.span = default.span;
+                (Some(expression), default.unpacked)
+            } else {
+                (None, false)
+            };
             result.push(TypeParam {
                 name,
                 kind,
+                default,
+                unpacked_default,
                 span: param_span,
             });
         }
@@ -703,7 +930,7 @@ impl Adapter {
         Ok(result)
     }
     fn expr(&mut self, node: py::Expr) -> Result<Expr> {
-        let s = span(&node);
+        let s = self.node_span(&node);
         let kind = match node {
             py::Expr::Constant(c) => ExprKind::Constant(match c.value {
                 py::Constant::None => Constant::None,

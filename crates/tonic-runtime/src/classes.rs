@@ -1542,7 +1542,13 @@ impl Heap {
                 name: parameter_name,
                 kind,
                 bound,
-            }) => Some((parameter_name.clone(), Some((*kind, *bound)), None)),
+                default,
+                ..
+            }) => Some((
+                parameter_name.clone(),
+                Some((*kind, *bound, *default)),
+                None,
+            )),
             Ok(Object::TypeAlias {
                 name: alias_name,
                 type_params,
@@ -1554,11 +1560,20 @@ impl Heap {
             return match name {
                 "__name__" => self.alloc(Object::Str(metadata_name)),
                 "__bound__" if parameter.is_some() => Ok(parameter
-                    .and_then(|(_, bound)| bound)
+                    .and_then(|(_, bound, _)| bound)
                     .unwrap_or(Value::NONE)),
+                "__default__" if parameter.is_some() => Ok(parameter.expect("checked parameter").2),
                 "__constraints__" if parameter.is_some() => self.alloc(Object::Tuple(Vec::new())),
                 "__type_params__" if alias.is_some() => Ok(alias.expect("checked alias").0),
                 "__value__" if alias.is_some() => Ok(alias.expect("checked alias").1),
+                _ => Err(missing(name)),
+            };
+        }
+        if let Ok(Object::TypeUnpack(value)) = self.get(owner) {
+            let value = *value;
+            return match name {
+                "__origin__" | "__args__" => self.attr(value, name),
+                "__unpacked__" => Ok(Value::bool(true)),
                 _ => Err(missing(name)),
             };
         }

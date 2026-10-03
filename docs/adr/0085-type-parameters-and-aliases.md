@@ -69,5 +69,6 @@ nested cells, shadowing, generic bases, builtin/class/type-alias subscription,
 introspection and construction under interpreter/JIT callers with collection at
 every allocation. Differential cases compare the shared Python 3.14 behavior.
 
-Python 3.13 type-parameter defaults and CPython 3.14 deferred annotation thunk
-internals are not part of this initial runtime contract.
+Python 3.13 type-parameter defaults were added by
+[ADR 0093](0093-type-parameter-defaults.md). CPython 3.14 deferred annotation
+thunk internals remain outside this initial runtime contract.

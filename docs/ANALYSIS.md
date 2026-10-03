@@ -503,6 +503,19 @@ direct-call inline planından çıkarılır, yeni construction opkodları Cranel
 explicit generic-runtime fallback'inde kalır. Ayrıntılar
 [ADR 0085](adr/0085-type-parameters-and-aliases.md) dosyasındadır.
 
+Python 3.13 type-parameter default sözdizimi parser bağımlılığının 3.12 AST
+sınırında, byte konumlarını koruyan dar bir adaptörle ayrıştırılır. Tonic AST her
+TypeVar/TypeVarTuple/ParamSpec için default ifadeyi ve starred-unpack kipini
+taşır; HIR bu ifadeleri type-parameter lexical ortamında çözer. Bytecode v33
+`TYPE_PARAM_DEFAULT`, doğrulanmış parameter/default register'larını birleştirir.
+Runtime default graph'ını precise edge olarak izler, eksik default için köklü
+tekil `typing.NoDefault` kullanır ve `*tuple[...]` metadata'sını origin/args ile
+korur. Generic class subscription eksik trailing parametreleri default'larla
+tamamlarken type alias `__args__` Python gibi yalnız açık argümanları taşır.
+Mevcut annotation politikasıyla uyumlu olarak default ifadeler eager
+değerlendirilir; PEP 649/749 ile ortak deferred thunk kararı ayrı açık aşamadır.
+Ayrıntılar [ADR 0093](adr/0093-type-parameter-defaults.md) dosyasındadır.
+
 Bytecode v32, Python'ın `@` ve `@=` işlemlerini ayrı `MAT_MUL` ve
 `INPLACE_MAT_MUL` opkodlarıyla taşır. Her üç operand verifier tarafından register
 sınırında doğrulanır. Runtime mevcut suspending binary-protocol state machine'ini

@@ -59,7 +59,7 @@ Hatalar dosya/satır/sütun ve fonksiyon zinciriyle stderr'e yazılır.
 | M4–M7 | expanded sequence/mapping, observed variadic, exact-float direct ve loop-carried F64 yolları; PC-indexli deopt map ve tam register rekonstrüksiyonu |
 | İstisnalar | managed exception nesneleri ve traceback state, typed/tuple/bare `try/except/else`, bare reraise, `raise from`, cause/context zinciri, frame unwind, `finally` ve senkron `with` |
 | Generator/coroutine | senkron generator, tam `yield from`, logical finalization; tembel `async def`, exact/özel awaitable `await`, `coroutine_wrapper`, `async for`, `async with`, `asend`/`athrow`/`aclose` destekli async generator ve Future/Task/cancellation içeren Tonic-owned tek thread `asyncio` loop'u |
-| Geniş dil | lexical scope'lu senkron/async list/dict/set comprehension, set literal, generator expression, value/OR/sequence/mapping/class desenli `match`/`case` ve nested dynamic format-spec ile `!s`/`!r`/`!a` destekli f-string var; değişken annotation/type parameter ve OS destekli async I/O henüz yok |
+| Geniş dil | lexical scope'lu senkron/async list/dict/set comprehension, set literal, generator expression, value/OR/sequence/mapping/class desenli `match`/`case`, nested dynamic format-spec ile `!s`/`!r`/`!a` destekli f-string, annotation/type parameter ve Python 3.13 type-parameter default yüzeyi var; deferred annotation ve OS destekli async I/O henüz yok |
 | CPython bridge | ayrı `tonic-cpython` crate; bigint/primitive/list/tuple/dict/foreign dönüşüm, GIL state guard, alias/cycle-aware materialization, runtime/execution guard'lı gerçek `PyTonicProxy` heap type, positional/keyword callback, attribute/set/repr forwarding, weak identity cache ve bounded iki-collector graph/cycle taraması |
 | HPy/aHPy | HPy Universal `.hpy0` host ve aHPy cross-runtime hattı proje kapsamına alındı; loader/context/field/type uygulaması henüz yok |
 | Diğer interop | shared-library loader henüz yok; graph limitini aşan veya global Python altyapısına giren bridge graph'ları conservative retention kullanır |
@@ -103,7 +103,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 370 Rust testi ile 331 stdout ve 259 exception türü
+Güncel yerel matris 372 Rust testi ile 332 stdout ve 261 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -232,8 +232,8 @@ fonksiyon varsayılan sekizinci girişte derlenir; sekiz guard kaybı site'ı ye
 interpreter'a indirir. Yedi instruction'dan küçük düz fonksiyonlar ölçülen bridge
 maliyeti nedeniyle adaptive interpreter'da kalır.
 
-**Kapsam:** değişken annotation'ları/type parameter'lar, list/dict metotları,
-slice assignment, range/custom-object slicing, string repetition, geniş standart
+**Kapsam:** deferred annotation'lar, list/dict metotları, slice assignment,
+range/custom-object slicing, string repetition, geniş standart
 kütüphane ve REPL yoktur. List, tuple ve Unicode string üzerinde read-only slice;
 açık uçlar, negatif sınırlar ve negatif adım desteklenir.
 Descriptor `__get__`/`__set__`/`__delete__` data ve non-data önceliğiyle,

@@ -614,6 +614,24 @@ def shadow[T](T):
     return T
 print(shadow(9),shadow.__type_params__)
 ''',
+'''def generic[T = int, U = list[T], *Ts = *tuple[str, bool], **P = [float, dict]]():
+    pass
+def bare_generic[T, U = int]():
+    pass
+class DefaultBox[T, U = int]:
+    pass
+class DefaultSpread[T, *Ts = *tuple[int, str]]:
+    pass
+type DefaultAlias[T, U = int] = tuple[T, U]
+print(generic.__type_params__)
+print(generic.__type_params__[0].__default__,generic.__type_params__[1].__default__)
+print(generic.__type_params__[2].__default__,generic.__type_params__[3].__default__)
+print(generic.__type_params__[2].__default__.__origin__,generic.__type_params__[2].__default__.__args__,generic.__type_params__[2].__default__.__unpacked__)
+print(bare_generic.__type_params__[0].__default__,bare_generic.__type_params__[0].__default__ is bare_generic.__type_params__[0].__default__)
+print(DefaultBox[str].__args__)
+print(DefaultSpread[bool].__args__)
+print(DefaultAlias[str].__args__)
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
@@ -665,6 +683,8 @@ ERRORS = [
 ('async def bad():\n    yield from []', 'SyntaxError'),
 ('def annotated_local():\n    value: int\n    return value\nannotated_local()', 'UnboundLocalError'),
 ('def generic_missing[T]():\n    print(T)\n    T=1\ngeneric_missing()', 'UnboundLocalError'),
+('def bad[T = int, U]():\n    pass', 'SyntaxError'),
+('type Bad[T =] = T', 'SyntaxError'),
 ('1 in 2', 'TypeError'),
 ('1 in "123"', 'TypeError'),
 ('[hidden for hidden in range(2)]\nprint(hidden)', 'NameError'),

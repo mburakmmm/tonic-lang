@@ -292,7 +292,10 @@ pub(crate) enum Object {
         name: String,
         kind: TypeParameterKind,
         bound: Option<Value>,
+        default: Value,
     },
+    TypeNoDefault,
+    TypeUnpack(Value),
     TypeAlias {
         name: String,
         type_params: Value,
@@ -496,7 +499,11 @@ impl Object {
                 annotations.iter().copied().for_each(&mut visit);
                 type_params.iter().copied().for_each(visit);
             }
-            Self::TypeParam { bound, .. } => bound.iter().copied().for_each(visit),
+            Self::TypeParam { bound, default, .. } => {
+                bound.iter().copied().for_each(&mut visit);
+                visit(*default);
+            }
+            Self::TypeUnpack(value) => visit(*value),
             Self::TypeAlias {
                 type_params, value, ..
             } => {
@@ -1836,6 +1843,10 @@ impl Heap {
             ),
             Object::Function { .. } => "<function>".into(),
             Object::TypeParam { name, .. } | Object::TypeAlias { name, .. } => name.clone(),
+            Object::TypeNoDefault => "typing.NoDefault".into(),
+            Object::TypeUnpack(value) => {
+                format!("*{}", self.format_depth(*value, true, path)?)
+            }
             Object::GenericAlias { origin, args } => {
                 let origin = match self.get(*origin)? {
                     Object::Class(class) => class.name.clone(),

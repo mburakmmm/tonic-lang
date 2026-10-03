@@ -243,8 +243,12 @@ sonra alınır.
       TypeVarTuple, ParamSpec ve bound metadata'sı, lexical cell/shadowing,
       `__type_params__`, managed alias/generic-alias nesneleri, builtin/class
       subscription, generic base çözümleme, verifier ve JIT fallback sınırı.
-  - [ ] Python 3.13 type-parameter default sözdizimi ve ileride seçilecek PEP 649
-    deferred-annotation modu; mevcut eager Tonic semantiği varsayılan kalabilir.
+  - [x] Python 3.13 type-parameter default sözdizimi; TypeVar/TypeVarTuple/
+    ParamSpec `__default__`, `typing.NoDefault`, starred tuple metadata'sı,
+    default-order doğrulaması, generic-class argument tamamlama, bytecode v33
+    verifier ve interpreter/JIT-caller stress-GC uyumu.
+  - [ ] PEP 649/749 deferred-annotation modu için açık dil kararı; mevcut eager
+    Tonic annotation/bound/default semantiği bu karar verilene kadar korunur.
 - [x] Generic A/B baseline ve adaptive integer `+`, `+=`, `-`, `*` specialization; sekiz gözlem ve guard-failure de-specialization.
 - [x] Exact-callee guard'lı monomorphic basit Tonic function call cache; rebinding miss ve generic binder fallback.
 - [x] Monomorphic instance-slot attribute cache; class + shape + slot + dependency-version guard'ı ve descriptor-safe fallback.

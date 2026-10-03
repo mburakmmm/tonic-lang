@@ -310,6 +310,16 @@ impl Lower<'_> {
                 TypeParamKind::TypeVarTuple => (self.alloc(1)?, 3),
             };
             self.emit(Op::TypeParam, value, param.name.0, kind, param.span)?;
+            if let Some(default) = &param.default {
+                let default = self.expr(default)?;
+                self.emit(
+                    Op::TypeParamDefault,
+                    value,
+                    default,
+                    u16::from(param.unpacked_default),
+                    param.span,
+                )?;
+            }
             self.type_bindings.push((param.name, value));
             values.push(value);
         }

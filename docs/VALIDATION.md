@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-2 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+3 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,12 +40,12 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 28, core verifier 20, Cranelift JIT 22, runtime unit 23,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 116, CPython bridge 15 ve HPy manifest 5; toplam 370 test.
+native handles 5, language/runtime 117, CPython bridge 15 ve HPy manifest 5; toplam 372 test.
 
-Differential corpus: 331 stdout vakası ve 259 exception türü vakası. Seed 42.
+Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -491,6 +491,17 @@ class-alias construction'ı interpreter/JIT-caller × allocation-stress GC altı
 kapsar. Cranelift testi construction opkodlarının explicit generic fallback'te
 kaldığını doğrular. Python 3.14 differential vakaları aynı gözlemlenebilir çıktı
 ve shadowing hata sınıflarını karşılaştırır.
+
+Python 3.13 type-parameter default dilimi bytecode v33
+`TYPE_PARAM_DEFAULT` operandlarını ve unpack modunu verifier'da sınar. Parser
+adaptörü upstream bootstrap grammar'ını kaynak byte offsetlerini değiştirmeden
+maskeler; TypeVar, TypeVarTuple ve ParamSpec default ifadeleri aynı Tonic-owned
+AST/HIR yoluna girer. Runtime `typing.NoDefault` tekil kimliğini,
+`__default__`, starred tuple `__origin__`/`__args__`/`__unpacked__` metadata'sını
+ve generic sınıfın eksik trailing argümanlarını doğrular. Interpreter/JIT-caller
+× allocation-stress GC testi default graph'larının precise trace edildiğini;
+Python 3.14 differential vakası gözlenebilir metadata ve alias argümanlarını
+karşılaştırır. Tonic'in eager değerlendirme tercihi ADR 0093'te belgelenmiştir.
 
 Matrix multiplication dilimi bytecode v32 `MAT_MUL`/`INPLACE_MAT_MUL`
 operandlarını iki verifier'da sınar. Compiler testi Tonic-owned AST ve iki opcode

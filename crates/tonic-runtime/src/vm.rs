@@ -1167,6 +1167,7 @@ struct PendingClass {
 struct RuntimeTypes {
     none: Value,
     not_implemented: Value,
+    no_default: Value,
     int: Value,
     bool_: Value,
     float: Value,
@@ -1218,6 +1219,7 @@ impl RuntimeTypes {
         Self {
             none: Value::UNBOUND,
             not_implemented: Value::UNBOUND,
+            no_default: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
@@ -1257,6 +1259,7 @@ impl RuntimeTypes {
         let mut roots = vec![
             self.none,
             self.not_implemented,
+            self.no_default,
             self.int,
             self.bool_,
             self.float,
@@ -1768,6 +1771,118 @@ pub struct Vm {
     float_call_profiles: Vec<Vec<Option<FloatCallProfile>>>,
 }
 impl Vm {
+    fn generic_alias_arguments(&mut self, owner: Value, key: Value) -> Result<Value> {
+        let mut arguments = match self.heap.get(key)? {
+            Object::Tuple(values) => values.clone(),
+            _ => vec![key],
+        };
+        if !matches!(self.heap.get(owner)?, Object::Class(_)) {
+            return self.heap.alloc(Object::Tuple(arguments));
+        }
+        let Some(parameters) = self.heap.class_lookup(owner, "__type_params__")? else {
+            return self.heap.alloc(Object::Tuple(arguments));
+        };
+        let parameters = match self.heap.get(parameters)? {
+            Object::Tuple(values) => values.clone(),
+            _ => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "class __type_params__ must be a tuple",
+                ))
+            }
+        };
+        if parameters.is_empty() {
+            return self.heap.alloc(Object::Tuple(arguments));
+        }
+        let variadic = parameters.iter().position(|parameter| {
+            matches!(
+                self.heap.get(*parameter),
+                Ok(Object::TypeParam {
+                    kind: TypeParameterKind::TypeVarTuple,
+                    ..
+                })
+            )
+        });
+        if let Some(variadic) = variadic {
+            // PEP 696 makes the useful runtime case a trailing TypeVarTuple:
+            // required leading parameters consume supplied arguments and an
+            // omitted variadic tail expands a starred tuple alias default.
+            if variadic + 1 == parameters.len() && arguments.len() <= variadic {
+                for parameter in &parameters[arguments.len()..variadic] {
+                    let default = match self.heap.get(*parameter)? {
+                        Object::TypeParam { default, .. }
+                            if !matches!(self.heap.get(*default)?, Object::TypeNoDefault) =>
+                        {
+                            Some(*default)
+                        }
+                        _ => None,
+                    };
+                    let Some(default) = default else {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "too few arguments for generic class",
+                        ));
+                    };
+                    arguments.push(default);
+                }
+                let default = match self.heap.get(parameters[variadic])? {
+                    Object::TypeParam { default, .. }
+                        if !matches!(self.heap.get(*default)?, Object::TypeNoDefault) =>
+                    {
+                        Some(*default)
+                    }
+                    _ => None,
+                };
+                if arguments.len() == variadic {
+                    if let Some(default) = default {
+                        let unpacked = match self.heap.get(default)? {
+                            Object::TypeUnpack(value) => Some(*value),
+                            _ => None,
+                        };
+                        if let Some(unpacked) = unpacked {
+                            if let Object::GenericAlias { args, .. } = self.heap.get(unpacked)? {
+                                if let Object::Tuple(values) = self.heap.get(*args)? {
+                                    arguments.extend(values.iter().copied());
+                                }
+                            } else if let Object::Tuple(values) = self.heap.get(unpacked)? {
+                                arguments.extend(values.iter().copied());
+                            } else {
+                                arguments.push(unpacked);
+                            }
+                        } else {
+                            arguments.push(default);
+                        }
+                    }
+                }
+            }
+            return self.heap.alloc(Object::Tuple(arguments));
+        }
+        if arguments.len() > parameters.len() {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "too many arguments for generic class",
+            ));
+        }
+        for parameter in &parameters[arguments.len()..] {
+            let default = match self.heap.get(*parameter)? {
+                Object::TypeParam { default, .. }
+                    if !matches!(self.heap.get(*default)?, Object::TypeNoDefault) =>
+                {
+                    Some(*default)
+                }
+                _ => None,
+            };
+            let Some(default) = default else {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "too few arguments for generic class",
+                ));
+            };
+            arguments.push(default);
+        }
+        self.heap.alloc(Object::Tuple(arguments))
+    }
+
     pub fn new() -> Result<Self> {
         let mut vm = Self {
             object_class: Value::UNBOUND,
@@ -2004,6 +2119,7 @@ impl Vm {
         let async_event_loop =
             vm.heap
                 .builtin_class("EventLoop", vec![vm.object_class], vm.type_class)?;
+        let no_default = vm.heap.alloc(Object::TypeNoDefault)?;
         vm.runtime_types = RuntimeTypes {
             none: vm
                 .heap
@@ -2013,6 +2129,7 @@ impl Vm {
                 vec![vm.object_class],
                 vm.type_class,
             )?,
+            no_default,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
             float: vm
@@ -5210,7 +5327,25 @@ impl Vm {
                             name: p.symbols[i.b as usize].clone(),
                             kind,
                             bound,
+                            default: self.runtime_types.no_default,
                         })?;
+                    }
+                    Op::TypeParamDefault => {
+                        let parameter = self.read(a)?;
+                        let mut default = self.read(b)?;
+                        if i.c == 1 {
+                            default = self.heap.alloc(Object::TypeUnpack(default))?;
+                        }
+                        self.heap.write_barrier(parameter, default);
+                        let Object::TypeParam { default: slot, .. } =
+                            self.heap.get_mut(parameter)?
+                        else {
+                            return Err(Diagnostic::new(
+                                "BytecodeError",
+                                "type parameter default target is not a type parameter",
+                            ));
+                        };
+                        *slot = default;
                     }
                     Op::TypeAlias => {
                         let value = self.read(a)?;
@@ -6882,11 +7017,7 @@ impl Vm {
                             _ => false,
                         };
                         if generic {
-                            let args = if matches!(self.heap.get(key), Ok(Object::Tuple(_))) {
-                                key
-                            } else {
-                                self.heap.alloc(Object::Tuple(vec![key]))?
-                            };
+                            let args = self.generic_alias_arguments(owner, key)?;
                             self.registers[a] = self.heap.alloc(Object::GenericAlias {
                                 origin: owner,
                                 args,

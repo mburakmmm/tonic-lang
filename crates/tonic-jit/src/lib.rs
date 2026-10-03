@@ -3797,7 +3797,7 @@ mod tests {
 
     #[test]
     fn type_parameter_construction_stays_in_the_generic_runtime() {
-        let program = function("def make():\n    type Alias[T] = (T,T)\n    return Alias");
+        let program = function("def make():\n    type Alias[T = int] = (T,T)\n    return Alias");
         let code = &program.program().code[1];
         assert!(code
             .instructions
@@ -3807,6 +3807,10 @@ mod tests {
             .instructions
             .iter()
             .any(|instruction| Op::try_from(instruction.opcode) == Ok(Op::TypeAlias)));
+        assert!(code
+            .instructions
+            .iter()
+            .any(|instruction| { Op::try_from(instruction.opcode) == Ok(Op::TypeParamDefault) }));
         assert!(matches!(compile(code), Err(Error::Unsupported(_))));
     }
 
