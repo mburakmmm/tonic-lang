@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 119, CPython bridge 15, HPy manifest 5 ve HPy
-loader 6; toplam 380 test.
+native handles 5, language/runtime 120, CPython bridge 15, HPy manifest 5 ve HPy
+loader 6; toplam 381 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×

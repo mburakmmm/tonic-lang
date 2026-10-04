@@ -3078,6 +3078,46 @@ impl Vm {
         self.heap.add_module_member(value, name, callable)?;
         Ok(())
     }
+    pub fn register_stateful_native(
+        &mut self,
+        module: &str,
+        name: &str,
+        arity: usize,
+        function: std::sync::Arc<crate::StatefulNativeFn>,
+    ) -> Result<()> {
+        self.ensure_running()?;
+        let value = if let Some(value) = self.modules.get(module) {
+            *value
+        } else {
+            let value = self.heap.alloc(Object::Module(Vec::new()))?;
+            self.modules.insert(module.into(), value);
+            value
+        };
+        if let Object::Module(members) = self.heap.get(value)? {
+            if members.iter().any(|(member, _)| member == name) {
+                return Err(Diagnostic::new(
+                    "ImportError",
+                    "native function already registered",
+                ));
+            }
+        }
+        let id = self.natives.len();
+        self.natives.push(NativeDef {
+            arity,
+            function: NativeCallable::Stateful(function),
+        });
+        let callable = self.heap.alloc(Object::Native(id))?;
+        self.heap.add_module_member(value, name, callable)?;
+        Ok(())
+    }
+    pub(crate) fn native_module_value(&self, name: &str) -> Result<Value> {
+        self.modules.get(name).copied().ok_or_else(|| {
+            Diagnostic::new(
+                "ModuleNotFoundError",
+                format!("no native module named '{name}'"),
+            )
+        })
+    }
     pub fn initialize_c_extension(
         &mut self,
         init: crate::c_api::CExtensionInitFn,

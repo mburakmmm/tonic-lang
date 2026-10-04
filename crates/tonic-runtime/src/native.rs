@@ -9,6 +9,7 @@ use crate::{
 use std::{
     io::Write,
     sync::atomic::{AtomicU32, Ordering},
+    sync::Arc,
 };
 use tonic_core::{
     bytecode::Program,
@@ -216,6 +217,11 @@ impl<'a> Context<'a> {
     }
     pub fn none(&mut self) -> Result<Handle> {
         self.local(Value::NONE)
+    }
+    /// Borrow a registered native module into this call's local handle scope.
+    pub fn native_module(&mut self, name: &str) -> Result<Handle> {
+        let module = self.vm.native_module_value(name)?;
+        self.local(module)
     }
     pub(crate) fn value_kind(&self, handle: Handle) -> Result<ValueKind> {
         let value = self.resolve(handle)?;
@@ -660,12 +666,21 @@ impl Drop for Context<'_> {
     }
 }
 pub type NativeFn = fn(&mut Context<'_>, &[Handle]) -> Result<Handle>;
-#[derive(Clone, Copy)]
+/// VM-owned native callback with immutable extension state.
+///
+/// Stateful callbacks are isolated to the native boundary. The VM clones the
+/// `Arc` before borrowing its execution state, so a callback may safely use the
+/// ordinary [`Context`] API without aliasing the native registry.
+pub type StatefulNativeFn =
+    dyn Fn(&mut Context<'_>, &[Handle]) -> Result<Handle> + Send + Sync + 'static;
+
+#[derive(Clone)]
 pub(crate) enum NativeCallable {
     Rust(NativeFn),
     C(crate::c_api::CNativeFn),
+    Stateful(Arc<StatefulNativeFn>),
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct NativeDef {
     pub arity: usize,
     pub function: NativeCallable,

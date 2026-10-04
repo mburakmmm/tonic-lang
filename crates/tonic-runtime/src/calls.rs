@@ -2081,24 +2081,26 @@ impl Vm {
                 self.registers[destination] = self.call_builtin(builtin, p, &args, output)?
             }
             Object::Native(id) => {
-                let def = &self.natives[*id];
+                let (arity, function) = {
+                    let def = &self.natives[*id];
+                    (def.arity, def.function.clone())
+                };
                 if args.keyword_count() != 0 {
                     return Err(Diagnostic::new(
                         "TypeError",
                         "registered native function does not accept keyword arguments",
                     ));
                 }
-                if args.count() != def.arity {
+                if args.count() != arity {
                     return Err(Diagnostic::new(
                         "TypeError",
                         format!(
                             "native function expects {} arguments, got {}",
-                            def.arity,
+                            arity,
                             args.count()
                         ),
                     ));
                 }
-                let function = def.function;
                 let values = (0..args.count())
                     .map(|index| args.positional(&self.registers, index))
                     .collect::<Vec<_>>();
@@ -2112,6 +2114,9 @@ impl Vm {
                     crate::native::NativeCallable::Rust(function) => function(&mut ctx, &handles),
                     crate::native::NativeCallable::C(function) => {
                         crate::c_api::invoke_native(&mut ctx, function, &handles)
+                    }
+                    crate::native::NativeCallable::Stateful(function) => {
+                        function(&mut ctx, &handles)
                     }
                 }?;
                 let result = ctx.resolve(result)?;

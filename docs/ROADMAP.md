@@ -335,6 +335,8 @@ sonra alınır.
       library mapping'ini unload protokolü gelene kadar süreç ömrüne pinleme.
     - [ ] Minimal context/module materialization ile constant module ve scalar
       Fibonacci; Windows loader.
+      - [x] Extension durumunu VM ömrüne bağlayan stateful native callback ve
+        çağrı-scope module handle erişimi.
   - [ ] Local `HPy`, `HPy_Dup`/`HPy_Close`, sayı/Unicode, module init ve exception
     state; stale/cross-runtime/failure cleanup testleri.
   - [ ] List/tuple/dict builders, attr/item/call yüzeyi ve keyword binder eşlemesi.

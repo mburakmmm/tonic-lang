@@ -2208,6 +2208,39 @@ fn native_registration() {
     assert_eq!(vm.stats.native_calls, 1);
     assert_eq!(vm.active_handles(), 0);
 }
+
+#[test]
+fn stateful_native_registration_keeps_vm_owned_extension_state() {
+    use std::sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    };
+
+    let calls = Arc::new(AtomicI64::new(0));
+    let state = Arc::clone(&calls);
+    let mut vm = Vm::new().unwrap();
+    vm.register_stateful_native(
+        "stateful",
+        "next",
+        0,
+        Arc::new(move |context, arguments| {
+            assert!(arguments.is_empty());
+            let _module = context.native_module("stateful")?;
+            context.from_i64(state.fetch_add(1, Ordering::Relaxed) + 1)
+        }),
+    )
+    .unwrap();
+    let program = compile(
+        "import stateful\nprint(stateful.next(), stateful.next())",
+        "stateful-native",
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+
+    assert_eq!(String::from_utf8(output).unwrap(), "1 2\n");
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
 #[test]
 fn small_integer_loop_has_no_per_iteration_heap_allocations() {
     let p = compile("i=0\ntotal=0\nwhile i<10000:\n    total+=i\n    i+=1", "x").unwrap();
