@@ -148,6 +148,25 @@ host `0.0` ile karşılaştırır ve başarılı yüklemede library mapping'ini 
 bu alt aşamada fail-closed kalır. Bu sınır ve güvenlik gerekçesi
 [ADR 0095](adr/0095-hpy-universal-loader.md) içinde kayıtlıdır.
 
+H1 tamamlanmıştır. HPy `0.9.0` resmi header ağacı kaynak dağıtımındaki
+`4545310f...b6c70cc` SHA-256 kaydı doğrulanarak test girdisi olarak vendored
+edilmiştir. Host exact 261-slot context düzenini kurar; local handle'ları yalnız
+native çağrı scope'unda tutar ve stale/cross-runtime kullanımı reddeder.
+`HPy_Dup`, `HPy_Close`, signed 64-bit integer ve UTF-8 Unicode dönüşümleri ile
+temel exception state çalışır. Module def materialization yalnız
+`HPyFunc_NOARGS` ve `HPyFunc_O` method'larını kabul eder; H2 imzaları, legacy
+methods, module C state ve `HPyGlobal` fail-closed reddedilir. Modül yöntemleri
+VM'ye tek transaction olarak kaydolur; başarısız doğrulama kısmi import
+bırakmaz. Gerçek C fixture interpreter ve JIT caller yollarında constant,
+`fib(40)`, Unicode, dup/close, exception cleanup ve local lifetime sınırlarını
+doğrular; binary dependency audit'i `libpython` bulunmadığını kanıtlar.
+
+Windows `.hpy0.pyd` filename/library/symbol/context kod yolu uygulanmıştır;
+çalışan Windows doğrulaması H6 CI matrisinin açık kabul kapısıdır. H1 dışında
+kalan context slotları çağrılabilir ilan edilmez. Bunlar için crash yerine
+versioned unavailable tanısı H6 kapsamında tamamlanacaktır. H1 kararı ve yaşam
+süresi sözleşmesi [ADR 0097](adr/0097-hpy-h1-minimal-context.md) içinde kayıtlıdır.
+
 İlk uçtan uca kanıt:
 
 ```text

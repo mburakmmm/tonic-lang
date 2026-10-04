@@ -2,13 +2,14 @@
 
 //! Isolated HPy Universal adapter boundary.
 //!
-//! Milestone H1a adds strict macOS/Linux shared-library validation and process
-//! pinning on top of the H0 inventory. It still does not provide an
-//! `HPyContext`; [`CapabilityState::Unavailable`] therefore means that no HPy
-//! operation is executable yet.
+//! Milestone H1 provides strict shared-library validation, process pinning and
+//! the minimal HPy 0.9 context needed by scalar Universal extensions. APIs
+//! outside the published capability inventory remain fail-closed.
 
+mod host;
 mod loader;
 
+pub use host::{HostError, UniversalModule};
 pub use loader::{LoadError, PinnedUniversalModule};
 
 use std::{error::Error, fmt};
@@ -161,6 +162,7 @@ impl Error for ModuleFileError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityState {
+    Available,
     Unavailable,
 }
 
@@ -179,15 +181,23 @@ const fn unavailable(id: &'static str, planned_milestone: &'static str) -> Capab
     }
 }
 
+const fn available(id: &'static str, planned_milestone: &'static str) -> Capability {
+    Capability {
+        id,
+        planned_milestone,
+        state: CapabilityState::Available,
+    }
+}
+
 /// Exhaustive coarse-grained capability inventory.
 ///
 /// APIs not represented here are also unavailable: lookup is fail-closed.
 pub const CAPABILITIES: &[Capability] = &[
-    unavailable("module-init", "H1"),
-    unavailable("local-handles", "H1"),
-    unavailable("integer-conversion", "H1"),
-    unavailable("unicode", "H1"),
-    unavailable("exception-state", "H1"),
+    available("module-init", "H1"),
+    available("local-handles", "H1"),
+    available("integer-conversion", "H1"),
+    available("unicode", "H1"),
+    available("exception-state", "H1"),
     unavailable("containers-builders", "H2"),
     unavailable("attributes-items-calls", "H2"),
     unavailable("globals", "H3"),
@@ -200,10 +210,17 @@ pub const CAPABILITIES: &[Capability] = &[
 ];
 
 /// HPy functions that Tonic can currently execute.
-///
-/// H1a validates and pins libraries but supplies no context, so this list must
-/// remain empty until H1b provides real runtime implementations.
-pub const IMPLEMENTED_FUNCTIONS: &[&str] = &[];
+pub const IMPLEMENTED_FUNCTIONS: &[&str] = &[
+    "HPy_Dup",
+    "HPy_Close",
+    "HPyLong_FromInt64_t",
+    "HPyLong_AsInt64_t",
+    "HPyUnicode_FromString",
+    "HPyUnicode_AsUTF8AndSize",
+    "HPyErr_SetString",
+    "HPyErr_Occurred",
+    "HPyErr_Clear",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FunctionCapability {
@@ -212,29 +229,28 @@ pub struct FunctionCapability {
     pub state: CapabilityState,
 }
 
-const fn unavailable_function(
+const fn available_function(
     name: &'static str,
     planned_milestone: &'static str,
 ) -> FunctionCapability {
     FunctionCapability {
         name,
         planned_milestone,
-        state: CapabilityState::Unavailable,
+        state: CapabilityState::Available,
     }
 }
 
-/// First callable context surface planned for H1b. Every entry still fails
-/// closed while only the H1a loader is present.
+/// Callable H1 context surface. Later APIs remain absent and fail closed.
 pub const PLANNED_FUNCTIONS: &[FunctionCapability] = &[
-    unavailable_function("HPy_Dup", "H1"),
-    unavailable_function("HPy_Close", "H1"),
-    unavailable_function("HPyLong_FromInt64_t", "H1"),
-    unavailable_function("HPyLong_AsInt64_t", "H1"),
-    unavailable_function("HPyUnicode_FromString", "H1"),
-    unavailable_function("HPyUnicode_AsUTF8AndSize", "H1"),
-    unavailable_function("HPyErr_SetString", "H1"),
-    unavailable_function("HPyErr_Occurred", "H1"),
-    unavailable_function("HPyErr_Clear", "H1"),
+    available_function("HPy_Dup", "H1"),
+    available_function("HPy_Close", "H1"),
+    available_function("HPyLong_FromInt64_t", "H1"),
+    available_function("HPyLong_AsInt64_t", "H1"),
+    available_function("HPyUnicode_FromString", "H1"),
+    available_function("HPyUnicode_AsUTF8AndSize", "H1"),
+    available_function("HPyErr_SetString", "H1"),
+    available_function("HPyErr_Occurred", "H1"),
+    available_function("HPyErr_Clear", "H1"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,7 +262,7 @@ pub enum CapabilityError {
 impl fmt::Display for CapabilityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown => formatter.write_str("unknown HPy capability; rejected by H0"),
+            Self::Unknown => formatter.write_str("unknown HPy capability; rejected by default"),
             Self::Unavailable { planned_milestone } => write!(
                 formatter,
                 "HPy capability is unavailable; planned for milestone {planned_milestone}"
@@ -266,6 +282,7 @@ pub fn capability(id: &str) -> Option<&'static Capability> {
 pub fn require_capability(id: &str) -> Result<&'static Capability, CapabilityError> {
     let capability = capability(id).ok_or(CapabilityError::Unknown)?;
     match capability.state {
+        CapabilityState::Available => Ok(capability),
         CapabilityState::Unavailable => Err(CapabilityError::Unavailable {
             planned_milestone: capability.planned_milestone,
         }),
@@ -279,6 +296,7 @@ pub fn require_function(name: &str) -> Result<&'static FunctionCapability, Capab
         .find(|function| function.name == name)
         .ok_or(CapabilityError::Unknown)?;
     match function.state {
+        CapabilityState::Available => Ok(function),
         CapabilityState::Unavailable => Err(CapabilityError::Unavailable {
             planned_milestone: function.planned_milestone,
         }),
@@ -345,28 +363,29 @@ mod tests {
     }
 
     #[test]
-    fn all_h0_capabilities_fail_closed() {
+    fn h1_capabilities_are_exact_and_unknown_apis_fail_closed() {
         for capability in CAPABILITIES {
-            assert_eq!(capability.state, CapabilityState::Unavailable);
-            assert_eq!(
-                require_capability(capability.id),
-                Err(CapabilityError::Unavailable {
-                    planned_milestone: capability.planned_milestone
-                })
-            );
+            match capability.state {
+                CapabilityState::Available => {
+                    assert_eq!(require_capability(capability.id), Ok(capability));
+                }
+                CapabilityState::Unavailable => assert_eq!(
+                    require_capability(capability.id),
+                    Err(CapabilityError::Unavailable {
+                        planned_milestone: capability.planned_milestone
+                    })
+                ),
+            }
         }
         assert_eq!(
             require_capability("future-api"),
             Err(CapabilityError::Unknown)
         );
-        assert_eq!(IMPLEMENTED_FUNCTIONS, &[] as &[&str]);
+        assert_eq!(IMPLEMENTED_FUNCTIONS.len(), PLANNED_FUNCTIONS.len());
         for function in PLANNED_FUNCTIONS {
-            assert_eq!(
-                require_function(function.name),
-                Err(CapabilityError::Unavailable {
-                    planned_milestone: function.planned_milestone
-                })
-            );
+            assert_eq!(function.state, CapabilityState::Available);
+            assert_eq!(require_function(function.name), Ok(function));
+            assert!(IMPLEMENTED_FUNCTIONS.contains(&function.name));
         }
         assert_eq!(
             require_function("HPy_Future"),

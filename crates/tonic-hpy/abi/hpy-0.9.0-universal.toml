@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h1a-loader-validation"
+implementation_status = "h1-minimal-context"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -16,7 +16,7 @@ tag = "hpy0"
 compile_definition = "HPY_ABI_UNIVERSAL"
 public_header = "hpy/devel/include/hpy.h"
 context_header = "hpy/devel/include/hpy/universal/autogen_ctx.h"
-context_metadata_fields = ["name", "abi_version"]
+context_metadata_fields = ["name", "_private", "abi_version"]
 context_first_slot = 0
 context_last_slot = 260
 context_slot_count = 261
@@ -24,7 +24,17 @@ context_layout_rule = "HPy_ID order; new members append"
 handle_storage = "intptr_t"
 null_handle_bits = 0
 default_function_state = "unavailable"
-implemented_functions = []
+implemented_functions = [
+  "HPy_Dup",
+  "HPy_Close",
+  "HPyLong_FromInt64_t",
+  "HPyLong_AsInt64_t",
+  "HPyUnicode_FromString",
+  "HPyUnicode_AsUTF8AndSize",
+  "HPyErr_SetString",
+  "HPyErr_Occurred",
+  "HPyErr_Clear",
+]
 planned_h1_functions = [
   "HPy_Dup",
   "HPy_Close",
@@ -46,42 +56,42 @@ module_init_prefix = "HPyInit_"
 [[platform_suffixes]]
 platform = "linux"
 suffix = ".hpy0.so"
-state = "loader-validation"
+state = "h1-context"
 
 [[platform_suffixes]]
 platform = "macos"
 suffix = ".hpy0.so"
-state = "loader-validation"
+state = "h1-context"
 
 [[platform_suffixes]]
 platform = "windows"
 suffix = ".hpy0.pyd"
-state = "unavailable"
+state = "h1-context-unverified-ci"
 
 [[capabilities]]
 id = "module-init"
 planned_milestone = "H1"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "local-handles"
 planned_milestone = "H1"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "integer-conversion"
 planned_milestone = "H1"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "unicode"
 planned_milestone = "H1"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "exception-state"
 planned_milestone = "H1"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "containers-builders"

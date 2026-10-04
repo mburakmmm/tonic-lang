@@ -691,6 +691,9 @@ name = "tonic-hpy"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "tonic-compiler",
+ "tonic-core",
+ "tonic-runtime",
 ]
 
 [[package]]

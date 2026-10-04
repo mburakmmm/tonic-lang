@@ -2241,6 +2241,40 @@ fn stateful_native_registration_keeps_vm_owned_extension_state() {
     assert_eq!(String::from_utf8(output).unwrap(), "1 2\n");
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
+
+#[test]
+fn stateful_module_registration_is_atomic_and_rejects_collisions() {
+    use std::sync::Arc;
+
+    let callback: Arc<tonic_runtime::StatefulNativeFn> = Arc::new(|context, _| context.from_i64(1));
+    let mut vm = Vm::new().unwrap();
+    let duplicate = vec![
+        ("same".to_owned(), 0, Arc::clone(&callback)),
+        ("same".to_owned(), 0, Arc::clone(&callback)),
+    ];
+    assert_eq!(
+        vm.register_stateful_module("atomic", duplicate)
+            .unwrap_err()
+            .kind,
+        "ImportError"
+    );
+    vm.register_stateful_module(
+        "atomic",
+        vec![("value".to_owned(), 0, Arc::clone(&callback))],
+    )
+    .unwrap();
+    assert_eq!(
+        vm.register_stateful_module("atomic", vec![("other".to_owned(), 0, callback)])
+            .unwrap_err()
+            .kind,
+        "ImportError"
+    );
+
+    let program = compile("import atomic\nprint(atomic.value())", "atomic-native").unwrap();
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1\n");
+}
 #[test]
 fn small_integer_loop_has_no_per_iteration_heap_allocations() {
     let p = compile("i=0\ntotal=0\nwhile i<10000:\n    total+=i\n    i+=1", "x").unwrap();

@@ -329,15 +329,15 @@ sonra alınır.
 - [ ] Tonic HPy Universal host ve aHPy uyumluluk hattı.
   - [x] Exact HPy sürüm/ABI/context envanteri, fail-closed capability manifesti ve
     izole `tonic-hpy` crate sınırı.
-  - [ ] Platform/ABI/init-symbol doğrulamalı `.hpy0` shared-library loader; libpython
+  - [x] Platform/ABI/init-symbol doğrulamalı `.hpy0` shared-library loader; libpython
     bağımlılığı olmadan constant module ve scalar Fibonacci.
     - [x] macOS/Linux dosya adı, ABI ve dört init sembolü doğrulaması; başarılı
       library mapping'ini unload protokolü gelene kadar süreç ömrüne pinleme.
-    - [ ] Minimal context/module materialization ile constant module ve scalar
+    - [x] Minimal context/module materialization ile constant module ve scalar
       Fibonacci; Windows loader.
       - [x] Extension durumunu VM ömrüne bağlayan stateful native callback ve
         çağrı-scope module handle erişimi.
-  - [ ] Local `HPy`, `HPy_Dup`/`HPy_Close`, sayı/Unicode, module init ve exception
+  - [x] Local `HPy`, `HPy_Dup`/`HPy_Close`, sayı/Unicode, module init ve exception
     state; stale/cross-runtime/failure cleanup testleri.
   - [ ] List/tuple/dict builders, attr/item/call yüzeyi ve keyword binder eşlemesi.
   - [ ] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek

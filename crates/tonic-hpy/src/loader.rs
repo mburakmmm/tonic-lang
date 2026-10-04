@@ -54,9 +54,6 @@ impl PinnedUniversalModule {
     /// during symbol calls.
     pub unsafe fn load(module_name: &str, path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let platform = Platform::current().ok_or(LoadError::UnsupportedPlatform)?;
-        if platform == Platform::Windows {
-            return Err(LoadError::UnsupportedPlatform);
-        }
         let path = path.as_ref();
         let file_name = path
             .file_name()
@@ -147,8 +144,13 @@ impl PinnedUniversalModule {
         NonNull::new(unsafe { (self.initialize_module)() }).ok_or(LoadError::NullModuleDefinition)
     }
 
+    pub(crate) unsafe fn initialize_context(&self, context: *mut c_void) {
+        // SAFETY: the host supplies its stable HPy 0.9 context allocation and
+        // `load` validated the extension initializer's C signature.
+        unsafe { (self._initialize_context)(context) };
+    }
+
     /// Expose whether the validated global-context initializer is present.
-    /// Calling it remains part of the minimal-context stage.
     #[must_use]
     pub const fn has_context_initializer(&self) -> bool {
         true
@@ -206,7 +208,7 @@ impl fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedPlatform => {
-                formatter.write_str("HPy Universal loading currently supports macOS and Linux")
+                formatter.write_str("HPy Universal loading is unavailable on this platform")
             }
             Self::InvalidPath(path) => write!(
                 formatter,

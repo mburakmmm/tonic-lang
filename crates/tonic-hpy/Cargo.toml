@@ -7,6 +7,11 @@ publish.workspace = true
 
 [dependencies]
 libloading.workspace = true
+tonic-core.workspace = true
+tonic-runtime.workspace = true
+
+[dev-dependencies]
+tonic-compiler.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"

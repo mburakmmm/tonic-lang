@@ -17,7 +17,7 @@ use crate::{
 use calls::{Arguments, ExpandedArgs};
 use num_bigint::BigInt;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::Write,
     sync::Arc,
     thread::ThreadId,
@@ -3108,6 +3108,50 @@ impl Vm {
         });
         let callable = self.heap.alloc(Object::Native(id))?;
         self.heap.add_module_member(value, name, callable)?;
+        Ok(())
+    }
+    /// Register a complete VM-owned native module without exposing a partially
+    /// populated module if validation or allocation fails.
+    pub fn register_stateful_module(
+        &mut self,
+        module: &str,
+        methods: Vec<(String, usize, std::sync::Arc<crate::StatefulNativeFn>)>,
+    ) -> Result<()> {
+        self.ensure_running()?;
+        if self.modules.contains_key(module) {
+            return Err(Diagnostic::new(
+                "ImportError",
+                "native module already registered",
+            ));
+        }
+
+        let mut names = HashSet::with_capacity(methods.len());
+        if let Some((name, _, _)) = methods
+            .iter()
+            .find(|(name, _, _)| !names.insert(name.as_str()))
+        {
+            return Err(Diagnostic::new(
+                "ImportError",
+                format!("duplicate native function '{name}'"),
+            ));
+        }
+        let first_id = self.natives.len();
+        first_id
+            .checked_add(methods.len())
+            .ok_or_else(|| Diagnostic::new("OverflowError", "native function registry is full"))?;
+
+        let mut members = Vec::with_capacity(methods.len());
+        for (offset, (name, _, _)) in methods.iter().enumerate() {
+            let callable = self.heap.alloc(Object::Native(first_id + offset))?;
+            members.push((name.clone(), callable));
+        }
+        let value = self.heap.alloc(Object::Module(members))?;
+        self.natives
+            .extend(methods.into_iter().map(|(_, arity, function)| NativeDef {
+                arity,
+                function: NativeCallable::Stateful(function),
+            }));
+        self.modules.insert(module.into(), value);
         Ok(())
     }
     pub(crate) fn native_module_value(&self, name: &str) -> Result<Value> {
