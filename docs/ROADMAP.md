@@ -343,8 +343,9 @@ sonra alınır.
     - [x] List/tuple/dict constructor ve exact-check yüzeyi; fixed-size list/tuple
       builder build/cancel, eksik/leaked/stale builder denetimi.
     - [x] Attr/item/call yüzeyi, dict mutation ve keyword binder eşlemesi.
-  - [ ] H2 tamamlayıcı scalar/exception kapısı: bool/bigint/float dönüşümleri,
-    raise/fetch/match ve normal/stress-GC/fault-injection testleri.
+  - [x] H2 tamamlayıcı scalar/exception kapısı: bool/bigint/float dönüşümleri,
+    HPy 0.9 public raise/match/no-memory yüzeyi ve normal/stress-GC/fault/error
+    testleri. Bu HPy sürümünde public fetch/restore API'si yoktur.
   - [ ] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
     moving-GC altında field/global cycle testi.
   - [ ] Pure `HPyType_Spec`, native payload, methods/slots/inheritance, trace,

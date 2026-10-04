@@ -44,7 +44,7 @@ Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 122, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 5; toplam 389 test.
+HPy loader 6 ve HPy Universal entegrasyonu 6; toplam 390 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -275,6 +275,12 @@ item protokolleri, list/dict mutation, contains/length/repr ile tuple/dict,
 vectorcall ve method-call yollarını interpreter ve JIT caller modlarında çalıştırır.
 Yanlış keyword arity, item türü, non-callable ve unsupported signature yolları
 deterministic guest/import hatası üretir ve aktif handle sayısı sıfıra döner.
+H2 scalar fixture bool, signed/unsigned 32/64-bit, bigint, size/ssize, mask,
+pointer, integer-to-double ve float yollarını interpreter/JIT caller ile
+default/her-allocation GC matrisinde çalıştırır. Overflow ve yanlış scalar türü,
+`HPyErr_SetObject`, built-in hierarchy/nested-tuple `ExceptionMatches` ve
+`HPyErr_NoMemory` failure yolları aynı matris içinde sıfır leaked handle ile
+doğrulanır. HPy 0.9 public yüzeyinde exception fetch/restore bulunmaz.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

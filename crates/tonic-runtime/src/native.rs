@@ -5,6 +5,8 @@ use crate::{
     value::Value,
     vm::{calls::ExpandedArgs, Vm},
 };
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
 use std::{
     io::Write,
     sync::atomic::{AtomicU32, Ordering},
@@ -222,6 +224,11 @@ impl<'a> Context<'a> {
         let module = self.vm.native_module_value(name)?;
         self.local(module)
     }
+    /// Borrow an original built-in binding into this call's local handle scope.
+    pub fn builtin(&mut self, name: &str) -> Result<Handle> {
+        let value = self.vm.named_builtin(name)?;
+        self.local(value)
+    }
     pub(crate) fn value_kind(&self, handle: Handle) -> Result<ValueKind> {
         let value = self.resolve(handle)?;
         if value == Value::NONE {
@@ -269,8 +276,68 @@ impl<'a> Context<'a> {
         let v = self.vm.heap.i64(n)?;
         self.local(v)
     }
+    pub fn from_u64(&mut self, value: u64) -> Result<Handle> {
+        let value = self.vm.heap.int(BigInt::from(value))?;
+        self.local(value)
+    }
     pub fn to_i64(&self, h: Handle) -> Result<i64> {
         self.vm.heap.to_i64(self.resolve(h)?)
+    }
+    fn integer(&self, handle: Handle) -> Result<BigInt> {
+        self.vm.heap.integer(self.resolve(handle)?)
+    }
+    pub fn to_i32(&self, handle: Handle) -> Result<i32> {
+        self.integer(handle)?
+            .to_i32()
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit i32"))
+    }
+    pub fn to_u32(&self, handle: Handle) -> Result<u32> {
+        self.integer(handle)?
+            .to_u32()
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit u32"))
+    }
+    pub fn to_u64(&self, handle: Handle) -> Result<u64> {
+        self.integer(handle)?
+            .to_u64()
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit u64"))
+    }
+    pub fn to_isize(&self, handle: Handle) -> Result<isize> {
+        self.integer(handle)?
+            .to_isize()
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit isize"))
+    }
+    pub fn to_usize(&self, handle: Handle) -> Result<usize> {
+        self.integer(handle)?
+            .to_usize()
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer does not fit usize"))
+    }
+    fn integer_mask(&self, handle: Handle, bits: usize) -> Result<BigInt> {
+        let modulus = BigInt::from(1_u8) << bits;
+        let mut value = self.integer(handle)? % &modulus;
+        if value.sign() == Sign::Minus {
+            value += modulus;
+        }
+        Ok(value)
+    }
+    pub fn to_u32_mask(&self, handle: Handle) -> Result<u32> {
+        self.integer_mask(handle, u32::BITS as usize)?
+            .to_u32()
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "u32 mask conversion failed"))
+    }
+    pub fn to_u64_mask(&self, handle: Handle) -> Result<u64> {
+        self.integer_mask(handle, u64::BITS as usize)?
+            .to_u64()
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "u64 mask conversion failed"))
+    }
+    pub fn integer_to_f64(&self, handle: Handle) -> Result<f64> {
+        self.integer(handle)?
+            .to_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| Diagnostic::new("OverflowError", "integer too large for float"))
+    }
+    pub fn class_name(&self, handle: Handle) -> Result<&str> {
+        let value = self.resolve(handle)?;
+        Ok(&self.vm.heap.class(value)?.name)
     }
     pub(crate) fn int_decimal(&self, handle: Handle) -> Result<String> {
         Ok(self.vm.heap.integer(self.resolve(handle)?)?.to_string())
@@ -448,6 +515,12 @@ impl<'a> Context<'a> {
     pub fn repr(&mut self, value: Handle) -> Result<Handle> {
         let value = self.resolve(value)?;
         let callable = self.vm.builtin_callable(Builtin::Repr)?;
+        let result = self.call_values(callable, &[value])?;
+        self.local(result)
+    }
+    pub fn str_value(&mut self, value: Handle) -> Result<Handle> {
+        let value = self.resolve(value)?;
+        let callable = self.vm.named_builtin("str")?;
         let result = self.call_values(callable, &[value])?;
         self.local(result)
     }

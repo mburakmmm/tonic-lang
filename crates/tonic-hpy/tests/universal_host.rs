@@ -90,8 +90,18 @@ fn module(fixture: &Fixture) -> UniversalModule {
 }
 
 fn run(module: &UniversalModule, source: &str, mode: ExecutionMode) -> (Vm, String) {
+    run_with_gc(module, source, mode, None)
+}
+
+fn run_with_gc(
+    module: &UniversalModule,
+    source: &str,
+    mode: ExecutionMode,
+    gc_interval: Option<u64>,
+) -> (Vm, String) {
     let mut vm = Vm::new().expect("create VM");
     vm.execution_mode = mode;
+    vm.gc_interval = gc_interval;
     module.register(&mut vm).expect("register HPy module");
     let program = compile(source, "hpy-h1").expect("compile source");
     let mut output = Vec::new();
@@ -136,6 +146,14 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             "call_tuple_dict",
             "call_keywords",
             "call_method",
+            "scalar_values",
+            "scalar_conversions",
+            "as_u64",
+            "as_i32",
+            "as_float",
+            "set_object",
+            "exception_matches",
+            "no_memory",
         ]
     );
 
@@ -167,6 +185,32 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             )
         );
         assert_eq!(vm.active_handles(), 0);
+    }
+}
+
+#[test]
+fn h2_scalar_and_exception_surface_handles_bigints_floats_and_forced_gc() {
+    let fixture = Fixture::compile();
+    let module = module(&fixture);
+    let source = concat!(
+        "import h1demo\n",
+        "print(h1demo.scalar_values())\n",
+        "print(h1demo.scalar_conversions())\n",
+        "print(h1demo.as_u64(18446744073709551615))\n",
+        "print(h1demo.as_i32(-2147483648))\n",
+        "print(h1demo.as_float(1.25))\n",
+        "print(h1demo.exception_matches())\n",
+    );
+    let expected = concat!(
+        "(True, False, -2147483648, 4294967295, 18446744073709551615, 42, -7, 1.25)\n",
+        "3.5\n18446744073709551615\n-2147483648\n1.25\n11\n",
+    );
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        for gc_interval in [None, Some(1)] {
+            let (vm, output) = run_with_gc(&module, source, mode, gc_interval);
+            assert_eq!(output, expected, "mode={mode:?}, gc={gc_interval:?}");
+            assert_eq!(vm.active_handles(), 0, "mode={mode:?}, gc={gc_interval:?}");
+        }
     }
 }
 
@@ -249,13 +293,35 @@ fn hpy_exception_state_and_failure_cleanup_are_guest_visible() {
         ("h1demo.list_roundtrip(1)", "TypeError"),
         ("h1demo.call_positional(1)", "TypeError"),
         ("h1demo.call_keywords(1)", "TypeError"),
+        ("h1demo.as_u64(-1)", "OverflowError"),
+        ("h1demo.as_i32(2147483648)", "OverflowError"),
+        ("h1demo.as_float('not-a-number')", "TypeError"),
+        ("h1demo.set_object('native failure')", "ValueError"),
+        ("h1demo.no_memory()", "MemoryError"),
     ] {
-        let mut vm = Vm::new().unwrap();
-        module.register(&mut vm).unwrap();
-        let program = compile(&format!("import h1demo\n{expression}"), "hpy-errors").unwrap();
-        let error = vm.run(&program, &mut Vec::new()).unwrap_err();
-        assert_eq!(error.kind, kind, "expression: {expression}");
-        assert_eq!(vm.active_handles(), 0, "expression: {expression}");
+        for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+            for gc_interval in [None, Some(1)] {
+                let mut vm = Vm::new().unwrap();
+                vm.execution_mode = mode;
+                vm.gc_interval = gc_interval;
+                module.register(&mut vm).unwrap();
+                let program =
+                    compile(&format!("import h1demo\n{expression}"), "hpy-errors").unwrap();
+                let error = vm.run(&program, &mut Vec::new()).unwrap_err();
+                assert_eq!(
+                    error.kind, kind,
+                    "expression={expression}, mode={mode:?}, gc={gc_interval:?}"
+                );
+                if expression.contains("set_object") {
+                    assert_eq!(error.message, "native failure");
+                }
+                assert_eq!(
+                    vm.active_handles(),
+                    0,
+                    "expression={expression}, mode={mode:?}, gc={gc_interval:?}"
+                );
+            }
+        }
     }
 }
 
@@ -301,6 +367,7 @@ fn unsupported_method_signature_fails_closed_during_load() {
 
 const SOURCE: &str = r#"
 #include <hpy.h>
+#include <stdint.h>
 
 HPyDef_METH(constant, "constant", HPyFunc_NOARGS)
 static HPy constant_impl(HPyContext *ctx, HPy self) {
@@ -675,6 +742,110 @@ static HPy call_method_impl(HPyContext *ctx, HPy self, HPy receiver) {
     return result;
 }
 
+HPyDef_METH(scalar_values, "scalar_values", HPyFunc_NOARGS)
+static HPy scalar_values_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPy items[8] = {
+        HPyBool_FromBool(ctx, true),
+        HPyBool_FromBool(ctx, false),
+        HPyLong_FromInt32_t(ctx, INT32_MIN),
+        HPyLong_FromUInt32_t(ctx, UINT32_MAX),
+        HPyLong_FromUInt64_t(ctx, UINT64_MAX),
+        HPyLong_FromSize_t(ctx, (size_t)42),
+        HPyLong_FromSsize_t(ctx, (HPy_ssize_t)-7),
+        HPyFloat_FromDouble(ctx, 1.25),
+    };
+    for (size_t index = 0; index < 8; index++) {
+        if (HPy_IsNull(items[index])) return HPy_NULL;
+    }
+    HPy result = HPyTuple_FromArray(ctx, items, 8);
+    for (size_t index = 0; index < 8; index++) HPy_Close(ctx, items[index]);
+    return result;
+}
+
+HPyDef_METH(scalar_conversions, "scalar_conversions", HPyFunc_NOARGS)
+static HPy scalar_conversions_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPy minus_one = HPyLong_FromInt32_t(ctx, -1);
+    HPy pointer_value = HPyLong_FromSize_t(ctx, (size_t)42);
+    HPy exact_float_integer = HPyLong_FromUInt64_t(ctx, UINT64_C(9007199254740992));
+    HPy floating = HPyFloat_FromDouble(ctx, 1.5);
+    if (HPy_IsNull(minus_one) || HPy_IsNull(pointer_value)
+        || HPy_IsNull(exact_float_integer) || HPy_IsNull(floating)) return HPy_NULL;
+    uint32_t mask32 = HPyLong_AsUInt32_tMask(ctx, minus_one);
+    uint64_t mask64 = HPyLong_AsUInt64_tMask(ctx, minus_one);
+    size_t size = HPyLong_AsSize_t(ctx, pointer_value);
+    HPy_ssize_t ssize = HPyLong_AsSsize_t(ctx, minus_one);
+    void *pointer = HPyLong_AsVoidPtr(ctx, pointer_value);
+    double integer_float = HPyLong_AsDouble(ctx, exact_float_integer);
+    double value_float = HPyFloat_AsDouble(ctx, floating);
+    HPy_Close(ctx, floating);
+    HPy_Close(ctx, exact_float_integer);
+    HPy_Close(ctx, pointer_value);
+    HPy_Close(ctx, minus_one);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    if (mask32 != UINT32_MAX || mask64 != UINT64_MAX || size != 42
+        || ssize != -1 || (uintptr_t)pointer != 42
+        || integer_float != 9007199254740992.0 || value_float != 1.5) {
+        return HPyErr_SetString(ctx, ctx->h_ValueError, "scalar conversion mismatch");
+    }
+    return HPyFloat_FromDouble(ctx, 3.5);
+}
+
+HPyDef_METH(as_u64, "as_u64", HPyFunc_O)
+static HPy as_u64_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    uint64_t converted = HPyLong_AsUInt64_t(ctx, value);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPyLong_FromUInt64_t(ctx, converted);
+}
+
+HPyDef_METH(as_i32, "as_i32", HPyFunc_O)
+static HPy as_i32_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    int32_t converted = HPyLong_AsInt32_t(ctx, value);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPyLong_FromInt32_t(ctx, converted);
+}
+
+HPyDef_METH(as_float, "as_float", HPyFunc_O)
+static HPy as_float_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    double converted = HPyFloat_AsDouble(ctx, value);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPyFloat_FromDouble(ctx, converted);
+}
+
+HPyDef_METH(set_object, "set_object", HPyFunc_O)
+static HPy set_object_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    return HPyErr_SetObject(ctx, ctx->h_ValueError, value);
+}
+
+HPyDef_METH(exception_matches, "exception_matches", HPyFunc_NOARGS)
+static HPy exception_matches_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyErr_SetString(ctx, ctx->h_ValueError, "match me");
+    int value = HPyErr_ExceptionMatches(ctx, ctx->h_ValueError);
+    int base = HPyErr_ExceptionMatches(ctx, ctx->h_Exception);
+    int other = HPyErr_ExceptionMatches(ctx, ctx->h_TypeError);
+    HPy expected_items[2] = { ctx->h_TypeError, ctx->h_ValueError };
+    HPy expected = HPyTuple_FromArray(ctx, expected_items, 2);
+    if (HPy_IsNull(expected)) return HPy_NULL;
+    int tuple = HPyErr_ExceptionMatches(ctx, expected);
+    HPy_Close(ctx, expected);
+    if (value < 0 || base < 0 || other < 0 || tuple < 0) return HPy_NULL;
+    if (tuple != 1) return HPyErr_SetString(ctx, ctx->h_ValueError, "tuple did not match");
+    HPyErr_Clear(ctx);
+    return HPyLong_FromInt32_t(ctx, value * 10 + base + other * 100);
+}
+
+HPyDef_METH(no_memory, "no_memory", HPyFunc_NOARGS)
+static HPy no_memory_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    return HPyErr_NoMemory(ctx);
+}
+
 static HPyDef *module_defines[] = {
     &constant,
     &fib,
@@ -705,6 +876,14 @@ static HPyDef *module_defines[] = {
     &call_tuple_dict,
     &call_keywords,
     &call_method,
+    &scalar_values,
+    &scalar_conversions,
+    &as_u64,
+    &as_i32,
+    &as_float,
+    &set_object,
+    &exception_matches,
+    &no_memory,
     NULL,
 };
 

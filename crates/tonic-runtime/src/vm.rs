@@ -3221,6 +3221,14 @@ impl Vm {
             })
             .ok_or_else(|| Diagnostic::new("RuntimeError", "builtin callable is unavailable"))
     }
+
+    pub(crate) fn named_builtin(&self, expected: &str) -> Result<Value> {
+        self.builtins
+            .iter()
+            .find(|(name, _)| name == expected)
+            .map(|(_, value)| *value)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "named builtin is unavailable"))
+    }
     pub fn initialize_c_extension(
         &mut self,
         init: crate::c_api::CExtensionInitFn,

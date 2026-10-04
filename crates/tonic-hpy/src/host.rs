@@ -29,10 +29,30 @@ type VectorArguments = (Vec<Handle>, Vec<(String, Handle)>);
 
 const SLOT_DUP: usize = 77;
 const SLOT_CLOSE: usize = 78;
+const SLOT_LONG_FROM_I32: usize = 79;
+const SLOT_LONG_FROM_U32: usize = 80;
 const SLOT_LONG_FROM_I64: usize = 81;
+const SLOT_LONG_FROM_U64: usize = 82;
+const SLOT_LONG_FROM_USIZE: usize = 83;
+const SLOT_LONG_FROM_ISIZE: usize = 84;
+const SLOT_LONG_AS_I32: usize = 85;
+const SLOT_LONG_AS_U32: usize = 86;
+const SLOT_LONG_AS_U32_MASK: usize = 87;
 const SLOT_LONG_AS_I64: usize = 88;
+const SLOT_LONG_AS_U64: usize = 89;
+const SLOT_LONG_AS_U64_MASK: usize = 90;
+const SLOT_LONG_AS_USIZE: usize = 91;
+const SLOT_LONG_AS_ISIZE: usize = 92;
+const SLOT_LONG_AS_VOID_PTR: usize = 93;
+const SLOT_LONG_AS_F64: usize = 94;
+const SLOT_FLOAT_FROM_F64: usize = 95;
+const SLOT_FLOAT_AS_F64: usize = 96;
+const SLOT_BOOL_FROM_BOOL: usize = 97;
 const SLOT_ERR_SET_STRING: usize = 137;
+const SLOT_ERR_SET_OBJECT: usize = 138;
 const SLOT_ERR_OCCURRED: usize = 141;
+const SLOT_ERR_EXCEPTION_MATCHES: usize = 142;
+const SLOT_ERR_NO_MEMORY: usize = 143;
 const SLOT_ERR_CLEAR: usize = 144;
 const SLOT_UNICODE_FROM_STRING: usize = 185;
 const SLOT_UNICODE_AS_UTF8_AND_SIZE: usize = 190;
@@ -77,8 +97,6 @@ const SLOT_CALL_METHOD: usize = 262;
 const HANDLE_NONE: usize = 0;
 const HANDLE_TRUE: usize = 1;
 const HANDLE_FALSE: usize = 2;
-const FIRST_EXCEPTION: usize = 5;
-const LAST_EXCEPTION: usize = 68;
 const LAST_CORE_TYPE: usize = 76;
 const FIRST_LATE_HANDLE: usize = 238;
 const LAST_LATE_HANDLE: usize = 243;
@@ -143,10 +161,30 @@ impl HpyContext {
         }
         context.slots[SLOT_DUP] = hpy_dup as usize;
         context.slots[SLOT_CLOSE] = hpy_close as usize;
+        context.slots[SLOT_LONG_FROM_I32] = hpy_long_from_i32 as usize;
+        context.slots[SLOT_LONG_FROM_U32] = hpy_long_from_u32 as usize;
         context.slots[SLOT_LONG_FROM_I64] = hpy_long_from_i64 as usize;
+        context.slots[SLOT_LONG_FROM_U64] = hpy_long_from_u64 as usize;
+        context.slots[SLOT_LONG_FROM_USIZE] = hpy_long_from_usize as usize;
+        context.slots[SLOT_LONG_FROM_ISIZE] = hpy_long_from_isize as usize;
+        context.slots[SLOT_LONG_AS_I32] = hpy_long_as_i32 as usize;
+        context.slots[SLOT_LONG_AS_U32] = hpy_long_as_u32 as usize;
+        context.slots[SLOT_LONG_AS_U32_MASK] = hpy_long_as_u32_mask as usize;
         context.slots[SLOT_LONG_AS_I64] = hpy_long_as_i64 as usize;
+        context.slots[SLOT_LONG_AS_U64] = hpy_long_as_u64 as usize;
+        context.slots[SLOT_LONG_AS_U64_MASK] = hpy_long_as_u64_mask as usize;
+        context.slots[SLOT_LONG_AS_USIZE] = hpy_long_as_usize as usize;
+        context.slots[SLOT_LONG_AS_ISIZE] = hpy_long_as_isize as usize;
+        context.slots[SLOT_LONG_AS_VOID_PTR] = hpy_long_as_void_ptr as usize;
+        context.slots[SLOT_LONG_AS_F64] = hpy_long_as_f64 as usize;
+        context.slots[SLOT_FLOAT_FROM_F64] = hpy_float_from_f64 as usize;
+        context.slots[SLOT_FLOAT_AS_F64] = hpy_float_as_f64 as usize;
+        context.slots[SLOT_BOOL_FROM_BOOL] = hpy_bool_from_bool as usize;
         context.slots[SLOT_ERR_SET_STRING] = hpy_err_set_string as usize;
+        context.slots[SLOT_ERR_SET_OBJECT] = hpy_err_set_object as usize;
         context.slots[SLOT_ERR_OCCURRED] = hpy_err_occurred as usize;
+        context.slots[SLOT_ERR_EXCEPTION_MATCHES] = hpy_err_exception_matches as usize;
+        context.slots[SLOT_ERR_NO_MEMORY] = hpy_err_no_memory as usize;
         context.slots[SLOT_ERR_CLEAR] = hpy_err_clear as usize;
         context.slots[SLOT_UNICODE_FROM_STRING] = hpy_unicode_from_string as usize;
         context.slots[SLOT_UNICODE_AS_UTF8_AND_SIZE] = hpy_unicode_as_utf8_and_size as usize;
@@ -578,6 +616,9 @@ impl CallState {
                 HANDLE_NONE => context.none(),
                 HANDLE_TRUE => context.from_bool(true),
                 HANDLE_FALSE => context.from_bool(false),
+                slot if exception_name(slot).is_some() => {
+                    context.builtin(exception_name(slot).expect("checked exception slot"))
+                }
                 _ => Err(Diagnostic::new(
                     "TypeError",
                     "HPy context type/exception handle is not a guest value on this surface",
@@ -788,6 +829,49 @@ unsafe extern "C" fn hpy_close(context: *mut HpyContext, handle: Hpy) {
     }
 }
 
+fn insert_scalar(call: &mut CallState, result: TonicResult<Handle>) -> Hpy {
+    match result.and_then(|handle| call.insert(handle)) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+fn convert_scalar<T>(
+    call: &mut CallState,
+    handle: Hpy,
+    fallback: T,
+    convert: impl FnOnce(&Context<'_>, Handle) -> TonicResult<T>,
+) -> T {
+    let result = call.resolve(handle).and_then(|handle| {
+        // SAFETY: `CallState::context` remains valid for the active native call.
+        convert(unsafe { &*call.context }, handle)
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, fallback),
+    }
+}
+
+unsafe extern "C" fn hpy_long_from_i32(context: *mut HpyContext, value: i32) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.from_i64(i64::from(value));
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_long_from_u32(context: *mut HpyContext, value: u32) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.from_u64(u64::from(value));
+    insert_scalar(call, result)
+}
+
 unsafe extern "C" fn hpy_long_from_i64(context: *mut HpyContext, value: i64) -> Hpy {
     // SAFETY: the extension must pass the active context it received.
     let Some(call) = (unsafe { active_call(context) }) else {
@@ -795,10 +879,73 @@ unsafe extern "C" fn hpy_long_from_i64(context: *mut HpyContext, value: i64) -> 
     };
     // SAFETY: active-call lifetime keeps the erased context valid.
     let result = unsafe { &mut *call.context }.from_i64(value);
-    match result.and_then(|handle| call.insert(handle)) {
-        Ok(handle) => handle,
-        Err(error) => call.fail(error, Hpy::NULL),
-    }
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_long_from_u64(context: *mut HpyContext, value: u64) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.from_u64(value);
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_long_from_usize(context: *mut HpyContext, value: usize) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = u64::try_from(value)
+        .map_err(|_| Diagnostic::new("OverflowError", "size_t does not fit u64"))
+        .and_then(|value| {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }.from_u64(value)
+        });
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_long_from_isize(context: *mut HpyContext, value: isize) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = i64::try_from(value)
+        .map_err(|_| Diagnostic::new("OverflowError", "HPy_ssize_t does not fit i64"))
+        .and_then(|value| {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }.from_i64(value)
+        });
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_long_as_i32(context: *mut HpyContext, handle: Hpy) -> i32 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    convert_scalar(call, handle, -1, |context, handle| context.to_i32(handle))
+}
+
+unsafe extern "C" fn hpy_long_as_u32(context: *mut HpyContext, handle: Hpy) -> u32 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return u32::MAX;
+    };
+    convert_scalar(call, handle, u32::MAX, |context, handle| {
+        context.to_u32(handle)
+    })
+}
+
+unsafe extern "C" fn hpy_long_as_u32_mask(context: *mut HpyContext, handle: Hpy) -> u32 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return u32::MAX;
+    };
+    convert_scalar(call, handle, u32::MAX, |context, handle| {
+        context.to_u32_mask(handle)
+    })
 }
 
 unsafe extern "C" fn hpy_long_as_i64(context: *mut HpyContext, handle: Hpy) -> i64 {
@@ -806,14 +953,91 @@ unsafe extern "C" fn hpy_long_as_i64(context: *mut HpyContext, handle: Hpy) -> i
     let Some(call) = (unsafe { active_call(context) }) else {
         return -1;
     };
-    let result = call.resolve(handle).and_then(|handle| {
-        // SAFETY: active-call lifetime keeps the erased context valid.
-        unsafe { &*call.context }.to_i64(handle)
-    });
-    match result {
-        Ok(value) => value,
-        Err(error) => call.fail(error, -1),
-    }
+    convert_scalar(call, handle, -1, |context, handle| context.to_i64(handle))
+}
+
+unsafe extern "C" fn hpy_long_as_u64(context: *mut HpyContext, handle: Hpy) -> u64 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return u64::MAX;
+    };
+    convert_scalar(call, handle, u64::MAX, |context, handle| {
+        context.to_u64(handle)
+    })
+}
+
+unsafe extern "C" fn hpy_long_as_u64_mask(context: *mut HpyContext, handle: Hpy) -> u64 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return u64::MAX;
+    };
+    convert_scalar(call, handle, u64::MAX, |context, handle| {
+        context.to_u64_mask(handle)
+    })
+}
+
+unsafe extern "C" fn hpy_long_as_usize(context: *mut HpyContext, handle: Hpy) -> usize {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return usize::MAX;
+    };
+    convert_scalar(call, handle, usize::MAX, |context, handle| {
+        context.to_usize(handle)
+    })
+}
+
+unsafe extern "C" fn hpy_long_as_isize(context: *mut HpyContext, handle: Hpy) -> isize {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    convert_scalar(call, handle, -1, |context, handle| context.to_isize(handle))
+}
+
+unsafe extern "C" fn hpy_long_as_void_ptr(context: *mut HpyContext, handle: Hpy) -> *mut c_void {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return ptr::null_mut();
+    };
+    convert_scalar(call, handle, ptr::null_mut(), |context, handle| {
+        Ok(context.to_usize(handle)? as *mut c_void)
+    })
+}
+
+unsafe extern "C" fn hpy_long_as_f64(context: *mut HpyContext, handle: Hpy) -> f64 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1.0;
+    };
+    convert_scalar(call, handle, -1.0, |context, handle| {
+        context.integer_to_f64(handle)
+    })
+}
+
+unsafe extern "C" fn hpy_float_from_f64(context: *mut HpyContext, value: f64) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.from_f64(value);
+    insert_scalar(call, result)
+}
+
+unsafe extern "C" fn hpy_float_as_f64(context: *mut HpyContext, handle: Hpy) -> f64 {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1.0;
+    };
+    convert_scalar(call, handle, -1.0, |context, handle| context.to_f64(handle))
+}
+
+unsafe extern "C" fn hpy_bool_from_bool(context: *mut HpyContext, value: bool) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(_call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    Hpy::special(if value { HANDLE_TRUE } else { HANDLE_FALSE })
 }
 
 unsafe extern "C" fn hpy_unicode_from_string(
@@ -1431,20 +1655,10 @@ unsafe extern "C" fn hpy_err_set_string(
     let Some(call) = (unsafe { active_call(context) }) else {
         return;
     };
-    let Some(slot) = exception_type.special_slot() else {
-        call.fail(
-            Diagnostic::new("SystemError", "HPyErr_SetString requires an exception type"),
-            (),
-        );
-        return;
+    let exception_type = match resolve_exception_type(call, exception_type) {
+        Ok(exception_type) => exception_type,
+        Err(error) => return call.fail(error, ()),
     };
-    if !(FIRST_EXCEPTION..=LAST_EXCEPTION).contains(&slot) {
-        call.fail(
-            Diagnostic::new("SystemError", "HPyErr_SetString requires an exception type"),
-            (),
-        );
-        return;
-    }
     if message.is_null() {
         call.fail(
             Diagnostic::new("SystemError", "HPyErr_SetString received null text"),
@@ -1456,7 +1670,27 @@ unsafe extern "C" fn hpy_err_set_string(
     let message = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
         .into_owned();
-    call.exception = Some(Diagnostic::new(exception_name(slot), message));
+    call.exception = Some(Diagnostic::new(exception_type, message));
+}
+
+unsafe extern "C" fn hpy_err_set_object(context: *mut HpyContext, exception_type: Hpy, value: Hpy) {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return;
+    };
+    let result = (|| {
+        let exception_type = resolve_exception_type(call, exception_type)?;
+        let value = call.resolve(value)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let context = unsafe { &mut *call.context };
+        let text = context.str_value(value)?;
+        let message = context.as_str(text)?.to_owned();
+        Ok(Diagnostic::new(exception_type, message))
+    })();
+    match result {
+        Ok(error) => call.exception = Some(error),
+        Err(error) => call.fail(error, ()),
+    }
 }
 
 unsafe extern "C" fn hpy_err_occurred(context: *mut HpyContext) -> c_int {
@@ -1464,6 +1698,27 @@ unsafe extern "C" fn hpy_err_occurred(context: *mut HpyContext) -> c_int {
     unsafe { active_call(context) }
         .is_some_and(|call| call.exception.is_some())
         .into()
+}
+
+unsafe extern "C" fn hpy_err_exception_matches(context: *mut HpyContext, expected: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let Some(actual) = call.exception.as_ref().map(|error| error.kind.clone()) else {
+        return 0;
+    };
+    match exception_expected_matches(call, &actual, expected) {
+        Ok(matches) => c_int::from(matches),
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_err_no_memory(context: *mut HpyContext) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        call.exception = Some(Diagnostic::new("MemoryError", "out of memory"));
+    }
 }
 
 unsafe extern "C" fn hpy_err_clear(context: *mut HpyContext) {
@@ -1729,16 +1984,144 @@ unsafe extern "C" fn hpy_tuple_builder_cancel(context: *mut HpyContext, builder:
     }
 }
 
-fn exception_name(slot: usize) -> &'static str {
-    match slot {
+fn resolve_exception_type(call: &mut CallState, exception_type: Hpy) -> TonicResult<String> {
+    let name = if let Some(slot) = exception_type.special_slot() {
+        exception_name(slot)
+            .ok_or_else(|| Diagnostic::new("SystemError", "expected an HPy exception type"))?
+            .to_owned()
+    } else {
+        let exception_type = call.resolve(exception_type)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &*call.context }
+            .class_name(exception_type)?
+            .to_owned()
+    };
+    if exception_parent(&name).is_none() && name != "BaseException" {
+        return Err(Diagnostic::new(
+            "TypeError",
+            "expected a supported built-in exception type",
+        ));
+    }
+    Ok(name)
+}
+
+fn exception_expected_matches(
+    call: &mut CallState,
+    actual: &str,
+    expected: Hpy,
+) -> TonicResult<bool> {
+    if expected.special_slot().is_some() {
+        return Ok(exception_matches(
+            actual,
+            &resolve_exception_type(call, expected)?,
+        ));
+    }
+    let expected = call.resolve(expected)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    exception_handle_matches(unsafe { &mut *call.context }, actual, expected, 0)
+}
+
+fn exception_handle_matches(
+    context: &mut Context<'_>,
+    actual: &str,
+    expected: Handle,
+    depth: usize,
+) -> TonicResult<bool> {
+    if depth >= 32 {
+        return Err(Diagnostic::new(
+            "RecursionError",
+            "exception match tuple nesting is too deep",
+        ));
+    }
+    if context.is_tuple(expected)? {
+        let length = context.sequence_len(expected)?;
+        for index in 0..length {
+            let item = context.sequence_get(expected, index)?;
+            if exception_handle_matches(context, actual, item, depth + 1)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    let expected = context.class_name(expected)?;
+    if exception_parent(expected).is_none() && expected != "BaseException" {
+        return Err(Diagnostic::new(
+            "TypeError",
+            "expected a supported built-in exception type or tuple",
+        ));
+    }
+    Ok(exception_matches(actual, expected))
+}
+
+fn exception_matches(actual: &str, expected: &str) -> bool {
+    let mut current = Some(actual);
+    while let Some(name) = current {
+        if name == expected {
+            return true;
+        }
+        current = exception_parent(name);
+    }
+    false
+}
+
+fn exception_parent(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "BaseException" => return None,
+        "Exception" | "GeneratorExit" | "KeyboardInterrupt" | "SystemExit" => "BaseException",
+        "FloatingPointError" | "OverflowError" | "ZeroDivisionError" => "ArithmeticError",
+        "IndexError" | "KeyError" => "LookupError",
+        "ModuleNotFoundError" => "ImportError",
+        "UnboundLocalError" => "NameError",
+        "RecursionError" | "NotImplementedError" => "RuntimeError",
+        "IndentationError" => "SyntaxError",
+        "TabError" => "IndentationError",
+        "UnicodeEncodeError" | "UnicodeDecodeError" | "UnicodeTranslateError" => "UnicodeError",
+        "BlockingIOError" | "BrokenPipeError" | "ChildProcessError" | "FileExistsError"
+        | "FileNotFoundError" | "InterruptedError" | "IsADirectoryError" | "NotADirectoryError"
+        | "PermissionError" | "ProcessLookupError" | "TimeoutError" => "OSError",
+        "ConnectionAbortedError" | "ConnectionRefusedError" | "ConnectionResetError" => {
+            "ConnectionError"
+        }
+        "ConnectionError" => "OSError",
+        "UserWarning"
+        | "DeprecationWarning"
+        | "PendingDeprecationWarning"
+        | "SyntaxWarning"
+        | "RuntimeWarning"
+        | "FutureWarning"
+        | "ImportWarning"
+        | "UnicodeWarning"
+        | "BytesWarning"
+        | "ResourceWarning" => "Warning",
+        "StopAsyncIteration" | "StopIteration" | "ArithmeticError" | "LookupError"
+        | "AssertionError" | "AttributeError" | "BufferError" | "EOFError" | "OSError"
+        | "ImportError" | "MemoryError" | "NameError" | "RuntimeError" | "SyntaxError"
+        | "ReferenceError" | "SystemError" | "TypeError" | "UnicodeError" | "ValueError"
+        | "Warning" => "Exception",
+        _ => return None,
+    })
+}
+
+fn exception_name(slot: usize) -> Option<&'static str> {
+    Some(match slot {
         5 => "BaseException",
         6 => "Exception",
+        7 => "StopAsyncIteration",
+        8 => "StopIteration",
+        9 => "GeneratorExit",
+        10 => "ArithmeticError",
+        11 => "LookupError",
+        12 => "AssertionError",
         13 => "AttributeError",
         14 => "BufferError",
+        15 => "EOFError",
+        16 => "FloatingPointError",
+        17 => "OSError",
         18 => "ImportError",
         19 => "ModuleNotFoundError",
         20 => "IndexError",
         21 => "KeyError",
+        22 => "KeyboardInterrupt",
         23 => "MemoryError",
         24 => "NameError",
         25 => "OverflowError",
@@ -1746,16 +2129,47 @@ fn exception_name(slot: usize) -> &'static str {
         27 => "RecursionError",
         28 => "NotImplementedError",
         29 => "SyntaxError",
+        30 => "IndentationError",
+        31 => "TabError",
+        32 => "ReferenceError",
         33 => "SystemError",
+        34 => "SystemExit",
         35 => "TypeError",
+        36 => "UnboundLocalError",
         37 => "UnicodeError",
         38 => "UnicodeEncodeError",
         39 => "UnicodeDecodeError",
         40 => "UnicodeTranslateError",
         41 => "ValueError",
         42 => "ZeroDivisionError",
-        _ => "Exception",
-    }
+        43 => "BlockingIOError",
+        44 => "BrokenPipeError",
+        45 => "ChildProcessError",
+        46 => "ConnectionError",
+        47 => "ConnectionAbortedError",
+        48 => "ConnectionRefusedError",
+        49 => "ConnectionResetError",
+        50 => "FileExistsError",
+        51 => "FileNotFoundError",
+        52 => "InterruptedError",
+        53 => "IsADirectoryError",
+        54 => "NotADirectoryError",
+        55 => "PermissionError",
+        56 => "ProcessLookupError",
+        57 => "TimeoutError",
+        58 => "Warning",
+        59 => "UserWarning",
+        60 => "DeprecationWarning",
+        61 => "PendingDeprecationWarning",
+        62 => "SyntaxWarning",
+        63 => "RuntimeWarning",
+        64 => "FutureWarning",
+        65 => "ImportWarning",
+        66 => "UnicodeWarning",
+        67 => "BytesWarning",
+        68 => "ResourceWarning",
+        _ => return None,
+    })
 }
 
 #[derive(Debug)]

@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h2-attributes-items-calls"
+implementation_status = "h2-scalars-exceptions"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -27,12 +27,32 @@ default_function_state = "unavailable"
 implemented_functions = [
   "HPy_Dup",
   "HPy_Close",
+  "HPyLong_FromInt32_t",
+  "HPyLong_FromUInt32_t",
   "HPyLong_FromInt64_t",
+  "HPyLong_FromUInt64_t",
+  "HPyLong_FromSize_t",
+  "HPyLong_FromSsize_t",
+  "HPyLong_AsInt32_t",
+  "HPyLong_AsUInt32_t",
+  "HPyLong_AsUInt32_tMask",
   "HPyLong_AsInt64_t",
+  "HPyLong_AsUInt64_t",
+  "HPyLong_AsUInt64_tMask",
+  "HPyLong_AsSize_t",
+  "HPyLong_AsSsize_t",
+  "HPyLong_AsVoidPtr",
+  "HPyLong_AsDouble",
+  "HPyFloat_FromDouble",
+  "HPyFloat_AsDouble",
+  "HPyBool_FromBool",
   "HPyUnicode_FromString",
   "HPyUnicode_AsUTF8AndSize",
   "HPyErr_SetString",
+  "HPyErr_SetObject",
   "HPyErr_Occurred",
+  "HPyErr_ExceptionMatches",
+  "HPyErr_NoMemory",
   "HPyErr_Clear",
   "HPyList_Check",
   "HPyList_New",
@@ -86,6 +106,9 @@ planned_h1_functions = [
 
 [limitations]
 list_new = "size 0 only; fixed-size construction uses HPyListBuilder"
+numeric_protocols = "scalar conversion accepts exact Tonic bool/int/float values; custom __index__ and __float__ reentry remains unavailable"
+exception_types = "SetObject and ExceptionMatches support built-in exception classes and nested tuples; custom exception classes require the H4 type surface"
+exception_fetch = "HPy 0.9 exposes no public fetch/restore API"
 module_method_signatures = [
   "HPyFunc_NOARGS",
   "HPyFunc_O",
@@ -146,6 +169,11 @@ state = "available"
 
 [[capabilities]]
 id = "attributes-items-calls"
+planned_milestone = "H2"
+state = "available"
+
+[[capabilities]]
+id = "scalars-exceptions"
 planned_milestone = "H2"
 state = "available"
 

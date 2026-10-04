@@ -184,7 +184,7 @@ aHPy veya handwritten fib extension
 - list/tuple/dict ve builders;
 - attribute/item/contains/length;
 - positional ve keyword calls;
-- error indicator, raise/fetch/match ve failure cleanup;
+- error indicator, HPy 0.9 public set/match/no-memory ve failure cleanup;
 - normal, stress-GC ve invalid-handle testleri.
 
 H2a container alt aşaması tamamlanmıştır. List/tuple/dict exact-check ve
@@ -203,9 +203,20 @@ attribute get/has/set, item get/set/delete, contains, length, repr,
 VM native binder, positional ve named handle dilimlerini geçici guest tuple/dict
 oluşturmadan `HPyFunc_VARARGS`/`HPyFunc_KEYWORDS` method'larına taşır. Gerçek C
 fixture normal ve hata yollarını interpreter ile JIT caller modlarında sınar.
-Karar [ADR 0099](adr/0099-hpy-object-calls.md) içindedir. Bigint/float API'leri,
-geniş exception fetch/match yüzeyi ve stress-GC/fault-injection kapısı H2'nin
-kalan tamamlayıcı işidir.
+Karar [ADR 0099](adr/0099-hpy-object-calls.md) içindedir.
+
+H2c scalar/exception alt aşaması tamamlanmıştır. Signed/unsigned 32/64-bit,
+`size_t`/`HPy_ssize_t`, mask, pointer ve integer-to-double yolları Tonic
+bigint'ini daraltmadan kullanır; bool ve float constructor/conversion slotları da
+çalışır. Daraltma overflow'u ve yanlış scalar türü deterministic guest exception
+üretir. `HPyErr_SetObject`, built-in exception hierarchy ve nested tuple
+`HPyErr_ExceptionMatches`, `HPyErr_NoMemory` ile cleanup yüzeyi eklenmiştir. HPy
+0.9 public API'sinde fetch/restore bulunmadığı için uygulanmamış bir API destekli
+gösterilmez. Gerçek C fixture interpreter/JIT caller ile normal ve
+her-allocation stress-GC matrisini, overflow/type hatalarını, explicit no-memory
+fault'unu ve sıfır leaked handle kabulünü sınar. Custom `__index__`/`__float__`
+reentry ve custom exception class'ları sonraki protocol/type kapsamına aittir.
+Karar [ADR 0100](adr/0100-hpy-scalars-exceptions.md) içindedir.
 
 ### H3 — Global, field ve moving GC
 
