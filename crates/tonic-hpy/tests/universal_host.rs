@@ -119,6 +119,14 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             "use_after_close",
             "null_without_error",
             "result_with_error",
+            "make_list",
+            "make_tuple",
+            "make_tuple_builder",
+            "make_dict",
+            "kind_code",
+            "cancel_builder",
+            "incomplete_builder",
+            "leak_builder",
         ]
     );
 
@@ -131,10 +139,24 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
         "print(h1demo.double(21))\n",
         "print(h1demo.module_self())\n",
         "print(h1demo.recover('not-an-int'))\n",
+        "print(h1demo.make_list())\n",
+        "print(h1demo.make_tuple())\n",
+        "print(h1demo.make_tuple_builder())\n",
+        "print(h1demo.make_dict())\n",
+        "print(h1demo.kind_code(h1demo.make_list()))\n",
+        "print(h1demo.kind_code(h1demo.make_tuple()))\n",
+        "print(h1demo.kind_code(h1demo.make_dict()))\n",
+        "print(h1demo.cancel_builder())\n",
     );
     for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
         let (vm, output) = run(&module, source, mode);
-        assert_eq!(output, "42\n102334155\ntonic-hpy\n3\n42\n<module>\n7\n");
+        assert_eq!(
+            output,
+            concat!(
+                "42\n102334155\ntonic-hpy\n3\n42\n<module>\n7\n",
+                "[1, 2, 3, 4]\n(5, 6)\n(7, 8)\n{}\n1\n2\n4\n9\n"
+            )
+        );
         assert_eq!(vm.active_handles(), 0);
     }
 }
@@ -148,6 +170,8 @@ fn hpy_exception_state_and_failure_cleanup_are_guest_visible() {
         ("h1demo.use_after_close(1)", "HandleError"),
         ("h1demo.null_without_error()", "SystemError"),
         ("h1demo.result_with_error()", "SystemError"),
+        ("h1demo.incomplete_builder()", "SystemError"),
+        ("h1demo.leak_builder()", "HandleError"),
     ] {
         let mut vm = Vm::new().unwrap();
         module.register(&mut vm).unwrap();
@@ -303,6 +327,92 @@ static HPy result_with_error_impl(HPyContext *ctx, HPy self) {
     return HPyLong_FromInt64_t(ctx, 1);
 }
 
+HPyDef_METH(make_list, "make_list", HPyFunc_NOARGS)
+static HPy make_list_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyListBuilder builder = HPyListBuilder_New(ctx, 3);
+    for (int64_t i = 0; i < 3; i++) {
+        HPy item = HPyLong_FromInt64_t(ctx, i + 1);
+        if (HPy_IsNull(item)) { HPyListBuilder_Cancel(ctx, builder); return HPy_NULL; }
+        HPyListBuilder_Set(ctx, builder, (HPy_ssize_t)i, item);
+        HPy_Close(ctx, item);
+    }
+    HPy list = HPyListBuilder_Build(ctx, builder);
+    if (HPy_IsNull(list)) return HPy_NULL;
+    HPy item = HPyLong_FromInt64_t(ctx, 4);
+    if (HPy_IsNull(item) || HPyList_Append(ctx, list, item) < 0) {
+        HPy_Close(ctx, item);
+        HPy_Close(ctx, list);
+        return HPy_NULL;
+    }
+    HPy_Close(ctx, item);
+    return list;
+}
+
+HPyDef_METH(make_tuple, "make_tuple", HPyFunc_NOARGS)
+static HPy make_tuple_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPy items[2] = { HPyLong_FromInt64_t(ctx, 5), HPyLong_FromInt64_t(ctx, 6) };
+    if (HPy_IsNull(items[0]) || HPy_IsNull(items[1])) return HPy_NULL;
+    HPy tuple = HPyTuple_FromArray(ctx, items, 2);
+    HPy_Close(ctx, items[0]);
+    HPy_Close(ctx, items[1]);
+    return tuple;
+}
+
+HPyDef_METH(make_tuple_builder, "make_tuple_builder", HPyFunc_NOARGS)
+static HPy make_tuple_builder_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTupleBuilder builder = HPyTupleBuilder_New(ctx, 2);
+    HPy first = HPyLong_FromInt64_t(ctx, 7);
+    HPy second = HPyLong_FromInt64_t(ctx, 8);
+    if (HPy_IsNull(first) || HPy_IsNull(second)) {
+        HPyTupleBuilder_Cancel(ctx, builder);
+        return HPy_NULL;
+    }
+    HPyTupleBuilder_Set(ctx, builder, 0, first);
+    HPyTupleBuilder_Set(ctx, builder, 1, second);
+    HPy_Close(ctx, first);
+    HPy_Close(ctx, second);
+    return HPyTupleBuilder_Build(ctx, builder);
+}
+
+HPyDef_METH(make_dict, "make_dict", HPyFunc_NOARGS)
+static HPy make_dict_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    return HPyDict_New(ctx);
+}
+
+HPyDef_METH(kind_code, "kind_code", HPyFunc_O)
+static HPy kind_code_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    int code = HPyList_Check(ctx, value) + 2 * HPyTuple_Check(ctx, value)
+        + 4 * HPyDict_Check(ctx, value);
+    return HPyLong_FromInt64_t(ctx, code);
+}
+
+HPyDef_METH(cancel_builder, "cancel_builder", HPyFunc_NOARGS)
+static HPy cancel_builder_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyListBuilder builder = HPyListBuilder_New(ctx, 1);
+    HPyListBuilder_Cancel(ctx, builder);
+    return HPyLong_FromInt64_t(ctx, 9);
+}
+
+HPyDef_METH(incomplete_builder, "incomplete_builder", HPyFunc_NOARGS)
+static HPy incomplete_builder_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTupleBuilder builder = HPyTupleBuilder_New(ctx, 1);
+    return HPyTupleBuilder_Build(ctx, builder);
+}
+
+HPyDef_METH(leak_builder, "leak_builder", HPyFunc_NOARGS)
+static HPy leak_builder_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    (void)HPyListBuilder_New(ctx, 1);
+    return HPyLong_FromInt64_t(ctx, 10);
+}
+
 static HPyDef *module_defines[] = {
     &constant,
     &fib,
@@ -316,6 +426,14 @@ static HPyDef *module_defines[] = {
     &use_after_close,
     &null_without_error,
     &result_with_error,
+    &make_list,
+    &make_tuple,
+    &make_tuple_builder,
+    &make_dict,
+    &kind_code,
+    &cancel_builder,
+    &incomplete_builder,
+    &leak_builder,
     NULL,
 };
 

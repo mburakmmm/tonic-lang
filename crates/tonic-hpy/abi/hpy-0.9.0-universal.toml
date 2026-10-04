@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h1-minimal-context"
+implementation_status = "h2a-container-builders"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -34,6 +34,21 @@ implemented_functions = [
   "HPyErr_SetString",
   "HPyErr_Occurred",
   "HPyErr_Clear",
+  "HPyList_Check",
+  "HPyList_New",
+  "HPyList_Append",
+  "HPyDict_Check",
+  "HPyDict_New",
+  "HPyTuple_Check",
+  "HPyTuple_FromArray",
+  "HPyListBuilder_New",
+  "HPyListBuilder_Set",
+  "HPyListBuilder_Build",
+  "HPyListBuilder_Cancel",
+  "HPyTupleBuilder_New",
+  "HPyTupleBuilder_Set",
+  "HPyTupleBuilder_Build",
+  "HPyTupleBuilder_Cancel",
 ]
 planned_h1_functions = [
   "HPy_Dup",
@@ -46,6 +61,10 @@ planned_h1_functions = [
   "HPyErr_Occurred",
   "HPyErr_Clear",
 ]
+
+[limitations]
+list_new = "size 0 only; fixed-size construction uses HPyListBuilder"
+module_method_signatures = ["HPyFunc_NOARGS", "HPyFunc_O"]
 
 [module_symbols]
 required_major_prefix = "get_required_hpy_major_version_"
@@ -96,7 +115,7 @@ state = "available"
 [[capabilities]]
 id = "containers-builders"
 planned_milestone = "H2"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "attributes-items-calls"

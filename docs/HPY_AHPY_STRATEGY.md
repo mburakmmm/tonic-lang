@@ -186,6 +186,17 @@ aHPy veya handwritten fib extension
 - error indicator, raise/fetch/match ve failure cleanup;
 - normal, stress-GC ve invalid-handle testleri.
 
+H2a container alt aşaması tamamlanmıştır. List/tuple/dict exact-check ve
+constructor'ları, list append, tuple-from-array ve fixed-size list/tuple
+builder lifecycle'ı context'e eklenmiştir. Builder token'ları local handle'lardan
+ayrı izlenir; yanlış tür/index, eksik slot, stale kullanım ve build/cancel
+edilmeden dönüş deterministic guest hatası üretir. `HPyList_New` yalnız size
+zero kabul eder; sabit boyutlu listeler builder ile kurulur ve böylece Tonic
+heap'ine gözlemlenebilir yarım container girmez. Gerçek Universal fixture bu
+yüzeyi interpreter ve JIT caller yollarında sınar. Ayrıntı
+[ADR 0098](adr/0098-hpy-container-builders.md) içindedir. Attr/item/call ve
+keyword binder tamamlanmadan H2 ana kapısı açık kalır.
+
 ### H3 — Global, field ve moving GC
 
 - `HPyGlobal` per-runtime persistent state;

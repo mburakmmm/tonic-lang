@@ -340,6 +340,9 @@ sonra alınır.
   - [x] Local `HPy`, `HPy_Dup`/`HPy_Close`, sayı/Unicode, module init ve exception
     state; stale/cross-runtime/failure cleanup testleri.
   - [ ] List/tuple/dict builders, attr/item/call yüzeyi ve keyword binder eşlemesi.
+    - [x] List/tuple/dict constructor ve exact-check yüzeyi; fixed-size list/tuple
+      builder build/cancel, eksik/leaked/stale builder denetimi.
+    - [ ] Attr/item/call yüzeyi, dict mutation ve keyword binder eşlemesi.
   - [ ] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
     moving-GC altında field/global cycle testi.
   - [ ] Pure `HPyType_Spec`, native payload, methods/slots/inheritance, trace,

@@ -600,16 +600,25 @@ impl<'a> Context<'a> {
         };
         Ok((self.local(key)?, self.local(value)?))
     }
-    pub(crate) fn new_list(&mut self) -> Result<Handle> {
+    pub fn is_list(&self, handle: Handle) -> Result<bool> {
+        Ok(self.value_kind(handle)? == ValueKind::List)
+    }
+    pub fn is_tuple(&self, handle: Handle) -> Result<bool> {
+        Ok(self.value_kind(handle)? == ValueKind::Tuple)
+    }
+    pub fn is_dict(&self, handle: Handle) -> Result<bool> {
+        Ok(self.value_kind(handle)? == ValueKind::Dict)
+    }
+    pub fn new_list(&mut self) -> Result<Handle> {
         let value = self.vm.heap.alloc(Object::List(Vec::new()))?;
         self.local(value)
     }
-    pub(crate) fn list_append(&mut self, list: Handle, item: Handle) -> Result<()> {
+    pub fn list_append(&mut self, list: Handle, item: Handle) -> Result<()> {
         let list = self.resolve(list)?;
         let item = self.resolve(item)?;
         self.vm.heap.append_list(list, item)
     }
-    pub(crate) fn new_tuple(&mut self, items: &[Handle]) -> Result<Handle> {
+    pub fn new_tuple(&mut self, items: &[Handle]) -> Result<Handle> {
         let items = items
             .iter()
             .map(|item| self.resolve(*item))
@@ -617,14 +626,14 @@ impl<'a> Context<'a> {
         let value = self.vm.heap.alloc(Object::Tuple(items))?;
         self.local(value)
     }
-    pub(crate) fn new_dict(&mut self) -> Result<Handle> {
+    pub fn new_dict(&mut self) -> Result<Handle> {
         let value = self
             .vm
             .heap
             .alloc(Object::Dict(crate::dict::Dict::default()))?;
         self.local(value)
     }
-    pub(crate) fn dict_set(&mut self, dict: Handle, key: Handle, value: Handle) -> Result<()> {
+    pub fn dict_set(&mut self, dict: Handle, key: Handle, value: Handle) -> Result<()> {
         let dict = self.resolve(dict)?;
         let key = self.resolve(key)?;
         let value = self.resolve(value)?;

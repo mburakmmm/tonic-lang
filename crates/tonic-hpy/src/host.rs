@@ -18,6 +18,7 @@ use tonic_core::diagnostic::{Diagnostic, Result as TonicResult};
 use tonic_runtime::{Context, Handle, StatefulNativeFn, Vm};
 
 const MAX_DEFINITIONS: usize = 4_096;
+const MAX_CONTAINER_ITEMS: usize = 1_048_576;
 const HPY_DEF_KIND_METHOD: c_int = 2;
 const HPY_FUNC_VARARGS: c_int = 1;
 const HPY_FUNC_KEYWORDS: c_int = 2;
@@ -34,6 +35,21 @@ const SLOT_ERR_OCCURRED: usize = 141;
 const SLOT_ERR_CLEAR: usize = 144;
 const SLOT_UNICODE_FROM_STRING: usize = 185;
 const SLOT_UNICODE_AS_UTF8_AND_SIZE: usize = 190;
+const SLOT_LIST_CHECK: usize = 198;
+const SLOT_LIST_NEW: usize = 199;
+const SLOT_LIST_APPEND: usize = 200;
+const SLOT_DICT_CHECK: usize = 201;
+const SLOT_DICT_NEW: usize = 202;
+const SLOT_TUPLE_CHECK: usize = 203;
+const SLOT_TUPLE_FROM_ARRAY: usize = 204;
+const SLOT_LIST_BUILDER_NEW: usize = 209;
+const SLOT_LIST_BUILDER_SET: usize = 210;
+const SLOT_LIST_BUILDER_BUILD: usize = 211;
+const SLOT_LIST_BUILDER_CANCEL: usize = 212;
+const SLOT_TUPLE_BUILDER_NEW: usize = 213;
+const SLOT_TUPLE_BUILDER_SET: usize = 214;
+const SLOT_TUPLE_BUILDER_BUILD: usize = 215;
+const SLOT_TUPLE_BUILDER_CANCEL: usize = 216;
 
 const HANDLE_NONE: usize = 0;
 const HANDLE_TRUE: usize = 1;
@@ -45,10 +61,17 @@ const FIRST_LATE_HANDLE: usize = 238;
 const LAST_LATE_HANDLE: usize = 243;
 
 static NEXT_LOCAL_HANDLE: AtomicUsize = AtomicUsize::new(1);
+static NEXT_BUILDER: AtomicUsize = AtomicUsize::new(1);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Hpy {
+    bits: isize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HpyBuilder {
     bits: isize,
 }
 
@@ -104,6 +127,21 @@ impl HpyContext {
         context.slots[SLOT_ERR_CLEAR] = hpy_err_clear as usize;
         context.slots[SLOT_UNICODE_FROM_STRING] = hpy_unicode_from_string as usize;
         context.slots[SLOT_UNICODE_AS_UTF8_AND_SIZE] = hpy_unicode_as_utf8_and_size as usize;
+        context.slots[SLOT_LIST_CHECK] = hpy_list_check as usize;
+        context.slots[SLOT_LIST_NEW] = hpy_list_new as usize;
+        context.slots[SLOT_LIST_APPEND] = hpy_list_append as usize;
+        context.slots[SLOT_DICT_CHECK] = hpy_dict_check as usize;
+        context.slots[SLOT_DICT_NEW] = hpy_dict_new as usize;
+        context.slots[SLOT_TUPLE_CHECK] = hpy_tuple_check as usize;
+        context.slots[SLOT_TUPLE_FROM_ARRAY] = hpy_tuple_from_array as usize;
+        context.slots[SLOT_LIST_BUILDER_NEW] = hpy_list_builder_new as usize;
+        context.slots[SLOT_LIST_BUILDER_SET] = hpy_list_builder_set as usize;
+        context.slots[SLOT_LIST_BUILDER_BUILD] = hpy_list_builder_build as usize;
+        context.slots[SLOT_LIST_BUILDER_CANCEL] = hpy_list_builder_cancel as usize;
+        context.slots[SLOT_TUPLE_BUILDER_NEW] = hpy_tuple_builder_new as usize;
+        context.slots[SLOT_TUPLE_BUILDER_SET] = hpy_tuple_builder_set as usize;
+        context.slots[SLOT_TUPLE_BUILDER_BUILD] = hpy_tuple_builder_build as usize;
+        context.slots[SLOT_TUPLE_BUILDER_CANCEL] = hpy_tuple_builder_cancel as usize;
         context
     }
 }
@@ -395,6 +433,7 @@ struct CallState {
     hpy_context: *mut HpyContext,
     handles: HashMap<isize, Handle>,
     utf8: HashMap<isize, Box<[u8]>>,
+    builders: HashMap<isize, BuilderState>,
     exception: Option<Diagnostic>,
 }
 
@@ -405,6 +444,7 @@ impl CallState {
             hpy_context,
             handles: HashMap::new(),
             utf8: HashMap::new(),
+            builders: HashMap::new(),
             exception: None,
         }
     }
@@ -470,7 +510,88 @@ impl CallState {
         fallback
     }
 
+    fn new_builder(&mut self, size: isize, kind: BuilderKind) -> TonicResult<HpyBuilder> {
+        let size = usize::try_from(size)
+            .map_err(|_| Diagnostic::new("ValueError", "HPy builder size cannot be negative"))?;
+        if size > MAX_CONTAINER_ITEMS {
+            return Err(Diagnostic::new(
+                "OverflowError",
+                "HPy builder exceeds the container item limit",
+            ));
+        }
+        let token = NEXT_BUILDER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current
+                    .checked_add(1)
+                    .filter(|next| *next <= isize::MAX as usize)
+            })
+            .map_err(|_| Diagnostic::new("HandleError", "HPy builder token space exhausted"))?
+            as isize;
+        self.builders.insert(
+            token,
+            BuilderState {
+                kind,
+                items: vec![None; size],
+            },
+        );
+        Ok(HpyBuilder { bits: token })
+    }
+
+    fn set_builder_item(
+        &mut self,
+        builder: HpyBuilder,
+        index: isize,
+        item: Hpy,
+        kind: BuilderKind,
+    ) -> TonicResult<()> {
+        let item = self.resolve(item)?;
+        let index = usize::try_from(index)
+            .map_err(|_| Diagnostic::new("IndexError", "HPy builder index is negative"))?;
+        let state = self
+            .builders
+            .get_mut(&builder.bits)
+            .ok_or_else(|| Diagnostic::new("HandleError", "stale HPy builder"))?;
+        if state.kind != kind {
+            return Err(Diagnostic::new("HandleError", "HPy builder kind mismatch"));
+        }
+        let slot = state
+            .items
+            .get_mut(index)
+            .ok_or_else(|| Diagnostic::new("IndexError", "HPy builder index out of range"))?;
+        *slot = Some(item);
+        Ok(())
+    }
+
+    fn take_builder(&mut self, builder: HpyBuilder, kind: BuilderKind) -> TonicResult<Vec<Handle>> {
+        let state = self
+            .builders
+            .remove(&builder.bits)
+            .ok_or_else(|| Diagnostic::new("HandleError", "stale HPy builder"))?;
+        if state.kind != kind {
+            return Err(Diagnostic::new("HandleError", "HPy builder kind mismatch"));
+        }
+        state
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                item.ok_or_else(|| {
+                    Diagnostic::new(
+                        "SystemError",
+                        format!("HPy builder item {index} was not initialized"),
+                    )
+                })
+            })
+            .collect()
+    }
+
     fn finish(&mut self, result: Hpy) -> TonicResult<Handle> {
+        if !self.builders.is_empty() && self.exception.is_none() {
+            return Err(Diagnostic::new(
+                "HandleError",
+                "HPy method leaked an unfinished builder",
+            ));
+        }
         match (result == Hpy::NULL, self.exception.take()) {
             (true, Some(error)) => Err(error),
             (true, None) => Err(Diagnostic::new(
@@ -487,6 +608,17 @@ impl CallState {
             (false, None) => self.resolve(result),
         }
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BuilderKind {
+    List,
+    Tuple,
+}
+
+struct BuilderState {
+    kind: BuilderKind,
+    items: Vec<Option<Handle>>,
 }
 
 thread_local! {
@@ -698,6 +830,262 @@ unsafe extern "C" fn hpy_err_clear(context: *mut HpyContext) {
     // SAFETY: the extension must pass the active context it received.
     if let Some(call) = unsafe { active_call(context) } {
         call.exception = None;
+    }
+}
+
+unsafe extern "C" fn hpy_list_check(context: *mut HpyContext, handle: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result = call.resolve(handle).and_then(|handle| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &*call.context }.is_list(handle)
+    });
+    match result {
+        Ok(value) => c_int::from(value),
+        Err(error) => call.fail(error, 0),
+    }
+}
+
+unsafe extern "C" fn hpy_list_new(context: *mut HpyContext, size: isize) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    if size != 0 {
+        return call.fail(
+            Diagnostic::new(
+                "NotImplementedError",
+                "HPyList_New currently requires size 0; use HPyListBuilder",
+            ),
+            Hpy::NULL,
+        );
+    }
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.new_list();
+    match result.and_then(|handle| call.insert(handle)) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_list_append(context: *mut HpyContext, list: Hpy, item: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = call
+        .resolve(list)
+        .and_then(|list| call.resolve(item).map(|item| (list, item)))
+        .and_then(|(list, item)| {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }.list_append(list, item)
+        });
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_dict_check(context: *mut HpyContext, handle: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result = call.resolve(handle).and_then(|handle| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &*call.context }.is_dict(handle)
+    });
+    match result {
+        Ok(value) => c_int::from(value),
+        Err(error) => call.fail(error, 0),
+    }
+}
+
+unsafe extern "C" fn hpy_dict_new(context: *mut HpyContext) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.new_dict();
+    match result.and_then(|handle| call.insert(handle)) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_check(context: *mut HpyContext, handle: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result = call.resolve(handle).and_then(|handle| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &*call.context }.is_tuple(handle)
+    });
+    match result {
+        Ok(value) => c_int::from(value),
+        Err(error) => call.fail(error, 0),
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_from_array(
+    context: *mut HpyContext,
+    items: *const Hpy,
+    count: isize,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let count = match usize::try_from(count) {
+        Ok(count) if count <= MAX_CONTAINER_ITEMS => count,
+        _ => {
+            return call.fail(
+                Diagnostic::new("ValueError", "invalid HPy tuple item count"),
+                Hpy::NULL,
+            )
+        }
+    };
+    if items.is_null() && count != 0 {
+        return call.fail(
+            Diagnostic::new("SystemError", "HPy tuple item array is null"),
+            Hpy::NULL,
+        );
+    }
+    let items = if count == 0 {
+        &[]
+    } else {
+        // SAFETY: HPy requires `items` to reference `count` readable handles.
+        unsafe { std::slice::from_raw_parts(items, count) }
+    };
+    let items = match items
+        .iter()
+        .copied()
+        .map(|item| call.resolve(item))
+        .collect::<TonicResult<Vec<_>>>()
+    {
+        Ok(items) => items,
+        Err(error) => return call.fail(error, Hpy::NULL),
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.new_tuple(&items);
+    match result.and_then(|handle| call.insert(handle)) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_list_builder_new(context: *mut HpyContext, size: isize) -> HpyBuilder {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return HpyBuilder { bits: 0 };
+    };
+    match call.new_builder(size, BuilderKind::List) {
+        Ok(builder) => builder,
+        Err(error) => call.fail(error, HpyBuilder { bits: 0 }),
+    }
+}
+
+unsafe extern "C" fn hpy_list_builder_set(
+    context: *mut HpyContext,
+    builder: HpyBuilder,
+    index: isize,
+    item: Hpy,
+) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        if let Err(error) = call.set_builder_item(builder, index, item, BuilderKind::List) {
+            call.fail(error, ());
+        }
+    }
+}
+
+unsafe extern "C" fn hpy_list_builder_build(context: *mut HpyContext, builder: HpyBuilder) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let items = match call.take_builder(builder, BuilderKind::List) {
+        Ok(items) => items,
+        Err(error) => return call.fail(error, Hpy::NULL),
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let context = unsafe { &mut *call.context };
+    let list = match context.new_list() {
+        Ok(list) => list,
+        Err(error) => return call.fail(error, Hpy::NULL),
+    };
+    for item in items {
+        if let Err(error) = context.list_append(list, item) {
+            return call.fail(error, Hpy::NULL);
+        }
+    }
+    match call.insert(list) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_list_builder_cancel(context: *mut HpyContext, builder: HpyBuilder) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        if call.builders.remove(&builder.bits).is_none() {
+            call.fail(Diagnostic::new("HandleError", "stale HPy builder"), ());
+        }
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_builder_new(context: *mut HpyContext, size: isize) -> HpyBuilder {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return HpyBuilder { bits: 0 };
+    };
+    match call.new_builder(size, BuilderKind::Tuple) {
+        Ok(builder) => builder,
+        Err(error) => call.fail(error, HpyBuilder { bits: 0 }),
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_builder_set(
+    context: *mut HpyContext,
+    builder: HpyBuilder,
+    index: isize,
+    item: Hpy,
+) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        if let Err(error) = call.set_builder_item(builder, index, item, BuilderKind::Tuple) {
+            call.fail(error, ());
+        }
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_builder_build(context: *mut HpyContext, builder: HpyBuilder) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let items = match call.take_builder(builder, BuilderKind::Tuple) {
+        Ok(items) => items,
+        Err(error) => return call.fail(error, Hpy::NULL),
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.new_tuple(&items);
+    match result.and_then(|handle| call.insert(handle)) {
+        Ok(handle) => handle,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_tuple_builder_cancel(context: *mut HpyContext, builder: HpyBuilder) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        if call.builders.remove(&builder.bits).is_none() {
+            call.fail(Diagnostic::new("HandleError", "stale HPy builder"), ());
+        }
     }
 }
 
