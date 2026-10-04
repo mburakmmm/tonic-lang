@@ -31,5 +31,5 @@ kullanır.
 
 Yarım container Tonic heap'ine girmez ve builder lifetime çağrı scope'unu
 aşamaz. Builder içindeki Tonic handle'ları native `Context` tarafından köklenir;
-build sonrası normal moving-GC kuralları geçerlidir. Attr/item/call ve keyword
-binder H2'nin sonraki alt aşaması olarak açık kalır.
+build sonrası normal moving-GC kuralları geçerlidir. Sonraki attr/item/call ve
+keyword binder alt aşaması [ADR 0099](0099-hpy-object-calls.md) ile tamamlanmıştır.

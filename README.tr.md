@@ -103,7 +103,7 @@ kapsamından geniştir. Hiçbir Python sürümüne tam conformance sözü verilm
 
 ## Doğrulama
 
-Güncel yerel matris 374 Rust testi ile 332 stdout ve 261 exception türü
+Güncel yerel matris 389 Rust testi ile 332 stdout ve 261 exception türü
 diferansiyel vakasını debug/release × interpreter/JIT × normal/stress-GC
 modlarında çalıştırır. CI ayrıca JIT'i Linux x86-64 ve macOS AArch64 üzerinde
 debug/release olarak, iki fuzz hedefini de her iki mimaride AddressSanitizer ile
@@ -149,7 +149,10 @@ dosyasındadır. Bunlar tamamlanma sonrası alınacak nihai benchmark değildir.
 
 HPy Universal host ve aHPy geliştirme sırası, kabul kapıları ve dürüst paket
 uyumluluğu sınırları [HPY_AHPY_STRATEGY.md](docs/HPY_AHPY_STRATEGY.md) içinde
-tanımlanmıştır. Bu bir uygulama planıdır; mevcut sürüm `.hpy0` yüklemez.
+tanımlanmıştır. Mevcut izole host, libpython olmadan sınırları açıkça belirtilmiş
+HPy 0.9 `.hpy0` modüllerini; scoped handle, scalar/container, attribute/item ve
+positional/keyword çağrı yüzeyiyle yükler. Global/field/type/buffer, Debug/Trace
+context ve aHPy paket hattı hâlâ yol haritasındadır.
 
 ## Mimari ve sınırlar
 

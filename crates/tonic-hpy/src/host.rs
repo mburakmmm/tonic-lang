@@ -15,7 +15,7 @@ use std::{
     },
 };
 use tonic_core::diagnostic::{Diagnostic, Result as TonicResult};
-use tonic_runtime::{Context, Handle, StatefulNativeFn, Vm};
+use tonic_runtime::{Context, Handle, StatefulKeywordNativeFn, StatefulNativeSignature, Vm};
 
 const MAX_DEFINITIONS: usize = 4_096;
 const MAX_CONTAINER_ITEMS: usize = 1_048_576;
@@ -25,6 +25,7 @@ const HPY_FUNC_KEYWORDS: c_int = 2;
 const HPY_FUNC_NOARGS: c_int = 3;
 const HPY_FUNC_O: c_int = 4;
 const CONTEXT_NAME: &[u8] = b"Tonic HPy 0.9 Universal\0";
+type VectorArguments = (Vec<Handle>, Vec<(String, Handle)>);
 
 const SLOT_DUP: usize = 77;
 const SLOT_CLOSE: usize = 78;
@@ -35,6 +36,23 @@ const SLOT_ERR_OCCURRED: usize = 141;
 const SLOT_ERR_CLEAR: usize = 144;
 const SLOT_UNICODE_FROM_STRING: usize = 185;
 const SLOT_UNICODE_AS_UTF8_AND_SIZE: usize = 190;
+const SLOT_LENGTH: usize = 98;
+const SLOT_CALLABLE_CHECK: usize = 134;
+const SLOT_CALL_TUPLE_DICT: usize = 135;
+const SLOT_GET_ATTR: usize = 152;
+const SLOT_GET_ATTR_S: usize = 153;
+const SLOT_HAS_ATTR: usize = 154;
+const SLOT_HAS_ATTR_S: usize = 155;
+const SLOT_SET_ATTR: usize = 156;
+const SLOT_SET_ATTR_S: usize = 157;
+const SLOT_GET_ITEM: usize = 158;
+const SLOT_GET_ITEM_I: usize = 159;
+const SLOT_GET_ITEM_S: usize = 160;
+const SLOT_CONTAINS: usize = 161;
+const SLOT_SET_ITEM: usize = 162;
+const SLOT_SET_ITEM_I: usize = 163;
+const SLOT_SET_ITEM_S: usize = 164;
+const SLOT_REPR: usize = 171;
 const SLOT_LIST_CHECK: usize = 198;
 const SLOT_LIST_NEW: usize = 199;
 const SLOT_LIST_APPEND: usize = 200;
@@ -50,6 +68,11 @@ const SLOT_TUPLE_BUILDER_NEW: usize = 213;
 const SLOT_TUPLE_BUILDER_SET: usize = 214;
 const SLOT_TUPLE_BUILDER_BUILD: usize = 215;
 const SLOT_TUPLE_BUILDER_CANCEL: usize = 216;
+const SLOT_DEL_ITEM: usize = 235;
+const SLOT_DEL_ITEM_I: usize = 236;
+const SLOT_DEL_ITEM_S: usize = 237;
+const SLOT_CALL: usize = 261;
+const SLOT_CALL_METHOD: usize = 262;
 
 const HANDLE_NONE: usize = 0;
 const HANDLE_TRUE: usize = 1;
@@ -94,7 +117,7 @@ struct HpyContext {
     name: *const c_char,
     private: *mut c_void,
     abi_version: c_int,
-    slots: [usize; 261],
+    slots: [usize; 263],
 }
 
 // SAFETY: after construction the context and all slot values are immutable.
@@ -110,7 +133,7 @@ impl HpyContext {
             name: CONTEXT_NAME.as_ptr().cast(),
             private: ptr::null_mut(),
             abi_version: UNIVERSAL_ABI.major as c_int,
-            slots: [0; 261],
+            slots: [0; 263],
         });
         for slot in 0..=LAST_CORE_TYPE {
             context.slots[slot] = Hpy::special(slot).bits as usize;
@@ -127,6 +150,23 @@ impl HpyContext {
         context.slots[SLOT_ERR_CLEAR] = hpy_err_clear as usize;
         context.slots[SLOT_UNICODE_FROM_STRING] = hpy_unicode_from_string as usize;
         context.slots[SLOT_UNICODE_AS_UTF8_AND_SIZE] = hpy_unicode_as_utf8_and_size as usize;
+        context.slots[SLOT_LENGTH] = hpy_length as usize;
+        context.slots[SLOT_CALLABLE_CHECK] = hpy_callable_check as usize;
+        context.slots[SLOT_CALL_TUPLE_DICT] = hpy_call_tuple_dict as usize;
+        context.slots[SLOT_GET_ATTR] = hpy_get_attr as usize;
+        context.slots[SLOT_GET_ATTR_S] = hpy_get_attr_s as usize;
+        context.slots[SLOT_HAS_ATTR] = hpy_has_attr as usize;
+        context.slots[SLOT_HAS_ATTR_S] = hpy_has_attr_s as usize;
+        context.slots[SLOT_SET_ATTR] = hpy_set_attr as usize;
+        context.slots[SLOT_SET_ATTR_S] = hpy_set_attr_s as usize;
+        context.slots[SLOT_GET_ITEM] = hpy_get_item as usize;
+        context.slots[SLOT_GET_ITEM_I] = hpy_get_item_i as usize;
+        context.slots[SLOT_GET_ITEM_S] = hpy_get_item_s as usize;
+        context.slots[SLOT_CONTAINS] = hpy_contains as usize;
+        context.slots[SLOT_SET_ITEM] = hpy_set_item as usize;
+        context.slots[SLOT_SET_ITEM_I] = hpy_set_item_i as usize;
+        context.slots[SLOT_SET_ITEM_S] = hpy_set_item_s as usize;
+        context.slots[SLOT_REPR] = hpy_repr as usize;
         context.slots[SLOT_LIST_CHECK] = hpy_list_check as usize;
         context.slots[SLOT_LIST_NEW] = hpy_list_new as usize;
         context.slots[SLOT_LIST_APPEND] = hpy_list_append as usize;
@@ -142,6 +182,11 @@ impl HpyContext {
         context.slots[SLOT_TUPLE_BUILDER_SET] = hpy_tuple_builder_set as usize;
         context.slots[SLOT_TUPLE_BUILDER_BUILD] = hpy_tuple_builder_build as usize;
         context.slots[SLOT_TUPLE_BUILDER_CANCEL] = hpy_tuple_builder_cancel as usize;
+        context.slots[SLOT_DEL_ITEM] = hpy_del_item as usize;
+        context.slots[SLOT_DEL_ITEM_I] = hpy_del_item_i as usize;
+        context.slots[SLOT_DEL_ITEM_S] = hpy_del_item_s as usize;
+        context.slots[SLOT_CALL] = hpy_call as usize;
+        context.slots[SLOT_CALL_METHOD] = hpy_call_method as usize;
         context
     }
 }
@@ -182,13 +227,17 @@ struct Method {
 enum MethodSignature {
     NoArgs,
     OneArg,
+    VarArgs,
+    Keywords,
 }
 
 impl MethodSignature {
-    const fn arity(self) -> usize {
+    const fn native_signature(self) -> StatefulNativeSignature {
         match self {
-            Self::NoArgs => 0,
-            Self::OneArg => 1,
+            Self::NoArgs => StatefulNativeSignature::Exact(0),
+            Self::OneArg => StatefulNativeSignature::Exact(1),
+            Self::VarArgs => StatefulNativeSignature::VarArgs,
+            Self::Keywords => StatefulNativeSignature::Keywords,
         }
     }
 }
@@ -218,7 +267,7 @@ impl fmt::Debug for UniversalModule {
 }
 
 impl UniversalModule {
-    /// Load, validate and materialize the H1 HPy module surface.
+    /// Load, validate and materialize the supported HPy module surface.
     ///
     /// # Safety
     ///
@@ -271,13 +320,14 @@ impl UniversalModule {
             let state = Arc::clone(&self.state);
             let method = &state.methods[index];
             let method_name = method.name.clone();
-            let arity = method.signature.arity();
-            let callback: Arc<StatefulNativeFn> = Arc::new(move |context, arguments| {
-                invoke_method(&state, index, context, arguments)
-            });
-            methods.push((method_name, arity, callback));
+            let signature = method.signature.native_signature();
+            let callback: Arc<StatefulKeywordNativeFn> =
+                Arc::new(move |context, arguments, keywords| {
+                    invoke_method(&state, index, context, arguments, keywords)
+                });
+            methods.push((method_name, signature, callback));
         }
-        vm.register_stateful_module(&self.state.module_name, methods)?;
+        vm.register_stateful_keyword_module(&self.state.module_name, methods)?;
         Ok(())
     }
 }
@@ -288,7 +338,7 @@ unsafe fn parse_module_definition(definition: NonNull<c_void>) -> Result<Vec<Met
     let definition = unsafe { &*definition.cast::<HpyModuleDef>().as_ptr() };
     if definition.size != 0 {
         return Err(HostError::Module(
-            "H1 modules cannot declare per-module C state".into(),
+            "HPy module C state is unavailable before milestone H3".into(),
         ));
     }
     if !definition.legacy_methods.is_null() {
@@ -335,11 +385,8 @@ unsafe fn parse_module_definition(definition: NonNull<c_void>) -> Result<Vec<Met
         let signature = match method.signature {
             HPY_FUNC_NOARGS => MethodSignature::NoArgs,
             HPY_FUNC_O => MethodSignature::OneArg,
-            HPY_FUNC_VARARGS | HPY_FUNC_KEYWORDS => {
-                return Err(HostError::Module(format!(
-                    "HPy method '{name}' uses an H2 argument signature"
-                )));
-            }
+            HPY_FUNC_VARARGS => MethodSignature::VarArgs,
+            HPY_FUNC_KEYWORDS => MethodSignature::Keywords,
             signature => {
                 return Err(HostError::Module(format!(
                     "HPy method '{name}' uses unsupported signature {signature}"
@@ -377,6 +424,7 @@ fn invoke_method(
     method_index: usize,
     context: &mut Context<'_>,
     arguments: &[Handle],
+    keywords: &[(String, Handle)],
 ) -> TonicResult<Handle> {
     let _lock = state
         .call_lock
@@ -389,7 +437,7 @@ fn invoke_method(
     if ACTIVE_CALL.with(|active| !active.get().is_null()) {
         return Err(Diagnostic::new(
             "RuntimeError",
-            "nested HPy calls are unavailable in milestone H1",
+            "nested HPy calls are unavailable before the H5 execution-state boundary",
         ));
     }
 
@@ -401,6 +449,27 @@ fn invoke_method(
         .copied()
         .map(|argument| call.insert(argument))
         .collect::<TonicResult<Vec<_>>>()?;
+    let mut h_arguments = h_arguments;
+    h_arguments.extend(
+        keywords
+            .iter()
+            .map(|(_, argument)| call.insert(*argument))
+            .collect::<TonicResult<Vec<_>>>()?,
+    );
+    let h_keyword_names = if keywords.is_empty() {
+        Hpy::NULL
+    } else {
+        let names = keywords
+            .iter()
+            .map(|(name, _)| {
+                // SAFETY: call lifetime keeps the erased context valid.
+                unsafe { &mut *call.context }.from_str(name)
+            })
+            .collect::<TonicResult<Vec<_>>>()?;
+        // SAFETY: call lifetime keeps the erased context valid.
+        let tuple = unsafe { &mut *call.context }.new_tuple(&names)?;
+        call.insert(tuple)?
+    };
     let _active = ActiveCallGuard::enter(&mut call)?;
     let result = match method.signature {
         MethodSignature::NoArgs => {
@@ -421,6 +490,36 @@ fn invoke_method(
                     ptr::from_ref(state.context.as_ref()).cast_mut(),
                     h_self,
                     h_arguments[0],
+                )
+            }
+        }
+        MethodSignature::VarArgs => {
+            type Function = unsafe extern "C" fn(*mut HpyContext, Hpy, *const Hpy, usize) -> Hpy;
+            // SAFETY: module parsing validated HPyFunc_VARARGS.
+            let function: Function = unsafe { std::mem::transmute(method.implementation) };
+            // SAFETY: the argument array remains live and keywords were rejected by the VM.
+            unsafe {
+                function(
+                    ptr::from_ref(state.context.as_ref()).cast_mut(),
+                    h_self,
+                    h_arguments.as_ptr(),
+                    arguments.len(),
+                )
+            }
+        }
+        MethodSignature::Keywords => {
+            type Function =
+                unsafe extern "C" fn(*mut HpyContext, Hpy, *const Hpy, usize, Hpy) -> Hpy;
+            // SAFETY: module parsing validated HPyFunc_KEYWORDS.
+            let function: Function = unsafe { std::mem::transmute(method.implementation) };
+            // SAFETY: positional and keyword arrays remain live for the native call.
+            unsafe {
+                function(
+                    ptr::from_ref(state.context.as_ref()).cast_mut(),
+                    h_self,
+                    h_arguments.as_ptr(),
+                    arguments.len(),
+                    h_keyword_names,
                 )
             }
         }
@@ -481,7 +580,7 @@ impl CallState {
                 HANDLE_FALSE => context.from_bool(false),
                 _ => Err(Diagnostic::new(
                     "TypeError",
-                    "HPy context type/exception handle is not a guest value in H1",
+                    "HPy context type/exception handle is not a guest value on this surface",
                 )),
             };
         }
@@ -780,6 +879,547 @@ unsafe extern "C" fn hpy_unicode_as_utf8_and_size(
         unsafe { size.write(length) };
     }
     pointer
+}
+
+fn resolve_name(call: &mut CallState, name: Hpy) -> TonicResult<String> {
+    let name = call.resolve(name)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    Ok(unsafe { &*call.context }.as_str(name)?.to_owned())
+}
+
+fn read_call_string(pointer: *const c_char, field: &str) -> TonicResult<String> {
+    if pointer.is_null() {
+        return Err(Diagnostic::new(
+            "SystemError",
+            format!("HPy {field} received null text"),
+        ));
+    }
+    // SAFETY: HPy requires a readable NUL-terminated string.
+    unsafe { CStr::from_ptr(pointer) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| Diagnostic::new("UnicodeDecodeError", format!("HPy {field} is not UTF-8")))
+}
+
+unsafe extern "C" fn hpy_length(context: *mut HpyContext, owner: Hpy) -> isize {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = call.resolve(owner).and_then(|owner| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }.length(owner)
+    });
+    match result {
+        Ok(length) => length,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_callable_check(context: *mut HpyContext, value: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result = call.resolve(value).and_then(|value| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &*call.context }.is_callable(value)
+    });
+    match result {
+        Ok(value) => c_int::from(value),
+        Err(error) => call.fail(error, 0),
+    }
+}
+
+fn get_attr_impl(call: &mut CallState, owner: Hpy, name: String) -> TonicResult<Hpy> {
+    let owner = call.resolve(owner)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.get_attr(owner, &name)?;
+    call.insert(result)
+}
+
+unsafe extern "C" fn hpy_get_attr(context: *mut HpyContext, owner: Hpy, name: Hpy) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = resolve_name(call, name).and_then(|name| get_attr_impl(call, owner, name));
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_get_attr_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    name: *const c_char,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result =
+        read_call_string(name, "GetAttr_s name").and_then(|name| get_attr_impl(call, owner, name));
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+fn has_attr_result(call: &mut CallState, result: TonicResult<Hpy>) -> c_int {
+    match result {
+        Ok(_) => 1,
+        Err(error) if error.kind == "AttributeError" => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_has_attr(context: *mut HpyContext, owner: Hpy, name: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result = resolve_name(call, name).and_then(|name| get_attr_impl(call, owner, name));
+    has_attr_result(call, result)
+}
+
+unsafe extern "C" fn hpy_has_attr_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    name: *const c_char,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return 0;
+    };
+    let result =
+        read_call_string(name, "HasAttr_s name").and_then(|name| get_attr_impl(call, owner, name));
+    has_attr_result(call, result)
+}
+
+fn set_attr_impl(call: &mut CallState, owner: Hpy, name: String, value: Hpy) -> TonicResult<()> {
+    let owner = call.resolve(owner)?;
+    let value = call.resolve(value)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    unsafe { &mut *call.context }.set_attr(owner, &name, value)
+}
+
+unsafe extern "C" fn hpy_set_attr(
+    context: *mut HpyContext,
+    owner: Hpy,
+    name: Hpy,
+    value: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = resolve_name(call, name).and_then(|name| set_attr_impl(call, owner, name, value));
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_set_attr_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    name: *const c_char,
+    value: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = read_call_string(name, "SetAttr_s name")
+        .and_then(|name| set_attr_impl(call, owner, name, value));
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+fn get_item_impl(call: &mut CallState, owner: Hpy, key: Hpy) -> TonicResult<Hpy> {
+    let owner = call.resolve(owner)?;
+    let key = call.resolve(key)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }.get_item(owner, key)?;
+    call.insert(result)
+}
+
+unsafe extern "C" fn hpy_get_item(context: *mut HpyContext, owner: Hpy, key: Hpy) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    match get_item_impl(call, owner, key) {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_get_item_i(context: *mut HpyContext, owner: Hpy, index: isize) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }
+        .from_i64(index as i64)
+        .and_then(|key| call.insert(key))
+        .and_then(|key| get_item_impl(call, owner, key));
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_get_item_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    key: *const c_char,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = read_call_string(key, "GetItem_s key").and_then(|key| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }
+            .from_str(&key)
+            .and_then(|key| call.insert(key))
+            .and_then(|key| get_item_impl(call, owner, key))
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_contains(context: *mut HpyContext, container: Hpy, key: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = call
+        .resolve(container)
+        .and_then(|container| call.resolve(key).map(|key| (container, key)))
+        .and_then(|(container, key)| {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }.contains(container, key)
+        });
+    match result {
+        Ok(value) => c_int::from(value),
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+fn set_item_impl(call: &mut CallState, owner: Hpy, key: Hpy, value: Hpy) -> TonicResult<()> {
+    let owner = call.resolve(owner)?;
+    let key = call.resolve(key)?;
+    let value = call.resolve(value)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    unsafe { &mut *call.context }.set_item(owner, key, value)
+}
+
+unsafe extern "C" fn hpy_set_item(
+    context: *mut HpyContext,
+    owner: Hpy,
+    key: Hpy,
+    value: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    match set_item_impl(call, owner, key, value) {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_set_item_i(
+    context: *mut HpyContext,
+    owner: Hpy,
+    index: isize,
+    value: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }
+        .from_i64(index as i64)
+        .and_then(|key| call.insert(key))
+        .and_then(|key| set_item_impl(call, owner, key, value));
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_set_item_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    key: *const c_char,
+    value: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = read_call_string(key, "SetItem_s key").and_then(|key| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }
+            .from_str(&key)
+            .and_then(|key| call.insert(key))
+            .and_then(|key| set_item_impl(call, owner, key, value))
+    });
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+fn del_item_impl(call: &mut CallState, owner: Hpy, key: Hpy) -> TonicResult<()> {
+    let owner = call.resolve(owner)?;
+    let key = call.resolve(key)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    unsafe { &mut *call.context }.delete_item(owner, key)
+}
+
+unsafe extern "C" fn hpy_del_item(context: *mut HpyContext, owner: Hpy, key: Hpy) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    match del_item_impl(call, owner, key) {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_del_item_i(context: *mut HpyContext, owner: Hpy, index: isize) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let result = unsafe { &mut *call.context }
+        .from_i64(index as i64)
+        .and_then(|key| call.insert(key))
+        .and_then(|key| del_item_impl(call, owner, key));
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_del_item_s(
+    context: *mut HpyContext,
+    owner: Hpy,
+    key: *const c_char,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    let result = read_call_string(key, "DelItem_s key").and_then(|key| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }
+            .from_str(&key)
+            .and_then(|key| call.insert(key))
+            .and_then(|key| del_item_impl(call, owner, key))
+    });
+    match result {
+        Ok(()) => 0,
+        Err(error) => call.fail(error, -1),
+    }
+}
+
+unsafe extern "C" fn hpy_repr(context: *mut HpyContext, value: Hpy) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = call.resolve(value).and_then(|value| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }.repr(value)
+    });
+    match result.and_then(|value| call.insert(value)) {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+fn sequence_handles(call: &mut CallState, sequence: Hpy) -> TonicResult<Vec<Handle>> {
+    let sequence = call.resolve(sequence)?;
+    // SAFETY: active-call lifetime keeps the erased context valid.
+    let context = unsafe { &mut *call.context };
+    if !context.is_tuple(sequence)? {
+        return Err(Diagnostic::new(
+            "TypeError",
+            "HPy call arguments must be a tuple",
+        ));
+    }
+    let length = context.sequence_len(sequence)?;
+    if length > MAX_CONTAINER_ITEMS {
+        return Err(Diagnostic::new(
+            "OverflowError",
+            "HPy argument tuple exceeds the item limit",
+        ));
+    }
+    (0..length)
+        .map(|index| context.sequence_get(sequence, index))
+        .collect()
+}
+
+unsafe extern "C" fn hpy_call_tuple_dict(
+    context: *mut HpyContext,
+    callable: Hpy,
+    arguments: Hpy,
+    keywords: Hpy,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = (|| {
+        let callable = call.resolve(callable)?;
+        let arguments = sequence_handles(call, arguments)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let context = unsafe { &mut *call.context };
+        let result = if keywords == Hpy::NULL {
+            context.call(callable, &arguments)?
+        } else {
+            let keywords = call.resolve(keywords)?;
+            context.call_with_keywords(callable, &arguments, keywords)?
+        };
+        call.insert(result)
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+fn vector_arguments(
+    call: &mut CallState,
+    arguments: *const Hpy,
+    positional_count: usize,
+    keyword_names: Hpy,
+) -> TonicResult<VectorArguments> {
+    let keyword_count = if keyword_names == Hpy::NULL {
+        0
+    } else {
+        let names = call.resolve(keyword_names)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let context = unsafe { &mut *call.context };
+        if !context.is_tuple(names)? {
+            return Err(Diagnostic::new("TypeError", "HPy kwnames must be a tuple"));
+        }
+        context.sequence_len(names)?
+    };
+    let total = positional_count
+        .checked_add(keyword_count)
+        .filter(|total| *total <= MAX_CONTAINER_ITEMS)
+        .ok_or_else(|| Diagnostic::new("OverflowError", "HPy call argument count is too large"))?;
+    if arguments.is_null() && total != 0 {
+        return Err(Diagnostic::new(
+            "SystemError",
+            "HPy call argument array is null",
+        ));
+    }
+    let raw = if total == 0 {
+        &[]
+    } else {
+        // SAFETY: HPy requires `arguments` to span positional plus keyword values.
+        unsafe { std::slice::from_raw_parts(arguments, total) }
+    };
+    let positional = raw[..positional_count]
+        .iter()
+        .copied()
+        .map(|value| call.resolve(value))
+        .collect::<TonicResult<Vec<_>>>()?;
+    let keywords = if keyword_count == 0 {
+        Vec::new()
+    } else {
+        let names = call.resolve(keyword_names)?;
+        let mut keywords = Vec::with_capacity(keyword_count);
+        for index in 0..keyword_count {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            let name = unsafe { &mut *call.context }.sequence_get(names, index)?;
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            let name = unsafe { &*call.context }.as_str(name)?.to_owned();
+            let value = call.resolve(raw[positional_count + index])?;
+            keywords.push((name, value));
+        }
+        keywords
+    };
+    Ok((positional, keywords))
+}
+
+unsafe extern "C" fn hpy_call(
+    context: *mut HpyContext,
+    callable: Hpy,
+    arguments: *const Hpy,
+    positional_count: usize,
+    keyword_names: Hpy,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = (|| {
+        let callable = call.resolve(callable)?;
+        let (positional, keywords) =
+            vector_arguments(call, arguments, positional_count, keyword_names)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let result =
+            unsafe { &mut *call.context }.call_with_named(callable, &positional, &keywords)?;
+        call.insert(result)
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_call_method(
+    context: *mut HpyContext,
+    name: Hpy,
+    arguments: *const Hpy,
+    positional_count: usize,
+    keyword_names: Hpy,
+) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = (|| {
+        let name = resolve_name(call, name)?;
+        let (mut positional, keywords) =
+            vector_arguments(call, arguments, positional_count, keyword_names)?;
+        if positional.is_empty() {
+            return Err(Diagnostic::new(
+                "TypeError",
+                "HPy_CallMethod requires the receiver as argument zero",
+            ));
+        }
+        let receiver = positional.remove(0);
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let method = unsafe { &mut *call.context }.get_attr(receiver, &name)?;
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        let result =
+            unsafe { &mut *call.context }.call_with_named(method, &positional, &keywords)?;
+        call.insert(result)
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
 }
 
 unsafe extern "C" fn hpy_err_set_string(

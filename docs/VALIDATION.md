@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 23,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 121, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 4; toplam 387 test.
+native handles 5, language/runtime 122, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 5; toplam 389 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -266,6 +266,15 @@ trace token'ı yeniden persistent köke yükseltilir. Traversal/graph sınırlar
 veya yabancı runtime proxy'si görülürse güçlü kök conservative biçimde korunur.
 Foreign finalizer payload destructor'ı traced Tonic kenarları hâlâ kökken çalışır;
 owned trace handle'ları destructor döndükten sonra bırakılır.
+HPy testleri vendored resmi 0.9 header'larından gerçek `.hpy0` C modülü derler;
+binary audit modülün `libpython` bağlamadığını doğrular. Loader filename, dört init
+sembolü, exact ABI ve process-lifetime mapping'i sınar. Host testi 263-slot context
+düzenini; scoped local handle, stale/cross-runtime, exception ve builder cleanup'ı
+denetler. H2 fixture `NOARGS`/`O` yanında `VARARGS`/`KEYWORDS`, custom attribute ve
+item protokolleri, list/dict mutation, contains/length/repr ile tuple/dict,
+vectorcall ve method-call yollarını interpreter ve JIT caller modlarında çalıştırır.
+Yanlış keyword arity, item türü, non-callable ve unsupported signature yolları
+deterministic guest/import hatası üretir ve aktif handle sayısı sıfıra döner.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

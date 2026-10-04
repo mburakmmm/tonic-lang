@@ -150,20 +150,21 @@ bu alt aşamada fail-closed kalır. Bu sınır ve güvenlik gerekçesi
 
 H1 tamamlanmıştır. HPy `0.9.0` resmi header ağacı kaynak dağıtımındaki
 `4545310f...b6c70cc` SHA-256 kaydı doğrulanarak test girdisi olarak vendored
-edilmiştir. Host exact 261-slot context düzenini kurar; local handle'ları yalnız
+edilmiştir. Host exact 263-slot context düzenini kurar; local handle'ları yalnız
 native çağrı scope'unda tutar ve stale/cross-runtime kullanımı reddeder.
 `HPy_Dup`, `HPy_Close`, signed 64-bit integer ve UTF-8 Unicode dönüşümleri ile
-temel exception state çalışır. Module def materialization yalnız
-`HPyFunc_NOARGS` ve `HPyFunc_O` method'larını kabul eder; H2 imzaları, legacy
-methods, module C state ve `HPyGlobal` fail-closed reddedilir. Modül yöntemleri
+temel exception state çalışır. H1 ilk tesliminde module def materialization
+yalnız `HPyFunc_NOARGS` ve `HPyFunc_O` method'larını kabul etmiştir; H2 ile
+`HPyFunc_VARARGS` ve `HPyFunc_KEYWORDS` eklenmiştir. Legacy methods, module C
+state ve `HPyGlobal` fail-closed reddedilir. Modül yöntemleri
 VM'ye tek transaction olarak kaydolur; başarısız doğrulama kısmi import
 bırakmaz. Gerçek C fixture interpreter ve JIT caller yollarında constant,
 `fib(40)`, Unicode, dup/close, exception cleanup ve local lifetime sınırlarını
 doğrular; binary dependency audit'i `libpython` bulunmadığını kanıtlar.
 
 Windows `.hpy0.pyd` filename/library/symbol/context kod yolu uygulanmıştır;
-çalışan Windows doğrulaması H6 CI matrisinin açık kabul kapısıdır. H1 dışında
-kalan context slotları çağrılabilir ilan edilmez. Bunlar için crash yerine
+çalışan Windows doğrulaması H6 CI matrisinin açık kabul kapısıdır. Yayımlanmış
+H1/H2 capability listesi dışında kalan context slotları çağrılabilir ilan edilmez. Bunlar için crash yerine
 versioned unavailable tanısı H6 kapsamında tamamlanacaktır. H1 kararı ve yaşam
 süresi sözleşmesi [ADR 0097](adr/0097-hpy-h1-minimal-context.md) içinde kayıtlıdır.
 
@@ -194,8 +195,17 @@ edilmeden dönüş deterministic guest hatası üretir. `HPyList_New` yalnız si
 zero kabul eder; sabit boyutlu listeler builder ile kurulur ve böylece Tonic
 heap'ine gözlemlenebilir yarım container girmez. Gerçek Universal fixture bu
 yüzeyi interpreter ve JIT caller yollarında sınar. Ayrıntı
-[ADR 0098](adr/0098-hpy-container-builders.md) içindedir. Attr/item/call ve
-keyword binder tamamlanmadan H2 ana kapısı açık kalır.
+[ADR 0098](adr/0098-hpy-container-builders.md) içindedir.
+
+H2b object/call alt aşaması da tamamlanmıştır. Exact 263-slot context içinde
+attribute get/has/set, item get/set/delete, contains, length, repr,
+`HPyCallable_Check`, tuple/dict call ve vectorcall/method-call slotları çalışır.
+VM native binder, positional ve named handle dilimlerini geçici guest tuple/dict
+oluşturmadan `HPyFunc_VARARGS`/`HPyFunc_KEYWORDS` method'larına taşır. Gerçek C
+fixture normal ve hata yollarını interpreter ile JIT caller modlarında sınar.
+Karar [ADR 0099](adr/0099-hpy-object-calls.md) içindedir. Bigint/float API'leri,
+geniş exception fetch/match yüzeyi ve stress-GC/fault-injection kapısı H2'nin
+kalan tamamlayıcı işidir.
 
 ### H3 — Global, field ve moving GC
 

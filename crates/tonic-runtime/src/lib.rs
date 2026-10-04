@@ -27,5 +27,8 @@ pub use foreign::{
     ForeignDestroyFn, ForeignTraceFn, TonicForeignVTable, TonicTraceVisitor, FOREIGN_OWNED,
 };
 pub use heap::CollectionStats;
-pub use native::{Context, Handle, NativeFn, PersistentHandle, StatefulNativeFn};
+pub use native::{
+    Context, Handle, NativeFn, PersistentHandle, StatefulKeywordNativeFn, StatefulNativeFn,
+    StatefulNativeSignature,
+};
 pub use vm::{ExecutionMode, Limits, RuntimePhase, Stats, Vm};

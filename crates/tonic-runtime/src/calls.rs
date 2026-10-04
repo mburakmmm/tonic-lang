@@ -2081,34 +2081,56 @@ impl Vm {
                 self.registers[destination] = self.call_builtin(builtin, p, &args, output)?
             }
             Object::Native(id) => {
-                let (arity, function) = {
+                let (signature, function) = {
                     let def = &self.natives[*id];
-                    (def.arity, def.function.clone())
+                    (def.signature, def.function.clone())
                 };
-                if args.keyword_count() != 0 {
-                    return Err(Diagnostic::new(
-                        "TypeError",
-                        "registered native function does not accept keyword arguments",
-                    ));
-                }
-                if args.count() != arity {
-                    return Err(Diagnostic::new(
-                        "TypeError",
-                        format!(
-                            "native function expects {} arguments, got {}",
-                            arity,
-                            args.count()
-                        ),
-                    ));
+                match signature {
+                    crate::StatefulNativeSignature::Exact(arity) => {
+                        if args.keyword_count() != 0 {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                "registered native function does not accept keyword arguments",
+                            ));
+                        }
+                        if args.count() != arity {
+                            return Err(Diagnostic::new(
+                                "TypeError",
+                                format!(
+                                    "native function expects {} arguments, got {}",
+                                    arity,
+                                    args.count()
+                                ),
+                            ));
+                        }
+                    }
+                    crate::StatefulNativeSignature::VarArgs if args.keyword_count() != 0 => {
+                        return Err(Diagnostic::new(
+                            "TypeError",
+                            "native varargs function does not accept keyword arguments",
+                        ));
+                    }
+                    crate::StatefulNativeSignature::VarArgs
+                    | crate::StatefulNativeSignature::Keywords => {}
                 }
                 let values = (0..args.count())
                     .map(|index| args.positional(&self.registers, index))
+                    .collect::<Vec<_>>();
+                let keyword_values = (0..args.keyword_count())
+                    .map(|index| {
+                        let (name, value) = args.keyword(p, &self.registers, index);
+                        (name.to_owned(), value)
+                    })
                     .collect::<Vec<_>>();
                 self.stats.native_calls += 1;
                 let mut ctx = Context::for_native_call(self, p, output);
                 let handles = values
                     .into_iter()
                     .map(|value| ctx.local(value))
+                    .collect::<Result<Vec<_>>>()?;
+                let keyword_values = keyword_values
+                    .into_iter()
+                    .map(|(name, value)| Ok((name, ctx.local(value)?)))
                     .collect::<Result<Vec<_>>>()?;
                 let result = match function {
                     crate::native::NativeCallable::Rust(function) => function(&mut ctx, &handles),
@@ -2117,6 +2139,9 @@ impl Vm {
                     }
                     crate::native::NativeCallable::Stateful(function) => {
                         function(&mut ctx, &handles)
+                    }
+                    crate::native::NativeCallable::StatefulKeywords(function) => {
+                        function(&mut ctx, &handles, &keyword_values)
                     }
                 }?;
                 let result = ctx.resolve(result)?;

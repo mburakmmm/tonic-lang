@@ -1,8 +1,7 @@
 //! Safe Rust native boundary. This is not a stable binary/C ABI.
 use crate::{
     buffer::{Buffer, ExportParts, F64BufferView},
-    classes::DescriptorAccess,
-    heap::Object,
+    heap::{Builtin, Object},
     value::Value,
     vm::{calls::ExpandedArgs, Vm},
 };
@@ -311,7 +310,7 @@ impl<'a> Context<'a> {
         };
         self.local(value)
     }
-    pub(crate) fn call_with_keywords(
+    pub fn call_with_keywords(
         &mut self,
         callable: Handle,
         arguments: &[Handle],
@@ -357,6 +356,67 @@ impl<'a> Context<'a> {
         };
         self.local(value)
     }
+    pub fn call_with_named(
+        &mut self,
+        callable: Handle,
+        arguments: &[Handle],
+        keywords: &[(String, Handle)],
+    ) -> Result<Handle> {
+        let callable = self.resolve(callable)?;
+        let positional = arguments
+            .iter()
+            .map(|argument| self.resolve(*argument))
+            .collect::<Result<Vec<_>>>()?;
+        let keywords = keywords
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), self.resolve(*value)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let value = {
+            let program = self.program.ok_or_else(|| {
+                Diagnostic::new(
+                    "RuntimeError",
+                    "Tonic callback requires an active native call context",
+                )
+            })?;
+            let output = self.output.as_deref_mut().ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "native callback has no output context")
+            })?;
+            self.vm.reenter_from_native_expanded(
+                program,
+                callable,
+                ExpandedArgs {
+                    positional,
+                    keywords,
+                    ..ExpandedArgs::default()
+                },
+                output,
+            )?
+        };
+        self.local(value)
+    }
+    pub fn is_callable(&self, handle: Handle) -> Result<bool> {
+        let value = self.resolve(handle)?;
+        match self.vm.heap.get(value)? {
+            Object::Function { .. }
+            | Object::Builtin(_)
+            | Object::Native(_)
+            | Object::BoundMethod { .. }
+            | Object::StaticMethod(_)
+            | Object::PropertySetter(_)
+            | Object::PropertyDeleter(_)
+            | Object::Class(_) => return Ok(true),
+            Object::GenericAlias { origin, .. } => {
+                return Ok(matches!(self.vm.heap.get(*origin), Ok(Object::Class(_))));
+            }
+            object if object.instance_class().is_some() => {}
+            _ => return Ok(false),
+        }
+        Ok(self
+            .vm
+            .heap
+            .special_method_call(value, "__call__")?
+            .is_some())
+    }
     fn call_values(&mut self, callable: Value, arguments: &[Value]) -> Result<Value> {
         let program = self.program.ok_or_else(|| {
             Diagnostic::new(
@@ -370,54 +430,26 @@ impl<'a> Context<'a> {
         self.vm
             .reenter_from_native(program, callable, arguments, output)
     }
-    fn descriptor_value(&mut self, access: DescriptorAccess) -> Result<Value> {
-        match access {
-            DescriptorAccess::Value(value) => Ok(value),
-            DescriptorAccess::Call {
-                callable,
-                receiver,
-                positional,
-                count,
-            } => {
-                let mut arguments = Vec::with_capacity(count + usize::from(receiver.is_some()));
-                arguments.extend(receiver);
-                arguments.extend_from_slice(&positional[..count]);
-                self.call_values(callable, &arguments)
-            }
-        }
-    }
-    pub(crate) fn get_attr(&mut self, owner: Handle, name: &str) -> Result<Handle> {
+    pub fn get_attr(&mut self, owner: Handle, name: &str) -> Result<Handle> {
         let owner = self.resolve(owner)?;
-        let value = if let Some(access) = self.vm.heap.super_getter(owner, name)? {
-            self.descriptor_value(access)?
-        } else if let Some(getter) = self.vm.heap.property_getter(owner, name)? {
-            self.call_values(getter, &[owner])?
-        } else if let Some(access) = self.vm.heap.descriptor_getter(owner, name)? {
-            self.descriptor_value(access)?
-        } else {
-            self.vm.heap.attr(owner, name)?
-        };
+        let name = self.vm.heap.alloc(Object::Str(name.to_owned()))?;
+        let callable = self.vm.builtin_callable(Builtin::GetAttr)?;
+        let value = self.call_values(callable, &[owner, name])?;
         self.local(value)
     }
-    pub(crate) fn set_attr(&mut self, owner: Handle, name: &str, value: Handle) -> Result<()> {
+    pub fn set_attr(&mut self, owner: Handle, name: &str, value: Handle) -> Result<()> {
         let owner = self.resolve(owner)?;
         let value = self.resolve(value)?;
-        if let Some(setter) = self.vm.heap.property_setter(owner, name)? {
-            let _ = self.call_values(setter, &[owner, value])?;
-        } else if let Some(setter) = self.vm.heap.descriptor_setter(owner, name)? {
-            let mut arguments = Vec::with_capacity(2 + usize::from(setter.receiver.is_some()));
-            arguments.extend(setter.receiver);
-            arguments.extend([owner, value]);
-            let _ = self.call_values(setter.callable, &arguments)?;
-        } else {
-            self.vm.heap.set_attr(owner, name, value)?;
-        }
+        let name = self.vm.heap.alloc(Object::Str(name.to_owned()))?;
+        let callable = self.vm.builtin_callable(Builtin::SetAttr)?;
+        let _ = self.call_values(callable, &[owner, name, value])?;
         Ok(())
     }
-    pub(crate) fn repr(&mut self, value: Handle) -> Result<Handle> {
+    pub fn repr(&mut self, value: Handle) -> Result<Handle> {
         let value = self.resolve(value)?;
-        let text = self.vm.heap.format(value, true)?;
-        self.from_str(&text)
+        let callable = self.vm.builtin_callable(Builtin::Repr)?;
+        let result = self.call_values(callable, &[value])?;
+        self.local(result)
     }
     pub(crate) fn add(&mut self, left: Handle, right: Handle) -> Result<Handle> {
         let left = self.resolve(left)?;
@@ -563,14 +595,14 @@ impl<'a> Context<'a> {
             _ => Err(Diagnostic::new("TypeError", "expected string")),
         }
     }
-    pub(crate) fn sequence_len(&self, handle: Handle) -> Result<usize> {
+    pub fn sequence_len(&self, handle: Handle) -> Result<usize> {
         let value = self.resolve(handle)?;
         match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::List(values) | Object::Tuple(values) => Ok(values.len()),
             _ => Err(Diagnostic::new("TypeError", "expected list or tuple")),
         }
     }
-    pub(crate) fn sequence_get(&mut self, handle: Handle, index: usize) -> Result<Handle> {
+    pub fn sequence_get(&mut self, handle: Handle, index: usize) -> Result<Handle> {
         let value = self.resolve(handle)?;
         let item = match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::List(values) | Object::Tuple(values) => values
@@ -581,14 +613,14 @@ impl<'a> Context<'a> {
         };
         self.local(item)
     }
-    pub(crate) fn dict_len(&self, handle: Handle) -> Result<usize> {
+    pub fn dict_len(&self, handle: Handle) -> Result<usize> {
         let value = self.resolve(handle)?;
         match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::Dict(dict) => Ok(dict.entries.len()),
             _ => Err(Diagnostic::new("TypeError", "expected dict")),
         }
     }
-    pub(crate) fn dict_entry(&mut self, handle: Handle, index: usize) -> Result<(Handle, Handle)> {
+    pub fn dict_entry(&mut self, handle: Handle, index: usize) -> Result<(Handle, Handle)> {
         let value = self.resolve(handle)?;
         let (key, value) = match self.vm.heap.get(self.vm.heap.native_value(value))? {
             Object::Dict(dict) => dict
@@ -639,6 +671,103 @@ impl<'a> Context<'a> {
         let value = self.resolve(value)?;
         self.vm.heap.dict_set(dict, key, value)
     }
+    pub fn get_item(&mut self, owner: Handle, key: Handle) -> Result<Handle> {
+        let owner = self.resolve(owner)?;
+        let key = self.resolve(key)?;
+        let value = if let Some(call) = self.vm.heap.special_method_call(owner, "__getitem__")? {
+            let mut arguments = Vec::with_capacity(1 + usize::from(call.receiver.is_some()));
+            arguments.extend(call.receiver);
+            arguments.push(key);
+            self.call_values(call.callable, &arguments)?
+        } else {
+            self.vm.heap.item(owner, key)?
+        };
+        self.local(value)
+    }
+    pub fn set_item(&mut self, owner: Handle, key: Handle, value: Handle) -> Result<()> {
+        let owner = self.resolve(owner)?;
+        let key = self.resolve(key)?;
+        let value = self.resolve(value)?;
+        if let Some(call) = self.vm.heap.special_method_call(owner, "__setitem__")? {
+            let mut arguments = Vec::with_capacity(2 + usize::from(call.receiver.is_some()));
+            arguments.extend(call.receiver);
+            arguments.extend([key, value]);
+            let _ = self.call_values(call.callable, &arguments)?;
+        } else {
+            self.vm.heap.set_item(owner, key, value)?;
+        }
+        Ok(())
+    }
+    pub fn delete_item(&mut self, owner: Handle, key: Handle) -> Result<()> {
+        let owner = self.resolve(owner)?;
+        let key = self.resolve(key)?;
+        if let Some(call) = self.vm.heap.special_method_call(owner, "__delitem__")? {
+            let mut arguments = Vec::with_capacity(1 + usize::from(call.receiver.is_some()));
+            arguments.extend(call.receiver);
+            arguments.push(key);
+            let _ = self.call_values(call.callable, &arguments)?;
+        } else {
+            self.vm.heap.delete_item(owner, key)?;
+        }
+        Ok(())
+    }
+    pub fn length(&mut self, owner: Handle) -> Result<isize> {
+        let owner = self.resolve(owner)?;
+        let value = if let Some(call) = self.vm.heap.special_method_call(owner, "__len__")? {
+            let arguments = call.receiver.into_iter().collect::<Vec<_>>();
+            self.call_values(call.callable, &arguments)?
+        } else {
+            self.vm.heap.length(owner)?
+        };
+        let value = self.vm.heap.to_i64(value)?;
+        if value < 0 {
+            return Err(Diagnostic::new(
+                "ValueError",
+                "__len__() should return >= 0",
+            ));
+        }
+        isize::try_from(value)
+            .map_err(|_| Diagnostic::new("OverflowError", "length does not fit HPy_ssize_t"))
+    }
+    pub fn contains(&mut self, container: Handle, key: Handle) -> Result<bool> {
+        let container = self.resolve(container)?;
+        let key = self.resolve(key)?;
+        if let Some(call) = self
+            .vm
+            .heap
+            .special_method_call(container, "__contains__")?
+        {
+            let mut arguments = Vec::with_capacity(1 + usize::from(call.receiver.is_some()));
+            arguments.extend(call.receiver);
+            arguments.push(key);
+            let result = self.call_values(call.callable, &arguments)?;
+            return self.vm.heap.truth(result);
+        }
+        let storage = self.vm.heap.native_value(container);
+        match self.vm.heap.get(storage)? {
+            Object::Dict(_) | Object::Set(_) => Ok(self.vm.heap.dict_get(storage, key)?.is_some()),
+            Object::List(values) | Object::Tuple(values) => {
+                let values = values.clone();
+                values.into_iter().try_fold(false, |found, value| {
+                    Ok(found || self.vm.heap.equal(value, key, 0)?)
+                })
+            }
+            Object::Str(value) => {
+                let value = value.clone();
+                let Object::Str(key) = self.vm.heap.get(self.vm.heap.native_value(key))? else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "string membership requires a string key",
+                    ));
+                };
+                Ok(value.contains(key))
+            }
+            _ => Err(Diagnostic::new(
+                "TypeError",
+                "object does not support membership",
+            )),
+        }
+    }
     pub fn persist(&mut self, h: Handle) -> Result<PersistentHandle> {
         let v = self.resolve(h)?;
         self.vm.handles.persist_value(v)
@@ -682,16 +811,29 @@ pub type NativeFn = fn(&mut Context<'_>, &[Handle]) -> Result<Handle>;
 /// ordinary [`Context`] API without aliasing the native registry.
 pub type StatefulNativeFn =
     dyn Fn(&mut Context<'_>, &[Handle]) -> Result<Handle> + Send + Sync + 'static;
+/// VM-owned native callback that receives both positional and named arguments.
+pub type StatefulKeywordNativeFn = dyn Fn(&mut Context<'_>, &[Handle], &[(String, Handle)]) -> Result<Handle>
+    + Send
+    + Sync
+    + 'static;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatefulNativeSignature {
+    Exact(usize),
+    VarArgs,
+    Keywords,
+}
 
 #[derive(Clone)]
 pub(crate) enum NativeCallable {
     Rust(NativeFn),
     C(crate::c_api::CNativeFn),
     Stateful(Arc<StatefulNativeFn>),
+    StatefulKeywords(Arc<StatefulKeywordNativeFn>),
 }
 #[derive(Clone)]
 pub(crate) struct NativeDef {
-    pub arity: usize,
+    pub signature: StatefulNativeSignature,
     pub function: NativeCallable,
 }
 

@@ -127,6 +127,15 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             "cancel_builder",
             "incomplete_builder",
             "leak_builder",
+            "argument_count",
+            "argument_shape",
+            "attr_roundtrip",
+            "list_roundtrip",
+            "dict_roundtrip",
+            "call_positional",
+            "call_tuple_dict",
+            "call_keywords",
+            "call_method",
         ]
     );
 
@@ -162,6 +171,70 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
 }
 
 #[test]
+fn h2_object_and_call_surface_executes_from_real_universal_extension() {
+    let fixture = Fixture::compile();
+    let module = module(&fixture);
+    let source = concat!(
+        "import h1demo\n",
+        "class Box:\n",
+        "    def __init__(self):\n",
+        "        object.__setattr__(self,'stored',0)\n",
+        "    def __setattr__(self,name,value):\n",
+        "        object.__setattr__(self,'stored',value+1)\n",
+        "    def __getattribute__(self,name):\n",
+        "        if name=='native_value':\n",
+        "            return object.__getattribute__(self,'stored')+1\n",
+        "        return object.__getattribute__(self,name)\n",
+        "    def __repr__(self):\n",
+        "        return 'hooked-box'\n",
+        "    def add(self,left,right=0):\n",
+        "        return left+right\n",
+        "def combine(left,right=0):\n",
+        "    return left+right\n",
+        "class Sequence:\n",
+        "    def __init__(self):\n",
+        "        self.data=[1,2,3]\n",
+        "    def __len__(self):\n",
+        "        return len(self.data)\n",
+        "    def __getitem__(self,key):\n",
+        "        return self.data[key]\n",
+        "    def __setitem__(self,key,value):\n",
+        "        self.data[key]=value\n",
+        "    def __delitem__(self,key):\n",
+        "        del self.data[key]\n",
+        "    def __contains__(self,value):\n",
+        "        return value in self.data\n",
+        "box=Box()\n",
+        "print(h1demo.argument_count(1,2,3))\n",
+        "print(h1demo.argument_shape(1,2,flag=3,other=4))\n",
+        "print(h1demo.attr_roundtrip(box))\n",
+        "print(box.native_value)\n",
+        "items=[1,2,3]\n",
+        "print(h1demo.list_roundtrip(items))\n",
+        "print(items)\n",
+        "sequence=Sequence()\n",
+        "print(h1demo.list_roundtrip(sequence))\n",
+        "print(sequence.data)\n",
+        "print(h1demo.dict_roundtrip())\n",
+        "print(h1demo.call_positional(combine,20,22))\n",
+        "print(h1demo.call_tuple_dict(combine))\n",
+        "print(h1demo.call_keywords(combine))\n",
+        "print(h1demo.call_method(box))\n",
+    );
+    let expected = concat!(
+        "3\n22\nhooked-box\n75\n",
+        "(99, 99, 1, 3, 2)\n[99, 3]\n",
+        "(99, 99, 1, 3, 2)\n[99, 3]\n",
+        "(41, 42, 1, 0)\n42\n42\n42\n42\n",
+    );
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let (vm, output) = run(&module, source, mode);
+        assert_eq!(output, expected);
+        assert_eq!(vm.active_handles(), 0);
+    }
+}
+
+#[test]
 fn hpy_exception_state_and_failure_cleanup_are_guest_visible() {
     let fixture = Fixture::compile();
     let module = module(&fixture);
@@ -172,6 +245,10 @@ fn hpy_exception_state_and_failure_cleanup_are_guest_visible() {
         ("h1demo.result_with_error()", "SystemError"),
         ("h1demo.incomplete_builder()", "SystemError"),
         ("h1demo.leak_builder()", "HandleError"),
+        ("h1demo.argument_count(flag=1)", "TypeError"),
+        ("h1demo.list_roundtrip(1)", "TypeError"),
+        ("h1demo.call_positional(1)", "TypeError"),
+        ("h1demo.call_keywords(1)", "TypeError"),
     ] {
         let mut vm = Vm::new().unwrap();
         module.register(&mut vm).unwrap();
@@ -214,12 +291,12 @@ fn saved_local_is_rejected_across_calls_and_runtimes() {
 }
 
 #[test]
-fn unsupported_h2_method_signature_fails_closed_during_load() {
+fn unsupported_method_signature_fails_closed_during_load() {
     let fixture = Fixture::compile_source(UNSUPPORTED_SOURCE);
     // SAFETY: this test compiles the source below against the pinned headers;
     // the host rejects its unsupported method before it can execute.
     let error = unsafe { UniversalModule::load("h1demo", &fixture.library) }.unwrap_err();
-    assert!(error.to_string().contains("H2 argument signature"));
+    assert!(error.to_string().contains("unsupported signature 99"));
 }
 
 const SOURCE: &str = r#"
@@ -413,6 +490,191 @@ static HPy leak_builder_impl(HPyContext *ctx, HPy self) {
     return HPyLong_FromInt64_t(ctx, 10);
 }
 
+HPyDef_METH(argument_count, "argument_count", HPyFunc_VARARGS)
+static HPy argument_count_impl(HPyContext *ctx, HPy self, const HPy *args, size_t nargs) {
+    (void)self;
+    (void)args;
+    return HPyLong_FromInt64_t(ctx, (int64_t)nargs);
+}
+
+HPyDef_METH(argument_shape, "argument_shape", HPyFunc_KEYWORDS)
+static HPy argument_shape_impl(
+    HPyContext *ctx, HPy self, const HPy *args, size_t nargs, HPy kwnames
+) {
+    (void)self;
+    (void)args;
+    HPy_ssize_t keyword_count = HPy_IsNull(kwnames) ? 0 : HPy_Length(ctx, kwnames);
+    if (keyword_count < 0) return HPy_NULL;
+    return HPyLong_FromInt64_t(ctx, (int64_t)nargs * 10 + (int64_t)keyword_count);
+}
+
+HPyDef_METH(attr_roundtrip, "attr_roundtrip", HPyFunc_O)
+static HPy attr_roundtrip_impl(HPyContext *ctx, HPy self, HPy owner) {
+    (void)self;
+    HPy value = HPyLong_FromInt64_t(ctx, 73);
+    HPy name = HPyUnicode_FromString(ctx, "native_value");
+    if (HPy_IsNull(value) || HPy_IsNull(name)) return HPy_NULL;
+    if (HPy_SetAttr_s(ctx, owner, "native_value", value) < 0) return HPy_NULL;
+    if (HPy_SetAttr(ctx, owner, name, value) < 0) return HPy_NULL;
+    int has_string = HPy_HasAttr_s(ctx, owner, "native_value");
+    int has_handle = HPy_HasAttr(ctx, owner, name);
+    if (has_string < 0 || has_handle < 0) return HPy_NULL;
+    if (!has_string || !has_handle) {
+        return HPyErr_SetString(ctx, ctx->h_AttributeError, "attribute roundtrip failed");
+    }
+    HPy from_string = HPy_GetAttr_s(ctx, owner, "native_value");
+    HPy from_handle = HPy_GetAttr(ctx, owner, name);
+    if (HPy_IsNull(from_string) || HPy_IsNull(from_handle)) return HPy_NULL;
+    int64_t from_string_value = HPyLong_AsInt64_t(ctx, from_string);
+    int64_t from_handle_value = HPyLong_AsInt64_t(ctx, from_handle);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    if (from_string_value != 75 || from_handle_value != 75) {
+        return HPyErr_SetString(ctx, ctx->h_ValueError, "attribute hook was bypassed");
+    }
+    HPy result = HPy_Repr(ctx, owner);
+    HPy_Close(ctx, from_string);
+    HPy_Close(ctx, from_handle);
+    HPy_Close(ctx, name);
+    HPy_Close(ctx, value);
+    return result;
+}
+
+HPyDef_METH(list_roundtrip, "list_roundtrip", HPyFunc_O)
+static HPy list_roundtrip_impl(HPyContext *ctx, HPy self, HPy list) {
+    (void)self;
+    HPy_ssize_t before = HPy_Length(ctx, list);
+    if (before < 0) return HPy_NULL;
+    HPy value = HPyLong_FromInt64_t(ctx, 99);
+    HPy key = HPyLong_FromInt64_t(ctx, 0);
+    if (HPy_IsNull(value) || HPy_IsNull(key)) return HPy_NULL;
+    if (HPy_SetItem_i(ctx, list, 0, value) < 0) return HPy_NULL;
+    HPy from_index = HPy_GetItem_i(ctx, list, 0);
+    HPy from_key = HPy_GetItem(ctx, list, key);
+    int contains = HPy_Contains(ctx, list, value);
+    if (HPy_IsNull(from_index) || HPy_IsNull(from_key) || contains < 0) return HPy_NULL;
+    if (HPy_DelItem_i(ctx, list, 1) < 0) return HPy_NULL;
+    HPy_ssize_t after = HPy_Length(ctx, list);
+    if (after < 0) return HPy_NULL;
+    HPy items[5] = {
+        from_index,
+        from_key,
+        HPyLong_FromInt64_t(ctx, contains),
+        HPyLong_FromInt64_t(ctx, (int64_t)before),
+        HPyLong_FromInt64_t(ctx, (int64_t)after),
+    };
+    HPy result = HPyTuple_FromArray(ctx, items, 5);
+    for (size_t index = 0; index < 5; index++) HPy_Close(ctx, items[index]);
+    HPy_Close(ctx, key);
+    HPy_Close(ctx, value);
+    return result;
+}
+
+HPyDef_METH(dict_roundtrip, "dict_roundtrip", HPyFunc_NOARGS)
+static HPy dict_roundtrip_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPy dict = HPyDict_New(ctx);
+    HPy key = HPyUnicode_FromString(ctx, "answer");
+    HPy first = HPyLong_FromInt64_t(ctx, 41);
+    HPy second = HPyLong_FromInt64_t(ctx, 42);
+    if (HPy_IsNull(dict) || HPy_IsNull(key) || HPy_IsNull(first) || HPy_IsNull(second)) {
+        return HPy_NULL;
+    }
+    if (HPy_SetItem_s(ctx, dict, "answer", first) < 0) return HPy_NULL;
+    HPy from_key = HPy_GetItem(ctx, dict, key);
+    int contains = HPy_Contains(ctx, dict, key);
+    if (HPy_IsNull(from_key) || contains < 0) return HPy_NULL;
+    if (HPy_DelItem(ctx, dict, key) < 0) return HPy_NULL;
+    if (HPy_SetItem(ctx, dict, key, second) < 0) return HPy_NULL;
+    HPy from_string = HPy_GetItem_s(ctx, dict, "answer");
+    if (HPy_IsNull(from_string)) return HPy_NULL;
+    if (HPy_DelItem_s(ctx, dict, "answer") < 0) return HPy_NULL;
+    HPy_ssize_t length = HPy_Length(ctx, dict);
+    if (length < 0) return HPy_NULL;
+    HPy items[4] = {
+        from_key,
+        from_string,
+        HPyLong_FromInt64_t(ctx, contains),
+        HPyLong_FromInt64_t(ctx, (int64_t)length),
+    };
+    HPy result = HPyTuple_FromArray(ctx, items, 4);
+    for (size_t index = 0; index < 4; index++) HPy_Close(ctx, items[index]);
+    HPy_Close(ctx, second);
+    HPy_Close(ctx, first);
+    HPy_Close(ctx, key);
+    HPy_Close(ctx, dict);
+    return result;
+}
+
+HPyDef_METH(call_positional, "call_positional", HPyFunc_VARARGS)
+static HPy call_positional_impl(
+    HPyContext *ctx, HPy self, const HPy *args, size_t nargs
+) {
+    (void)self;
+    if (nargs < 1 || !HPyCallable_Check(ctx, args[0])) {
+        return HPyErr_SetString(ctx, ctx->h_TypeError, "expected a callable");
+    }
+    return HPy_Call(ctx, args[0], args + 1, nargs - 1, HPy_NULL);
+}
+
+HPyDef_METH(call_tuple_dict, "call_tuple_dict", HPyFunc_O)
+static HPy call_tuple_dict_impl(HPyContext *ctx, HPy self, HPy callable) {
+    (void)self;
+    HPy twenty = HPyLong_FromInt64_t(ctx, 20);
+    HPy twenty_two = HPyLong_FromInt64_t(ctx, 22);
+    HPy args = HPyTuple_FromArray(ctx, &twenty, 1);
+    HPy keywords = HPyDict_New(ctx);
+    if (HPy_IsNull(args) || HPy_IsNull(keywords)) return HPy_NULL;
+    if (HPy_SetItem_s(ctx, keywords, "right", twenty_two) < 0) return HPy_NULL;
+    HPy result = HPy_CallTupleDict(ctx, callable, args, keywords);
+    HPy_Close(ctx, keywords);
+    HPy_Close(ctx, args);
+    HPy_Close(ctx, twenty_two);
+    HPy_Close(ctx, twenty);
+    return result;
+}
+
+HPyDef_METH(call_keywords, "call_keywords", HPyFunc_O)
+static HPy call_keywords_impl(HPyContext *ctx, HPy self, HPy callable) {
+    (void)self;
+    HPy arguments[2] = {
+        HPyLong_FromInt64_t(ctx, 20),
+        HPyLong_FromInt64_t(ctx, 22),
+    };
+    HPy name = HPyUnicode_FromString(ctx, "right");
+    HPy names = HPyTuple_FromArray(ctx, &name, 1);
+    if (HPy_IsNull(arguments[0]) || HPy_IsNull(arguments[1]) || HPy_IsNull(names)) {
+        return HPy_NULL;
+    }
+    HPy result = HPy_Call(ctx, callable, arguments, 1, names);
+    HPy_Close(ctx, names);
+    HPy_Close(ctx, name);
+    HPy_Close(ctx, arguments[1]);
+    HPy_Close(ctx, arguments[0]);
+    return result;
+}
+
+HPyDef_METH(call_method, "call_method", HPyFunc_O)
+static HPy call_method_impl(HPyContext *ctx, HPy self, HPy receiver) {
+    (void)self;
+    HPy name = HPyUnicode_FromString(ctx, "add");
+    HPy keyword_name = HPyUnicode_FromString(ctx, "right");
+    HPy keyword_names = HPyTuple_FromArray(ctx, &keyword_name, 1);
+    HPy arguments[3] = {
+        receiver,
+        HPyLong_FromInt64_t(ctx, 35),
+        HPyLong_FromInt64_t(ctx, 7),
+    };
+    if (HPy_IsNull(name) || HPy_IsNull(keyword_names)
+        || HPy_IsNull(arguments[1]) || HPy_IsNull(arguments[2])) return HPy_NULL;
+    HPy result = HPy_CallMethod(ctx, name, arguments, 2, keyword_names);
+    HPy_Close(ctx, arguments[2]);
+    HPy_Close(ctx, arguments[1]);
+    HPy_Close(ctx, keyword_names);
+    HPy_Close(ctx, keyword_name);
+    HPy_Close(ctx, name);
+    return result;
+}
+
 static HPyDef *module_defines[] = {
     &constant,
     &fib,
@@ -434,11 +696,20 @@ static HPyDef *module_defines[] = {
     &cancel_builder,
     &incomplete_builder,
     &leak_builder,
+    &argument_count,
+    &argument_shape,
+    &attr_roundtrip,
+    &list_roundtrip,
+    &dict_roundtrip,
+    &call_positional,
+    &call_tuple_dict,
+    &call_keywords,
+    &call_method,
     NULL,
 };
 
 static HPyModuleDef module_definition = {
-    .doc = "Tonic H1 integration fixture",
+    .doc = "Tonic H1/H2 integration fixture",
     .size = 0,
     .legacy_methods = NULL,
     .defines = module_defines,
@@ -451,16 +722,25 @@ HPy_MODINIT(h1demo, module_definition)
 const UNSUPPORTED_SOURCE: &str = r#"
 #include <hpy.h>
 
-HPyDef_METH(varargs, "varargs", HPyFunc_VARARGS)
-static HPy varargs_impl(HPyContext *ctx, HPy self, const HPy *args, size_t nargs) {
+static HPy invalid_impl(HPyContext *ctx, HPy self) {
     (void)self;
-    (void)args;
-    return HPyLong_FromInt64_t(ctx, (int64_t)nargs);
+    return HPyLong_FromInt64_t(ctx, 0);
 }
 
-static HPyDef *module_defines[] = { &varargs, NULL };
+static HPyDef invalid = {
+    .kind = HPyDef_Kind_Meth,
+    .meth = {
+        .name = "invalid",
+        .impl = (HPyCFunction)invalid_impl,
+        .cpy_trampoline = NULL,
+        .signature = (HPyFunc_Signature)99,
+        .doc = NULL,
+    },
+};
+
+static HPyDef *module_defines[] = { &invalid, NULL };
 static HPyModuleDef module_definition = {
-    .doc = "unsupported H2 signature fixture",
+    .doc = "unsupported signature fixture",
     .size = 0,
     .legacy_methods = NULL,
     .defines = module_defines,

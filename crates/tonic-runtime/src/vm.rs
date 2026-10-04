@@ -3036,7 +3036,7 @@ impl Vm {
         }
         let id = self.natives.len();
         self.natives.push(NativeDef {
-            arity,
+            signature: crate::StatefulNativeSignature::Exact(arity),
             function: NativeCallable::Rust(function),
         });
         let callable = self.heap.alloc(Object::Native(id))?;
@@ -3071,7 +3071,7 @@ impl Vm {
         }
         let id = self.natives.len();
         self.natives.push(NativeDef {
-            arity,
+            signature: crate::StatefulNativeSignature::Exact(arity),
             function: NativeCallable::C(function),
         });
         let callable = self.heap.alloc(Object::Native(id))?;
@@ -3103,7 +3103,7 @@ impl Vm {
         }
         let id = self.natives.len();
         self.natives.push(NativeDef {
-            arity,
+            signature: crate::StatefulNativeSignature::Exact(arity),
             function: NativeCallable::Stateful(function),
         });
         let callable = self.heap.alloc(Object::Native(id))?;
@@ -3148,9 +3148,58 @@ impl Vm {
         let value = self.heap.alloc(Object::Module(members))?;
         self.natives
             .extend(methods.into_iter().map(|(_, arity, function)| NativeDef {
-                arity,
+                signature: crate::StatefulNativeSignature::Exact(arity),
                 function: NativeCallable::Stateful(function),
             }));
+        self.modules.insert(module.into(), value);
+        Ok(())
+    }
+    /// Register a complete stateful module whose callbacks may receive
+    /// variadic positional and named arguments.
+    pub fn register_stateful_keyword_module(
+        &mut self,
+        module: &str,
+        methods: Vec<(
+            String,
+            crate::StatefulNativeSignature,
+            std::sync::Arc<crate::StatefulKeywordNativeFn>,
+        )>,
+    ) -> Result<()> {
+        self.ensure_running()?;
+        if self.modules.contains_key(module) {
+            return Err(Diagnostic::new(
+                "ImportError",
+                "native module already registered",
+            ));
+        }
+        let mut names = HashSet::with_capacity(methods.len());
+        if let Some((name, _, _)) = methods
+            .iter()
+            .find(|(name, _, _)| !names.insert(name.as_str()))
+        {
+            return Err(Diagnostic::new(
+                "ImportError",
+                format!("duplicate native function '{name}'"),
+            ));
+        }
+        let first_id = self.natives.len();
+        first_id
+            .checked_add(methods.len())
+            .ok_or_else(|| Diagnostic::new("OverflowError", "native function registry is full"))?;
+        let mut members = Vec::with_capacity(methods.len());
+        for (offset, (name, _, _)) in methods.iter().enumerate() {
+            let callable = self.heap.alloc(Object::Native(first_id + offset))?;
+            members.push((name.clone(), callable));
+        }
+        let value = self.heap.alloc(Object::Module(members))?;
+        self.natives.extend(
+            methods
+                .into_iter()
+                .map(|(_, signature, function)| NativeDef {
+                    signature,
+                    function: NativeCallable::StatefulKeywords(function),
+                }),
+        );
         self.modules.insert(module.into(), value);
         Ok(())
     }
@@ -3161,6 +3210,16 @@ impl Vm {
                 format!("no native module named '{name}'"),
             )
         })
+    }
+
+    pub(crate) fn builtin_callable(&self, expected: Builtin) -> Result<Value> {
+        self.builtins
+            .iter()
+            .map(|(_, value)| *value)
+            .find(|value| {
+                matches!(self.heap.get(*value), Ok(Object::Builtin(actual)) if *actual == expected)
+            })
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "builtin callable is unavailable"))
     }
     pub fn initialize_c_extension(
         &mut self,

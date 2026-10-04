@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h2a-container-builders"
+implementation_status = "h2-attributes-items-calls"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -18,8 +18,8 @@ public_header = "hpy/devel/include/hpy.h"
 context_header = "hpy/devel/include/hpy/universal/autogen_ctx.h"
 context_metadata_fields = ["name", "_private", "abi_version"]
 context_first_slot = 0
-context_last_slot = 260
-context_slot_count = 261
+context_last_slot = 262
+context_slot_count = 263
 context_layout_rule = "HPy_ID order; new members append"
 handle_storage = "intptr_t"
 null_handle_bits = 0
@@ -49,6 +49,28 @@ implemented_functions = [
   "HPyTupleBuilder_Set",
   "HPyTupleBuilder_Build",
   "HPyTupleBuilder_Cancel",
+  "HPy_Length",
+  "HPyCallable_Check",
+  "HPy_CallTupleDict",
+  "HPy_GetAttr",
+  "HPy_GetAttr_s",
+  "HPy_HasAttr",
+  "HPy_HasAttr_s",
+  "HPy_SetAttr",
+  "HPy_SetAttr_s",
+  "HPy_GetItem",
+  "HPy_GetItem_i",
+  "HPy_GetItem_s",
+  "HPy_Contains",
+  "HPy_SetItem",
+  "HPy_SetItem_i",
+  "HPy_SetItem_s",
+  "HPy_Repr",
+  "HPy_DelItem",
+  "HPy_DelItem_i",
+  "HPy_DelItem_s",
+  "HPy_Call",
+  "HPy_CallMethod",
 ]
 planned_h1_functions = [
   "HPy_Dup",
@@ -64,7 +86,12 @@ planned_h1_functions = [
 
 [limitations]
 list_new = "size 0 only; fixed-size construction uses HPyListBuilder"
-module_method_signatures = ["HPyFunc_NOARGS", "HPyFunc_O"]
+module_method_signatures = [
+  "HPyFunc_NOARGS",
+  "HPyFunc_O",
+  "HPyFunc_VARARGS",
+  "HPyFunc_KEYWORDS",
+]
 
 [module_symbols]
 required_major_prefix = "get_required_hpy_major_version_"
@@ -120,7 +147,7 @@ state = "available"
 [[capabilities]]
 id = "attributes-items-calls"
 planned_milestone = "H2"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "globals"

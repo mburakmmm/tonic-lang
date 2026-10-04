@@ -2,9 +2,9 @@
 
 //! Isolated HPy Universal adapter boundary.
 //!
-//! Milestone H1 provides strict shared-library validation, process pinning and
-//! the minimal HPy 0.9 context needed by scalar Universal extensions. APIs
-//! outside the published capability inventory remain fail-closed.
+//! The host provides strict shared-library validation, process pinning, scoped
+//! handles, H1 scalar APIs and the H2 container/object/call surface. APIs outside
+//! the published capability inventory remain fail-closed.
 
 mod host;
 mod loader;
@@ -56,8 +56,8 @@ pub const UNIVERSAL_ABI: UniversalAbi = UniversalAbi {
     public_header: "hpy/devel/include/hpy.h",
     context_header: "hpy/devel/include/hpy/universal/autogen_ctx.h",
     context_first_slot: 0,
-    context_last_slot: 260,
-    context_slot_count: 261,
+    context_last_slot: 262,
+    context_slot_count: 263,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,7 +199,7 @@ pub const CAPABILITIES: &[Capability] = &[
     available("unicode", "H1"),
     available("exception-state", "H1"),
     available("containers-builders", "H2"),
-    unavailable("attributes-items-calls", "H2"),
+    available("attributes-items-calls", "H2"),
     unavailable("globals", "H3"),
     unavailable("fields", "H3"),
     unavailable("types", "H4"),
@@ -235,6 +235,28 @@ pub const IMPLEMENTED_FUNCTIONS: &[&str] = &[
     "HPyTupleBuilder_Set",
     "HPyTupleBuilder_Build",
     "HPyTupleBuilder_Cancel",
+    "HPy_Length",
+    "HPyCallable_Check",
+    "HPy_CallTupleDict",
+    "HPy_GetAttr",
+    "HPy_GetAttr_s",
+    "HPy_HasAttr",
+    "HPy_HasAttr_s",
+    "HPy_SetAttr",
+    "HPy_SetAttr_s",
+    "HPy_GetItem",
+    "HPy_GetItem_i",
+    "HPy_GetItem_s",
+    "HPy_Contains",
+    "HPy_SetItem",
+    "HPy_SetItem_i",
+    "HPy_SetItem_s",
+    "HPy_Repr",
+    "HPy_DelItem",
+    "HPy_DelItem_i",
+    "HPy_DelItem_s",
+    "HPy_Call",
+    "HPy_CallMethod",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -255,7 +277,7 @@ const fn available_function(
     }
 }
 
-/// Callable H1 context surface. Later APIs remain absent and fail closed.
+/// Callable context surface. Later APIs remain absent and fail closed.
 pub const PLANNED_FUNCTIONS: &[FunctionCapability] = &[
     available_function("HPy_Dup", "H1"),
     available_function("HPy_Close", "H1"),
@@ -281,6 +303,28 @@ pub const PLANNED_FUNCTIONS: &[FunctionCapability] = &[
     available_function("HPyTupleBuilder_Set", "H2"),
     available_function("HPyTupleBuilder_Build", "H2"),
     available_function("HPyTupleBuilder_Cancel", "H2"),
+    available_function("HPy_Length", "H2"),
+    available_function("HPyCallable_Check", "H2"),
+    available_function("HPy_CallTupleDict", "H2"),
+    available_function("HPy_GetAttr", "H2"),
+    available_function("HPy_GetAttr_s", "H2"),
+    available_function("HPy_HasAttr", "H2"),
+    available_function("HPy_HasAttr_s", "H2"),
+    available_function("HPy_SetAttr", "H2"),
+    available_function("HPy_SetAttr_s", "H2"),
+    available_function("HPy_GetItem", "H2"),
+    available_function("HPy_GetItem_i", "H2"),
+    available_function("HPy_GetItem_s", "H2"),
+    available_function("HPy_Contains", "H2"),
+    available_function("HPy_SetItem", "H2"),
+    available_function("HPy_SetItem_i", "H2"),
+    available_function("HPy_SetItem_s", "H2"),
+    available_function("HPy_Repr", "H2"),
+    available_function("HPy_DelItem", "H2"),
+    available_function("HPy_DelItem_i", "H2"),
+    available_function("HPy_DelItem_s", "H2"),
+    available_function("HPy_Call", "H2"),
+    available_function("HPy_CallMethod", "H2"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -393,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn h1_capabilities_are_exact_and_unknown_apis_fail_closed() {
+    fn published_capabilities_are_exact_and_unknown_apis_fail_closed() {
         for capability in CAPABILITIES {
             match capability.state {
                 CapabilityState::Available => {

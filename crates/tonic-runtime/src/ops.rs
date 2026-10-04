@@ -445,7 +445,7 @@ impl Heap {
             _ => false,
         }))
     }
-    fn equal(&self, a: Value, b: Value, depth: usize) -> Result<bool> {
+    pub(crate) fn equal(&self, a: Value, b: Value, depth: usize) -> Result<bool> {
         if depth > 100 {
             return Err(Diagnostic::new(
                 "RecursionError",

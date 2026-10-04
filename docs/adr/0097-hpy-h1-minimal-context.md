@@ -7,7 +7,7 @@ Kabul edildi ve uygulandı.
 ## Bağlam
 
 HPy Universal library doğrulaması tek başına extension çalıştırmaz. Resmi HPy
-`0.9.0` header'ları, metadata alanları ve 261 pointer-sized slot içeren exact bir
+`0.9.0` header'ları, metadata alanları ve 263 pointer-sized slot içeren exact bir
 `HPyContext` bekler. Extension method'ları ayrıca VM değerlerine çağrı-scope
 handle'larla erişmeli, guest exception üretmeli ve module nesnesini doğru `self`
 olarak almalıdır. Tonic'in hareketli GC hedefi nedeniyle C tarafına heap adresi

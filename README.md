@@ -72,10 +72,11 @@ The current implementation includes:
 - an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.
 
-The accepted native ecosystem roadmap adds an isolated HPy Universal host and
-an aHPy compatibility lane. The target is to load `.hpy0` extensions without
-libpython while preserving Tonic's object layout and moving GC. This is planned
-work, not a current compatibility claim; see the
+The native ecosystem roadmap now includes an isolated HPy 0.9 Universal host
+that loads a deliberately bounded `.hpy0` subset without libpython. Scoped
+handles, scalar/container APIs, attributes/items and positional/keyword calls
+operate through Tonic's object model; globals, fields, extension types, buffers,
+Debug/Trace contexts and the aHPy package lane remain roadmap work. See the
 [HPy/aHPy strategy](docs/HPY_AHPY_STRATEGY.md).
 
 The unsupported surface is reported explicitly. Tonic 0.x deliberately keeps
@@ -172,7 +173,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 374 Rust tests and a differential corpus of
+The repository currently contains 389 Rust tests and a differential corpus of
 332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets

@@ -2275,6 +2275,37 @@ fn stateful_module_registration_is_atomic_and_rejects_collisions() {
     vm.run(&program, &mut output).unwrap();
     assert_eq!(output, b"1\n");
 }
+
+#[test]
+fn stateful_keyword_module_receives_variadic_arguments_without_materialized_guest_containers() {
+    use std::sync::Arc;
+
+    let callback: Arc<tonic_runtime::StatefulKeywordNativeFn> =
+        Arc::new(|context, positional, keywords| {
+            let score = positional.len() as i64 * 10
+                + keywords.len() as i64
+                + i64::from(keywords.first().is_some_and(|(name, _)| name == "flag"));
+            context.from_i64(score)
+        });
+    let mut vm = Vm::new().unwrap();
+    vm.register_stateful_keyword_module(
+        "variadic",
+        vec![(
+            "count".to_owned(),
+            tonic_runtime::StatefulNativeSignature::Keywords,
+            callback,
+        )],
+    )
+    .unwrap();
+    let program = compile(
+        "import variadic\nprint(variadic.count(1, 2, flag=3))",
+        "stateful-keywords",
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"22\n");
+}
 #[test]
 fn small_integer_loop_has_no_per_iteration_heap_allocations() {
     let p = compile("i=0\ntotal=0\nwhile i<10000:\n    total+=i\n    i+=1", "x").unwrap();
