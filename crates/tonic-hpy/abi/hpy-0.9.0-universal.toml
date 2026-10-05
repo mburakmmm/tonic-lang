@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h3-globals-fields"
+implementation_status = "h3-trackers-globals-fields"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -69,6 +69,10 @@ implemented_functions = [
   "HPyTupleBuilder_Set",
   "HPyTupleBuilder_Build",
   "HPyTupleBuilder_Cancel",
+  "HPyTracker_New",
+  "HPyTracker_Add",
+  "HPyTracker_ForgetAll",
+  "HPyTracker_Close",
   "HPyField_Store",
   "HPyField_Load",
   "HPyGlobal_Store",
@@ -114,7 +118,7 @@ numeric_protocols = "scalar conversion accepts exact Tonic bool/int/float values
 exception_types = "SetObject and ExceptionMatches support built-in exception classes and nested tuples; custom exception classes require the H4 type surface"
 exception_fetch = "HPy 0.9 exposes no public fetch/restore API"
 fields = "precise fields are available for heap owners; embedding fields in extension native payloads requires the H4 type surface"
-module_state = "non-zero HPyModuleDef.size and HPyTracker remain unavailable"
+module_state = "non-zero HPyModuleDef.size remains unavailable because HPy 0.9 exposes no public Universal state accessor"
 module_method_signatures = [
   "HPyFunc_NOARGS",
   "HPyFunc_O",
@@ -190,6 +194,11 @@ state = "available"
 
 [[capabilities]]
 id = "fields"
+planned_milestone = "H3"
+state = "available"
+
+[[capabilities]]
+id = "trackers"
 planned_milestone = "H3"
 state = "available"
 

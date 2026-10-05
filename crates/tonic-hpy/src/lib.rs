@@ -3,7 +3,8 @@
 //! Isolated HPy Universal adapter boundary.
 //!
 //! The host provides strict shared-library validation, process pinning, scoped
-//! handles, H1 scalar APIs and the H2 container/object/call surface. APIs outside
+//! handles, H1 scalar APIs, H2 container/object/call operations and H3
+//! global/field/tracker lifetime support. APIs outside
 //! the published capability inventory remain fail-closed.
 
 mod host;
@@ -203,6 +204,7 @@ pub const CAPABILITIES: &[Capability] = &[
     available("scalars-exceptions", "H2"),
     available("globals", "H3"),
     available("fields", "H3"),
+    available("trackers", "H3"),
     unavailable("types", "H4"),
     unavailable("buffer", "H5"),
     unavailable("execution-state", "H5"),
@@ -256,6 +258,10 @@ pub const IMPLEMENTED_FUNCTIONS: &[&str] = &[
     "HPyTupleBuilder_Set",
     "HPyTupleBuilder_Build",
     "HPyTupleBuilder_Cancel",
+    "HPyTracker_New",
+    "HPyTracker_Add",
+    "HPyTracker_ForgetAll",
+    "HPyTracker_Close",
     "HPyField_Store",
     "HPyField_Load",
     "HPyGlobal_Store",
@@ -348,6 +354,10 @@ pub const PLANNED_FUNCTIONS: &[FunctionCapability] = &[
     available_function("HPyTupleBuilder_Set", "H2"),
     available_function("HPyTupleBuilder_Build", "H2"),
     available_function("HPyTupleBuilder_Cancel", "H2"),
+    available_function("HPyTracker_New", "H3"),
+    available_function("HPyTracker_Add", "H3"),
+    available_function("HPyTracker_ForgetAll", "H3"),
+    available_function("HPyTracker_Close", "H3"),
     available_function("HPyField_Store", "H3"),
     available_function("HPyField_Load", "H3"),
     available_function("HPyGlobal_Store", "H3"),

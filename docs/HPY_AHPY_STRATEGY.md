@@ -241,8 +241,21 @@ field'in yaşattığı değer compaction'dan çıkar, field-only cycle ise dış
 kalmadığında toplanır. Gerçek C fixture iki VM arasında global izolasyonunu,
 global cycle root/clear davranışını ve interpreter/JIT caller altında
 her-allocation GC ile field load/clear/cycle reclamation'ı doğrular. Karar
-[ADR 0102](adr/0102-hpy-globals-fields.md) içindedir. `HPyTracker`, non-zero
-module C state ve native payload içine field gömme H3/H4'ün kalan işidir.
+[ADR 0102](adr/0102-hpy-globals-fields.md) içindedir.
+
+H3b `HPyTracker` yüzeyi de tamamlanmıştır. Tracker, mevcut local handle'ların
+sahipliğini alır; `Close` hepsini tam bir kez kapatır, `ForgetAll` ise handle'ları
+açık bırakarak yalnız tracker'ı tüketir. Negatif/aşırı kapasite, stale token,
+kapanmış handle ve normal dönüşte açık tracker deterministic guest hatasıdır.
+Gerçek C fixture bu davranışı interpreter/JIT caller ve normal/her-allocation GC
+matrisinde sınar. Karar [ADR 0103](adr/0103-hpy-tracker-lifetime.md) içindedir.
+
+Pinned HPy 0.9 Universal header'ı `HPyModuleDef.size` alanını tanımlar fakat C
+extension'a ayrılmış state pointer'ını veren public bir context fonksiyonu
+tanımlamaz. Bu nedenle Tonic non-zero size'ı destekliyormuş gibi göstermeyecek ve
+private bir accessor ABI'si uydurmayacaktır. Bu kapı, resmi erişim sözleşmesi olan
+bir HPy sürümüne geçiş kararıyla veya upstream uyumluluk kanıtıyla açılacaktır.
+Native payload içine field gömme H4 type yüzeyinin kalan işidir.
 
 ### H4 — Pure types ve protokoller
 

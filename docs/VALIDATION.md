@@ -44,7 +44,7 @@ Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 122, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 7; toplam 393 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 394 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -288,6 +288,10 @@ testi owner→value kenarını her-allocation moving GC altında load eder, clea
 ve yalnız field/value→owner tarafından tutulan cycle'ın major collection'da
 toplandığını doğrular. Heap unit testleri external field old→young write barrier'ı
 ile owner öldüğünde field metadata sweep'ini doğrudan denetler.
+H3 tracker fixture `Close` ile sahip olunan local handle'ların kapandığını,
+`ForgetAll` sonrasında sahipliğin çağıranda kaldığını ve stale token, kapanmış
+handle, negatif kapasite ile açık tracker dönüşlerinin interpreter/JIT ×
+default/her-allocation GC matrisinde deterministic hata verdiğini doğrular.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

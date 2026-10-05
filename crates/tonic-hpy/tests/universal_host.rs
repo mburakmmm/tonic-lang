@@ -137,6 +137,12 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             "cancel_builder",
             "incomplete_builder",
             "leak_builder",
+            "tracker_sum",
+            "tracker_forget",
+            "tracker_closed_handle",
+            "stale_tracker",
+            "leak_tracker",
+            "negative_tracker",
             "argument_count",
             "argument_shape",
             "attr_roundtrip",
@@ -193,6 +199,24 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             )
         );
         assert_eq!(vm.active_handles(), 0);
+    }
+}
+
+#[test]
+fn h3_trackers_close_or_release_owned_handles_deterministically() {
+    let fixture = Fixture::compile();
+    let module = module(&fixture);
+    let source = concat!(
+        "import h1demo\n",
+        "print(h1demo.tracker_sum())\n",
+        "print(h1demo.tracker_forget())\n",
+    );
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        for gc_interval in [None, Some(1)] {
+            let (vm, output) = run_with_gc(&module, source, mode, gc_interval);
+            assert_eq!(output, "42\n43\n", "mode={mode:?}, gc={gc_interval:?}");
+            assert_eq!(vm.active_handles(), 0, "mode={mode:?}, gc={gc_interval:?}");
+        }
     }
 }
 
@@ -372,6 +396,10 @@ fn hpy_exception_state_and_failure_cleanup_are_guest_visible() {
         ("h1demo.result_with_error()", "SystemError"),
         ("h1demo.incomplete_builder()", "SystemError"),
         ("h1demo.leak_builder()", "HandleError"),
+        ("h1demo.tracker_closed_handle()", "HandleError"),
+        ("h1demo.stale_tracker()", "HandleError"),
+        ("h1demo.leak_tracker()", "HandleError"),
+        ("h1demo.negative_tracker()", "ValueError"),
         ("h1demo.argument_count(flag=1)", "TypeError"),
         ("h1demo.list_roundtrip(1)", "TypeError"),
         ("h1demo.call_positional(1)", "TypeError"),
@@ -640,6 +668,85 @@ static HPy leak_builder_impl(HPyContext *ctx, HPy self) {
     (void)self;
     (void)HPyListBuilder_New(ctx, 1);
     return HPyLong_FromInt64_t(ctx, 10);
+}
+
+HPyDef_METH(tracker_sum, "tracker_sum", HPyFunc_NOARGS)
+static HPy tracker_sum_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTracker tracker = HPyTracker_New(ctx, 2);
+    if (tracker._i == 0) return HPy_NULL;
+    HPy first = HPyLong_FromInt64_t(ctx, 19);
+    HPy second = HPyLong_FromInt64_t(ctx, 23);
+    if (HPy_IsNull(first) || HPy_IsNull(second)) {
+        HPyTracker_Close(ctx, tracker);
+        return HPy_NULL;
+    }
+    if (HPyTracker_Add(ctx, tracker, first) < 0 ||
+        HPyTracker_Add(ctx, tracker, second) < 0) {
+        HPyTracker_Close(ctx, tracker);
+        return HPy_NULL;
+    }
+    int64_t result = HPyLong_AsInt64_t(ctx, first) + HPyLong_AsInt64_t(ctx, second);
+    HPyTracker_Close(ctx, tracker);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPyLong_FromInt64_t(ctx, result);
+}
+
+HPyDef_METH(tracker_forget, "tracker_forget", HPyFunc_NOARGS)
+static HPy tracker_forget_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTracker tracker = HPyTracker_New(ctx, 0);
+    if (tracker._i == 0) return HPy_NULL;
+    HPy value = HPyLong_FromInt64_t(ctx, 43);
+    if (HPy_IsNull(value) || HPyTracker_Add(ctx, tracker, value) < 0) {
+        HPyTracker_Close(ctx, tracker);
+        return HPy_NULL;
+    }
+    HPyTracker_ForgetAll(ctx, tracker);
+    int64_t result = HPyLong_AsInt64_t(ctx, value);
+    HPy_Close(ctx, value);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPyLong_FromInt64_t(ctx, result);
+}
+
+HPyDef_METH(tracker_closed_handle, "tracker_closed_handle", HPyFunc_NOARGS)
+static HPy tracker_closed_handle_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTracker tracker = HPyTracker_New(ctx, 1);
+    if (tracker._i == 0) return HPy_NULL;
+    HPy value = HPyLong_FromInt64_t(ctx, 1);
+    if (HPy_IsNull(value) || HPyTracker_Add(ctx, tracker, value) < 0) {
+        HPyTracker_Close(ctx, tracker);
+        return HPy_NULL;
+    }
+    HPyTracker_Close(ctx, tracker);
+    return HPy_Dup(ctx, value);
+}
+
+HPyDef_METH(stale_tracker, "stale_tracker", HPyFunc_NOARGS)
+static HPy stale_tracker_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTracker tracker = HPyTracker_New(ctx, 0);
+    if (tracker._i == 0) return HPy_NULL;
+    HPyTracker_Close(ctx, tracker);
+    if (HPyTracker_Add(ctx, tracker, ctx->h_None) < 0) return HPy_NULL;
+    return HPy_Dup(ctx, ctx->h_None);
+}
+
+HPyDef_METH(leak_tracker, "leak_tracker", HPyFunc_NOARGS)
+static HPy leak_tracker_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    (void)HPyTracker_New(ctx, 0);
+    return HPyLong_FromInt64_t(ctx, 10);
+}
+
+HPyDef_METH(negative_tracker, "negative_tracker", HPyFunc_NOARGS)
+static HPy negative_tracker_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyTracker tracker = HPyTracker_New(ctx, -1);
+    if (tracker._i == 0) return HPy_NULL;
+    HPyTracker_Close(ctx, tracker);
+    return HPy_Dup(ctx, ctx->h_None);
 }
 
 HPyDef_METH(argument_count, "argument_count", HPyFunc_VARARGS)
@@ -1017,6 +1124,12 @@ static HPyDef *module_defines[] = {
     &cancel_builder,
     &incomplete_builder,
     &leak_builder,
+    &tracker_sum,
+    &tracker_forget,
+    &tracker_closed_handle,
+    &stale_tracker,
+    &leak_tracker,
+    &negative_tracker,
     &argument_count,
     &argument_shape,
     &attr_roundtrip,

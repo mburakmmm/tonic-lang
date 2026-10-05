@@ -2,7 +2,7 @@
 
 `tonic-hpy` is the isolated adapter boundary for Tonic's HPy Universal host.
 The crate implements the pinned HPy 0.9 Universal ABI inventory and the current
-H1/H2 host: strict module filename/init-symbol/ABI validation, process-lifetime
+H1-H3 host: strict module filename/init-symbol/ABI validation, process-lifetime
 library pinning, scoped local handles and VM-owned module methods.
 
 The executable surface is deliberately bounded: `HPy_Dup`/`HPy_Close`, the HPy
@@ -20,9 +20,13 @@ public exception fetch/restore API. Custom numeric conversion protocols and
 custom exception classes remain unavailable until their protocol/type surfaces.
 Per-runtime `HPyGlobal` roots and owner-traced `HPyField` edges are available;
 field stores use the generational write barrier and field-only cycles remain
-collectible. Native payload embedding, module C state/trackers, types, buffers,
-Debug and Trace contexts remain tracked work in the capability manifest and
-roadmap.
+collectible. `HPyTracker` owns call-local handles until `Close`, or releases
+ownership without closing through `ForgetAll`; stale, leaked and invalid
+trackers fail deterministically. Native payload embedding, non-zero module C
+state, types, buffers, Debug and Trace contexts remain tracked work in the
+capability manifest and roadmap. The pinned HPy 0.9 Universal public surface has
+no module-state accessor, so Tonic does not invent a private ABI for
+`HPyModuleDef.size`.
 
 The official HPy 0.9 header tree used by native integration tests is vendored
 under `vendor/hpy-0.9.0`; its source hash and license are recorded there. The

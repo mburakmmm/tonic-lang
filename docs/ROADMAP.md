@@ -392,8 +392,11 @@ sonra alınır.
     testleri. Bu HPy sürümünde public fetch/restore API'si yoktur.
   - [x] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
     moving-GC altında field/global cycle testi.
-  - [ ] `HPyTracker`, non-zero module C state ve deterministic teardown; native
-    payload field yerleşimi H4 type yüzeyiyle birlikte tamamlanacak.
+  - [x] `HPyTracker` ownership, `Close`/`ForgetAll`, stale/leak/fault yolları ve
+    deterministic call teardown.
+  - [ ] Non-zero module C state: pinned HPy 0.9 Universal public yüzeyinde state
+    accessor olmadığı için private ABI uydurmadan upstream sürüm/contract kararı.
+    Native payload field yerleşimi H4 type yüzeyiyle birlikte tamamlanacak.
   - [ ] Pure `HPyType_Spec`, native payload, methods/slots/inheritance, trace,
     finalizer ve shutdown sözleşmeleri.
   - [ ] Public HPy buffer ve execution-state yüzeyi; owner/pin/thread/callback

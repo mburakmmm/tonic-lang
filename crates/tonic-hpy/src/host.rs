@@ -88,6 +88,10 @@ const SLOT_TUPLE_BUILDER_NEW: usize = 213;
 const SLOT_TUPLE_BUILDER_SET: usize = 214;
 const SLOT_TUPLE_BUILDER_BUILD: usize = 215;
 const SLOT_TUPLE_BUILDER_CANCEL: usize = 216;
+const SLOT_TRACKER_NEW: usize = 217;
+const SLOT_TRACKER_ADD: usize = 218;
+const SLOT_TRACKER_FORGET_ALL: usize = 219;
+const SLOT_TRACKER_CLOSE: usize = 220;
 const SLOT_FIELD_STORE: usize = 221;
 const SLOT_FIELD_LOAD: usize = 222;
 const SLOT_GLOBAL_STORE: usize = 225;
@@ -107,6 +111,7 @@ const LAST_LATE_HANDLE: usize = 243;
 
 static NEXT_LOCAL_HANDLE: AtomicUsize = AtomicUsize::new(1);
 static NEXT_BUILDER: AtomicUsize = AtomicUsize::new(1);
+static NEXT_TRACKER: AtomicUsize = AtomicUsize::new(1);
 static NEXT_FIELD: AtomicUsize = AtomicUsize::new(1);
 static NEXT_MODULE: AtomicU64 = AtomicU64::new(1);
 
@@ -119,6 +124,12 @@ struct Hpy {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct HpyBuilder {
+    bits: isize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HpyTracker {
     bits: isize,
 }
 
@@ -238,6 +249,10 @@ impl HpyContext {
         context.slots[SLOT_TUPLE_BUILDER_SET] = hpy_tuple_builder_set as usize;
         context.slots[SLOT_TUPLE_BUILDER_BUILD] = hpy_tuple_builder_build as usize;
         context.slots[SLOT_TUPLE_BUILDER_CANCEL] = hpy_tuple_builder_cancel as usize;
+        context.slots[SLOT_TRACKER_NEW] = hpy_tracker_new as usize;
+        context.slots[SLOT_TRACKER_ADD] = hpy_tracker_add as usize;
+        context.slots[SLOT_TRACKER_FORGET_ALL] = hpy_tracker_forget_all as usize;
+        context.slots[SLOT_TRACKER_CLOSE] = hpy_tracker_close as usize;
         context.slots[SLOT_FIELD_STORE] = hpy_field_store as usize;
         context.slots[SLOT_FIELD_LOAD] = hpy_field_load as usize;
         context.slots[SLOT_GLOBAL_STORE] = hpy_global_store as usize;
@@ -644,6 +659,7 @@ struct CallState {
     handles: HashMap<isize, Handle>,
     utf8: HashMap<isize, Box<[u8]>>,
     builders: HashMap<isize, BuilderState>,
+    trackers: HashMap<isize, Vec<Hpy>>,
     exception: Option<Diagnostic>,
 }
 
@@ -662,6 +678,7 @@ impl CallState {
             handles: HashMap::new(),
             utf8: HashMap::new(),
             builders: HashMap::new(),
+            trackers: HashMap::new(),
             exception: None,
         }
     }
@@ -810,6 +827,12 @@ impl CallState {
             return Err(Diagnostic::new(
                 "HandleError",
                 "HPy method leaked an unfinished builder",
+            ));
+        }
+        if !self.trackers.is_empty() && self.exception.is_none() {
+            return Err(Diagnostic::new(
+                "HandleError",
+                "HPy method leaked an open tracker",
             ));
         }
         match (result == Hpy::NULL, self.exception.take()) {
@@ -2060,6 +2083,107 @@ unsafe extern "C" fn hpy_tuple_builder_cancel(context: *mut HpyContext, builder:
     if let Some(call) = unsafe { active_call(context) } {
         if call.builders.remove(&builder.bits).is_none() {
             call.fail(Diagnostic::new("HandleError", "stale HPy builder"), ());
+        }
+    }
+}
+
+unsafe extern "C" fn hpy_tracker_new(context: *mut HpyContext, size: isize) -> HpyTracker {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return HpyTracker { bits: 0 };
+    };
+    let size = match usize::try_from(size) {
+        Ok(size) if size <= MAX_CONTAINER_ITEMS => size,
+        Ok(_) => {
+            return call.fail(
+                Diagnostic::new("OverflowError", "HPy tracker exceeds the handle limit"),
+                HpyTracker { bits: 0 },
+            );
+        }
+        Err(_) => {
+            return call.fail(
+                Diagnostic::new("ValueError", "HPy tracker size cannot be negative"),
+                HpyTracker { bits: 0 },
+            );
+        }
+    };
+    let token = match NEXT_TRACKER.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current
+            .checked_add(1)
+            .filter(|next| *next <= isize::MAX as usize)
+    }) {
+        Ok(token) => token as isize,
+        Err(_) => {
+            return call.fail(
+                Diagnostic::new("HandleError", "HPy tracker token space exhausted"),
+                HpyTracker { bits: 0 },
+            );
+        }
+    };
+    let mut handles = Vec::new();
+    if handles.try_reserve_exact(size).is_err() {
+        return call.fail(
+            Diagnostic::new("MemoryError", "could not allocate HPy tracker"),
+            HpyTracker { bits: 0 },
+        );
+    }
+    call.trackers.insert(token, handles);
+    HpyTracker { bits: token }
+}
+
+unsafe extern "C" fn hpy_tracker_add(
+    context: *mut HpyContext,
+    tracker: HpyTracker,
+    handle: Hpy,
+) -> c_int {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return -1;
+    };
+    if handle != Hpy::NULL && handle.special_slot().is_none() {
+        if let Err(error) = call.resolve(handle) {
+            return call.fail(error, -1);
+        }
+    }
+    let Some(handles) = call.trackers.get_mut(&tracker.bits) else {
+        return call.fail(Diagnostic::new("HandleError", "stale HPy tracker"), -1);
+    };
+    if handles.len() >= MAX_CONTAINER_ITEMS {
+        return call.fail(
+            Diagnostic::new("OverflowError", "HPy tracker exceeds the handle limit"),
+            -1,
+        );
+    }
+    if handles.try_reserve(1).is_err() {
+        return call.fail(
+            Diagnostic::new("MemoryError", "could not grow HPy tracker"),
+            -1,
+        );
+    }
+    handles.push(handle);
+    0
+}
+
+unsafe extern "C" fn hpy_tracker_forget_all(context: *mut HpyContext, tracker: HpyTracker) {
+    // SAFETY: the extension must pass the active context it received.
+    if let Some(call) = unsafe { active_call(context) } {
+        if call.trackers.remove(&tracker.bits).is_none() {
+            call.fail(Diagnostic::new("HandleError", "stale HPy tracker"), ());
+        }
+    }
+}
+
+unsafe extern "C" fn hpy_tracker_close(context: *mut HpyContext, tracker: HpyTracker) {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return;
+    };
+    let Some(handles) = call.trackers.remove(&tracker.bits) else {
+        return call.fail(Diagnostic::new("HandleError", "stale HPy tracker"), ());
+    };
+    for handle in handles {
+        if let Err(error) = call.close(handle) {
+            call.fail(error, ());
         }
     }
 }
