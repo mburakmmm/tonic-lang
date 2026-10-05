@@ -172,10 +172,19 @@ overflow, sıfıra bölme veya bozulmuş resume state yine tam PC'de deopt eder.
 Elision sayısı JIT metadata'sı ve VM istatistiklerinde yayımlanır. Karar ayrıntısı
 [ADR 0106](adr/0106-typed-int-dataflow-overlay.md) içindedir.
 
-Bu overlay henüz raw `i64` register/çağrı ABI'si değildir: integer değerler precise
-root buffer'da tagged `Value` olarak kalır ve işlem sınırında decode/encode edilir.
-Birleşik float/bool lattice, annotated call-result propagation ve typed direct-call
-özeti sonraki dilimdir.
+Scalar overlay artık ortak `Unknown/Int/Float/Bool` lattice'i kullanır. Exact
+`bool` annotation'lı fonksiyonlar da first-call typed girişe adaydır; parametre,
+bool sabiti, `Move`, `not`, scalar karşılaştırma ve branch sonuçları taşınır.
+Arbitrary-PC giriş exact `bool` değerini guard eder. `bool` aritmetiği Python'daki
+`bool <: int` davranışını koruyarak `False=0`, `True=1` olarak lower edilir ve
+sonucu tagged `int` olur. Bu genişletmenin kararı
+[ADR 0107](adr/0107-typed-scalar-bool-lattice.md) içindedir.
+
+Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
+değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında
+decode/encode edilir. F64 lowering mevcut ayrı stack-slot/stack-map mekanizmasını
+kullanır. Annotated call-result propagation, direct-callee özeti ve kullanıcıya
+açık explain/rejection metadata'sı sonraki dilimdir.
 
 ## Kabul ölçütleri
 

@@ -109,6 +109,7 @@ pub struct Stats {
     pub jit_annotation_guard_misses: u64,
     pub jit_annotation_invalidations: u64,
     pub jit_typed_int_guard_elisions: u64,
+    pub jit_typed_bool_guard_elisions: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -249,6 +250,7 @@ enum JitEntry {
 enum AnnotationScalar {
     Int,
     Float,
+    Bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1878,6 +1880,7 @@ impl Vm {
             match annotation.plan.as_ref().ok()? {
                 TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
                 TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
+                TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
                 _ => None,
             }
         };
@@ -1936,6 +1939,7 @@ impl Vm {
         match kind {
             AnnotationScalar::Int => value.as_int().is_some(),
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
+            AnnotationScalar::Bool => value.as_bool().is_some(),
         }
     }
 
@@ -1945,6 +1949,7 @@ impl Vm {
                 value.as_int().is_some() || matches!(self.heap.get(value), Ok(Object::Int(_)))
             }
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
+            AnnotationScalar::Bool => value.as_bool().is_some(),
         }
     }
 
@@ -9246,6 +9251,7 @@ impl Vm {
                 let scalar = |kind| match kind {
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
+                    AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
                 };
                 tonic_jit::TypedSignature {
                     parameters: annotation.parameters.iter().copied().map(scalar).collect(),
@@ -9290,6 +9296,8 @@ impl Vm {
                     self.stats.jit_direct_method_sites += metadata.direct_method_sites as u64;
                     self.stats.jit_typed_int_guard_elisions +=
                         metadata.typed_int_guard_elisions as u64;
+                    self.stats.jit_typed_bool_guard_elisions +=
+                        metadata.typed_bool_guard_elisions as u64;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,

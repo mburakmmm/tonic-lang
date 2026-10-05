@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 23, runtime unit 26,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 24, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 127, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 401 test.
+native handles 5, language/runtime 128, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 403 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -62,6 +62,13 @@ azalttığını metadata sayacıyla doğrular. Doğru exact-int giriş native so
 verir; bool ile normal giriş ve eksik/corrupt register'larla arbitrary-PC resume
 aynı giriş PC'sinde deopt eder. Public JIT API uyumsuz typed-signature arity'sini
 Cranelift codegen öncesinde `InvalidBytecode` olarak reddeder.
+
+Typed scalar bool testi ortak `Unknown/Int/Float/Bool` lattice'inde exact-bool
+parametre, branch, `bool + int` ve karşılaştırma sonucunu izler. Native yol
+`False=0`/`True=1` sayısal dönüşümünü Python ile aynı yapar; exact-bool olmayan
+argüman first-call tier'ını atlayıp advisory annotation semantiğiyle generic
+sonucu üretir. Ayrı public-JIT testi normal girişte yanlış bool tag'ını reddeder
+ve metadata'daki bool guard-elision sayacını doğrular.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×

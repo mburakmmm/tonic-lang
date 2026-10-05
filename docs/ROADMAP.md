@@ -336,6 +336,12 @@ sonra alınır.
       noktalarında redundant tag-guard elimination.
     - [ ] Birleşik `int/float/bool` lattice, dönüş/call-result propagation,
       direct annotated callee özeti ve diagnostics/explain metadata'sı.
+      - [x] Ortak `Unknown/Int/Float/Bool` forward lattice; exact-bool parametre,
+        sabit, `Move`, `not`, karşılaştırma ve branch propagation'ı; `bool`
+        annotation'lı first-call JIT, arbitrary-PC exact-bool guard'ı ve Python
+        `bool <: int` sayısal lowering'i.
+      - [ ] Annotated dönüş/call-result propagation, direct callee özeti ve
+        kullanıcıya açık explain/rejection metadata'sı.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.

@@ -261,12 +261,15 @@ pub struct Metadata {
     pub direct_method_sites: usize,
     /// Integer tag guards proven redundant by the verified typed overlay.
     pub typed_int_guard_elisions: usize,
+    /// Exact-bool guards proven redundant by the verified typed overlay.
+    pub typed_bool_guard_elisions: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
     Int,
     Float,
+    Bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,10 +364,32 @@ struct FloatAnalysis {
     deopt_maps: Vec<DeoptMap>,
 }
 
-struct TypedIntAnalysis {
-    before: Vec<Option<Vec<bool>>>,
-    slots: Vec<bool>,
-    guard_elisions: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScalarFact {
+    Unknown,
+    Int,
+    Float,
+    Bool,
+}
+
+impl ScalarFact {
+    fn from_signature(kind: ScalarType) -> Self {
+        match kind {
+            ScalarType::Int => Self::Int,
+            ScalarType::Float => Self::Float,
+            ScalarType::Bool => Self::Bool,
+        }
+    }
+
+    fn is_integer_like(self) -> bool {
+        matches!(self, Self::Int | Self::Bool)
+    }
+}
+
+struct TypedScalarAnalysis {
+    before: Vec<Option<Vec<ScalarFact>>>,
+    int_guard_elisions: usize,
+    bool_guard_elisions: usize,
 }
 
 type RuntimeHelper = extern "C" fn(*mut c_void, *const u64, usize, u32, u64, u64, *mut u64) -> u32;
@@ -821,8 +846,8 @@ pub fn compile_with_execution_profile_and_types(
     validate_materialized_constants(code, materialized_constants)?;
     validate_supported(code, direct_calls, materialized_constants)?;
     let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
-    let typed_int_analysis = typed_signature
-        .map(|signature| analyze_typed_int_execution(code, signature))
+    let typed_scalar_analysis = typed_signature
+        .map(|signature| analyze_typed_scalar_execution(code, signature))
         .transpose()?;
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
@@ -972,8 +997,8 @@ pub fn compile_with_execution_profile_and_types(
             let interval = builder.ins().iconst(types::I64, BACKEDGE_POLL_INTERVAL);
             builder.ins().stack_store(interval, slot, 0);
         }
-        if let Some(analysis) = &typed_int_analysis {
-            registers = emit_typed_int_entry_guards(
+        if let Some(analysis) = &typed_scalar_analysis {
+            registers = emit_typed_scalar_entry_guards(
                 &mut builder,
                 registers,
                 start_pc,
@@ -1039,7 +1064,7 @@ pub fn compile_with_execution_profile_and_types(
             let float_state = float_analysis
                 .as_ref()
                 .and_then(|analysis| analysis.before[pc].as_ref());
-            let typed_int_state = typed_int_analysis
+            let typed_scalar_state = typed_scalar_analysis
                 .as_ref()
                 .and_then(|analysis| analysis.before[pc].as_ref());
             match op {
@@ -1215,10 +1240,12 @@ pub fn compile_with_execution_profile_and_types(
                         );
                         continue;
                     }
-                    let statically_int = typed_int_state.is_some_and(|state| {
-                        state[instruction.b as usize] && state[instruction.c as usize]
+                    let typed_operands = typed_scalar_state.and_then(|state| {
+                        let left = state[instruction.b as usize];
+                        let right = state[instruction.c as usize];
+                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
                     });
-                    let registers = if statically_int {
+                    let registers = if typed_operands.is_some() {
                         registers
                     } else if backedges > 0 {
                         let left = load(&mut builder, registers, instruction.b);
@@ -1277,8 +1304,17 @@ pub fn compile_with_execution_profile_and_types(
                     };
                     let left_raw = load(&mut builder, registers, instruction.b);
                     let right_raw = load(&mut builder, registers, instruction.c);
-                    let left = decode_int(&mut builder, left_raw);
-                    let right = decode_int(&mut builder, right_raw);
+                    let (left, right) = if let Some((left, right)) = typed_operands {
+                        (
+                            decode_known_integer(&mut builder, left_raw, left),
+                            decode_known_integer(&mut builder, right_raw, right),
+                        )
+                    } else {
+                        (
+                            decode_int(&mut builder, left_raw),
+                            decode_int(&mut builder, right_raw),
+                        )
+                    };
                     let (result, valid) = match op {
                         Op::Sub => (builder.ins().isub(left, right), None),
                         Op::Add | Op::InplaceAdd => (builder.ins().iadd(left, right), None),
@@ -1371,9 +1407,10 @@ pub fn compile_with_execution_profile_and_types(
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::Neg | Op::Pos => {
-                    let statically_int =
-                        typed_int_state.is_some_and(|state| state[instruction.b as usize]);
-                    let registers = if statically_int {
+                    let typed_operand = typed_scalar_state
+                        .map(|state| state[instruction.b as usize])
+                        .filter(|fact| fact.is_integer_like());
+                    let registers = if typed_operand.is_some() {
                         registers
                     } else {
                         let operand = load(&mut builder, registers, instruction.b);
@@ -1381,7 +1418,11 @@ pub fn compile_with_execution_profile_and_types(
                         guard(&mut builder, condition, registers, pc, pointer_type)
                     };
                     let raw = load(&mut builder, registers, instruction.b);
-                    let operand = decode_int(&mut builder, raw);
+                    let operand = if let Some(fact) = typed_operand {
+                        decode_known_integer(&mut builder, raw, fact)
+                    } else {
+                        decode_int(&mut builder, raw)
+                    };
                     let result = if matches!(op, Op::Neg) {
                         builder.ins().ineg(operand)
                     } else {
@@ -1411,10 +1452,12 @@ pub fn compile_with_execution_profile_and_types(
                         );
                         continue;
                     }
-                    let statically_int = typed_int_state.is_some_and(|state| {
-                        state[instruction.b as usize] && state[instruction.c as usize]
+                    let typed_operands = typed_scalar_state.and_then(|state| {
+                        let left = state[instruction.b as usize];
+                        let right = state[instruction.c as usize];
+                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
                     });
-                    let registers = if statically_int {
+                    let registers = if typed_operands.is_some() {
                         registers
                     } else {
                         let left = load(&mut builder, registers, instruction.b);
@@ -1424,8 +1467,17 @@ pub fn compile_with_execution_profile_and_types(
                     };
                     let left_raw = load(&mut builder, registers, instruction.b);
                     let right_raw = load(&mut builder, registers, instruction.c);
-                    let left = decode_int(&mut builder, left_raw);
-                    let right = decode_int(&mut builder, right_raw);
+                    let (left, right) = if let Some((left, right)) = typed_operands {
+                        (
+                            decode_known_integer(&mut builder, left_raw, left),
+                            decode_known_integer(&mut builder, right_raw, right),
+                        )
+                    } else {
+                        (
+                            decode_int(&mut builder, left_raw),
+                            decode_int(&mut builder, right_raw),
+                        )
+                    };
                     let condition = builder.ins().icmp(comparison(op), left, right);
                     let yes = builder.ins().iconst(types::I64, VALUE_TRUE);
                     let no = builder.ins().iconst(types::I64, VALUE_FALSE);
@@ -1453,9 +1505,15 @@ pub fn compile_with_execution_profile_and_types(
                 }
                 Op::Not => {
                     let raw = load(&mut builder, registers, instruction.b);
-                    let (valid, truth) = immediate_truth(&mut builder, raw);
-                    let (registers, truth) =
-                        guard_value(&mut builder, valid, registers, truth, pc, pointer_type);
+                    let typed_operand = typed_scalar_state
+                        .map(|state| state[instruction.b as usize])
+                        .filter(|fact| matches!(fact, ScalarFact::Int | ScalarFact::Bool));
+                    let (registers, truth) = if let Some(fact) = typed_operand {
+                        (registers, known_integer_truth(&mut builder, raw, fact))
+                    } else {
+                        let (valid, truth) = immediate_truth(&mut builder, raw);
+                        guard_value(&mut builder, valid, registers, truth, pc, pointer_type)
+                    };
                     let yes = builder.ins().iconst(types::I64, VALUE_TRUE);
                     let no = builder.ins().iconst(types::I64, VALUE_FALSE);
                     let result = builder.ins().select(truth, no, yes);
@@ -1488,9 +1546,15 @@ pub fn compile_with_execution_profile_and_types(
                 }
                 Op::JumpFalse | Op::JumpTrue => {
                     let raw = load(&mut builder, registers, instruction.a);
-                    let (valid, truth) = immediate_truth(&mut builder, raw);
-                    let (registers, truth) =
-                        guard_value(&mut builder, valid, registers, truth, pc, pointer_type);
+                    let typed_operand = typed_scalar_state
+                        .map(|state| state[instruction.a as usize])
+                        .filter(|fact| matches!(fact, ScalarFact::Int | ScalarFact::Bool));
+                    let (registers, truth) = if let Some(fact) = typed_operand {
+                        (registers, known_integer_truth(&mut builder, raw, fact))
+                    } else {
+                        let (valid, truth) = immediate_truth(&mut builder, raw);
+                        guard_value(&mut builder, valid, registers, truth, pc, pointer_type)
+                    };
                     let jump_when_true = matches!(op, Op::JumpTrue);
                     let (taken, other) = if jump_when_true {
                         (instruction.b as usize, pc + 1)
@@ -1772,9 +1836,12 @@ pub fn compile_with_execution_profile_and_types(
                 .iter()
                 .filter(|call| call.method_attr_pc.is_some())
                 .count(),
-            typed_int_guard_elisions: typed_int_analysis
+            typed_int_guard_elisions: typed_scalar_analysis
                 .as_ref()
-                .map_or(0, |analysis| analysis.guard_elisions),
+                .map_or(0, |analysis| analysis.int_guard_elisions),
+            typed_bool_guard_elisions: typed_scalar_analysis
+                .as_ref()
+                .map_or(0, |analysis| analysis.bool_guard_elisions),
         },
     })
 }
@@ -2517,14 +2584,14 @@ fn analyze_float_execution(
     }))
 }
 
-fn analyze_typed_int_execution(
+fn analyze_typed_scalar_execution(
     code: &CodeObject,
     signature: &TypedSignature,
-) -> Result<TypedIntAnalysis, Error> {
+) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
-    let mut initial = vec![false; code.registers as usize];
+    let mut initial = vec![ScalarFact::Unknown; code.registers as usize];
     for (register, kind) in signature.parameters.iter().enumerate() {
-        initial[register] = *kind == ScalarType::Int;
+        initial[register] = ScalarFact::from_signature(*kind);
     }
     before[0] = Some(initial);
     let mut queue = VecDeque::from([0usize]);
@@ -2534,32 +2601,75 @@ fn analyze_typed_int_execution(
         let op = Op::try_from(instruction.opcode).map_err(|error| {
             Error::Backend(format!("verified opcode could not be decoded: {error}"))
         })?;
-        let is_int = |register: u16| after[register as usize];
+        let fact = |register: u16| after[register as usize];
         match op {
             Op::Const => {
-                after[instruction.a as usize] =
-                    encode_constant(&code.constants[instruction.b as usize])
-                        .is_some_and(|value| value & TAG_MASK as u64 == INT_TAG as u64);
+                after[instruction.a as usize] = match &code.constants[instruction.b as usize] {
+                    Constant::Bool(_) => ScalarFact::Bool,
+                    Constant::Int(value)
+                        if value
+                            .parse::<i64>()
+                            .is_ok_and(|value| (MIN_INT..=MAX_INT).contains(&value)) =>
+                    {
+                        ScalarFact::Int
+                    }
+                    Constant::Float(_) => ScalarFact::Float,
+                    Constant::None | Constant::Int(_) | Constant::Str(_) => ScalarFact::Unknown,
+                };
             }
-            Op::Move => after[instruction.a as usize] = is_int(instruction.b),
+            Op::Move => after[instruction.a as usize] = fact(instruction.b),
             Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul | Op::FloorDiv | Op::Mod => {
-                after[instruction.a as usize] = is_int(instruction.b) && is_int(instruction.c);
+                let left = fact(instruction.b);
+                let right = fact(instruction.c);
+                after[instruction.a as usize] = if left.is_integer_like() && right.is_integer_like()
+                {
+                    ScalarFact::Int
+                } else if matches!(op, Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul)
+                    && left == ScalarFact::Float
+                    && right == ScalarFact::Float
+                {
+                    ScalarFact::Float
+                } else {
+                    ScalarFact::Unknown
+                };
             }
-            Op::Neg | Op::Pos => after[instruction.a as usize] = is_int(instruction.b),
-            Op::LoadGlobal
-            | Op::Div
-            | Op::Not
-            | Op::Eq
-            | Op::Ne
-            | Op::Lt
-            | Op::Le
-            | Op::Gt
-            | Op::Ge
-            | Op::Is
-            | Op::IsNot
-            | Op::Call
-            | Op::Attr
-            | Op::CallExpanded => after[instruction.a as usize] = false,
+            Op::Div => {
+                let left = fact(instruction.b);
+                let right = fact(instruction.c);
+                after[instruction.a as usize] = if matches!(
+                    (left, right),
+                    (
+                        ScalarFact::Int | ScalarFact::Bool | ScalarFact::Float,
+                        ScalarFact::Int | ScalarFact::Bool | ScalarFact::Float
+                    )
+                ) {
+                    ScalarFact::Float
+                } else {
+                    ScalarFact::Unknown
+                };
+            }
+            Op::Neg | Op::Pos => {
+                after[instruction.a as usize] = match fact(instruction.b) {
+                    ScalarFact::Int | ScalarFact::Bool => ScalarFact::Int,
+                    ScalarFact::Float => ScalarFact::Float,
+                    ScalarFact::Unknown => ScalarFact::Unknown,
+                };
+            }
+            Op::Not => after[instruction.a as usize] = ScalarFact::Bool,
+            Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
+                let left = fact(instruction.b);
+                let right = fact(instruction.c);
+                after[instruction.a as usize] =
+                    if left != ScalarFact::Unknown && right != ScalarFact::Unknown {
+                        ScalarFact::Bool
+                    } else {
+                        ScalarFact::Unknown
+                    };
+            }
+            Op::Is | Op::IsNot => after[instruction.a as usize] = ScalarFact::Bool,
+            Op::LoadGlobal | Op::Call | Op::Attr | Op::CallExpanded => {
+                after[instruction.a as usize] = ScalarFact::Unknown;
+            }
             Op::BeginArgs
             | Op::ArgPos
             | Op::ArgStar
@@ -2594,7 +2704,11 @@ fn analyze_typed_int_execution(
                 Some(existing) => {
                     let mut changed = false;
                     for (known, incoming) in existing.iter_mut().zip(&after) {
-                        let merged = *known && *incoming;
+                        let merged = if *known == *incoming {
+                            *known
+                        } else {
+                            ScalarFact::Unknown
+                        };
                         changed |= merged != *known;
                         *known = merged;
                     }
@@ -2606,16 +2720,13 @@ fn analyze_typed_int_execution(
             }
         }
     }
-    let mut slots = vec![false; code.registers as usize];
-    let mut guard_elisions = 0;
+    let mut int_guard_elisions = 0;
+    let mut bool_guard_elisions = 0;
     for (pc, state) in before.iter().enumerate() {
         let Some(state) = state else { continue };
-        for (slot, known) in slots.iter_mut().zip(state) {
-            *slot |= *known;
-        }
         let instruction = code.instructions[pc];
         let op = Op::try_from(instruction.opcode).expect("verified typed opcode");
-        guard_elisions += usize::from(match op {
+        let operands = match op {
             Op::Add
             | Op::InplaceAdd
             | Op::Sub
@@ -2627,15 +2738,36 @@ fn analyze_typed_int_execution(
             | Op::Lt
             | Op::Le
             | Op::Gt
-            | Op::Ge => state[instruction.b as usize] && state[instruction.c as usize],
-            Op::Neg | Op::Pos => state[instruction.b as usize],
-            _ => false,
-        });
+            | Op::Ge => {
+                let facts = [state[instruction.b as usize], state[instruction.c as usize]];
+                facts
+                    .iter()
+                    .all(|fact| fact.is_integer_like())
+                    .then_some(facts)
+            }
+            Op::Neg | Op::Pos | Op::Not => {
+                let fact = state[instruction.b as usize];
+                fact.is_integer_like()
+                    .then_some([fact, ScalarFact::Unknown])
+            }
+            Op::JumpFalse | Op::JumpTrue => {
+                let fact = state[instruction.a as usize];
+                fact.is_integer_like()
+                    .then_some([fact, ScalarFact::Unknown])
+            }
+            _ => None,
+        };
+        let Some(operands) = operands else { continue };
+        int_guard_elisions += 1;
+        bool_guard_elisions += operands
+            .iter()
+            .filter(|fact| **fact == ScalarFact::Bool)
+            .count();
     }
-    Ok(TypedIntAnalysis {
+    Ok(TypedScalarAnalysis {
         before,
-        slots,
-        guard_elisions,
+        int_guard_elisions,
+        bool_guard_elisions,
     })
 }
 
@@ -2851,6 +2983,11 @@ fn exact_int(builder: &mut FunctionBuilder<'_>, raw: Value) -> Value {
     let tag = builder.ins().band_imm(raw, TAG_MASK);
     builder.ins().icmp_imm(IntCC::Equal, tag, INT_TAG)
 }
+fn exact_bool(builder: &mut FunctionBuilder<'_>, raw: Value) -> Value {
+    let true_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
+    let false_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_FALSE);
+    builder.ins().bor(true_bool, false_bool)
+}
 fn both_exact_int(builder: &mut FunctionBuilder<'_>, left: Value, right: Value) -> Value {
     let left = exact_int(builder, left);
     let right = exact_int(builder, right);
@@ -2858,6 +2995,30 @@ fn both_exact_int(builder: &mut FunctionBuilder<'_>, left: Value, right: Value) 
 }
 fn decode_int(builder: &mut FunctionBuilder<'_>, raw: Value) -> Value {
     builder.ins().sshr_imm(raw, 3)
+}
+fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: ScalarFact) -> Value {
+    match fact {
+        ScalarFact::Int => decode_int(builder, raw),
+        ScalarFact::Bool => {
+            let truth = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
+            builder.ins().uextend(types::I64, truth)
+        }
+        ScalarFact::Unknown | ScalarFact::Float => {
+            unreachable!("non-integer scalar reached integer lowering")
+        }
+    }
+}
+fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: ScalarFact) -> Value {
+    match fact {
+        ScalarFact::Int => {
+            let decoded = decode_int(builder, raw);
+            builder.ins().icmp_imm(IntCC::NotEqual, decoded, 0)
+        }
+        ScalarFact::Bool => builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE),
+        ScalarFact::Unknown | ScalarFact::Float => {
+            unreachable!("non-integer scalar reached truth lowering")
+        }
+    }
 }
 fn encode_int(builder: &mut FunctionBuilder<'_>, integer: Value) -> Value {
     let shifted = builder.ins().ishl_imm(integer, 3);
@@ -2995,62 +3156,66 @@ fn runtime_guard(
     builder.block_params(pass)[0]
 }
 
-fn emit_typed_int_entry_guards(
+fn emit_typed_scalar_entry_guards(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
-    analysis: &TypedIntAnalysis,
+    analysis: &TypedScalarAnalysis,
     pointer_type: cranelift_codegen::ir::Type,
 ) -> Value {
-    for (register, used) in analysis.slots.iter().copied().enumerate() {
-        if !used {
-            continue;
-        }
-        let mut needed = None;
-        for (pc, state) in analysis.before.iter().enumerate() {
-            if state.as_ref().is_some_and(|state| state[register]) {
-                let at_pc = builder.ins().icmp_imm(IntCC::Equal, start_pc, pc as i64);
-                needed = Some(match needed {
-                    Some(previous) => builder.ins().bor(previous, at_pc),
-                    None => at_pc,
-                });
+    let register_count = analysis.before.iter().flatten().next().map_or(0, Vec::len);
+    for register in 0..register_count {
+        for expected in [ScalarFact::Int, ScalarFact::Bool] {
+            let mut needed = None;
+            for (pc, state) in analysis.before.iter().enumerate() {
+                if state
+                    .as_ref()
+                    .is_some_and(|state| state[register] == expected)
+                {
+                    let at_pc = builder.ins().icmp_imm(IntCC::Equal, start_pc, pc as i64);
+                    needed = Some(match needed {
+                        Some(previous) => builder.ins().bor(previous, at_pc),
+                        None => at_pc,
+                    });
+                }
             }
+            let Some(needed) = needed else { continue };
+            let inspect = builder.create_block();
+            builder.append_block_param(inspect, pointer_type);
+            let skip = builder.create_block();
+            builder.append_block_param(skip, pointer_type);
+            let next = builder.create_block();
+            builder.append_block_param(next, pointer_type);
+            builder
+                .ins()
+                .brif(needed, inspect, &[registers], skip, &[registers]);
+
+            builder.switch_to_block(inspect);
+            let inspect_registers = builder.block_params(inspect)[0];
+            let raw = load(builder, inspect_registers, register as u16);
+            let exact = match expected {
+                ScalarFact::Int => exact_int(builder, raw),
+                ScalarFact::Bool => exact_bool(builder, raw),
+                ScalarFact::Unknown | ScalarFact::Float => unreachable!(),
+            };
+            let valid = builder.create_block();
+            builder.append_block_param(valid, pointer_type);
+            let invalid = builder.create_block();
+            builder
+                .ins()
+                .brif(exact, valid, &[inspect_registers], invalid, &[]);
+            builder.switch_to_block(invalid);
+            builder.ins().return_(&[start_pc]);
+            builder.switch_to_block(valid);
+            let valid_registers = builder.block_params(valid)[0];
+            builder.ins().jump(next, &[valid_registers]);
+
+            builder.switch_to_block(skip);
+            let skip_registers = builder.block_params(skip)[0];
+            builder.ins().jump(next, &[skip_registers]);
+            builder.switch_to_block(next);
+            registers = builder.block_params(next)[0];
         }
-        let inspect = builder.create_block();
-        builder.append_block_param(inspect, pointer_type);
-        let skip = builder.create_block();
-        builder.append_block_param(skip, pointer_type);
-        let next = builder.create_block();
-        builder.append_block_param(next, pointer_type);
-        builder.ins().brif(
-            needed.expect("typed integer slot has at least one live PC"),
-            inspect,
-            &[registers],
-            skip,
-            &[registers],
-        );
-
-        builder.switch_to_block(inspect);
-        let inspect_registers = builder.block_params(inspect)[0];
-        let raw = load(builder, inspect_registers, register as u16);
-        let exact = exact_int(builder, raw);
-        let valid = builder.create_block();
-        builder.append_block_param(valid, pointer_type);
-        let invalid = builder.create_block();
-        builder
-            .ins()
-            .brif(exact, valid, &[inspect_registers], invalid, &[]);
-        builder.switch_to_block(invalid);
-        builder.ins().return_(&[start_pc]);
-        builder.switch_to_block(valid);
-        let valid_registers = builder.block_params(valid)[0];
-        builder.ins().jump(next, &[valid_registers]);
-
-        builder.switch_to_block(skip);
-        let skip_registers = builder.block_params(skip)[0];
-        builder.ins().jump(next, &[skip_registers]);
-        builder.switch_to_block(next);
-        registers = builder.block_params(next)[0];
     }
     registers
 }
@@ -4046,6 +4211,59 @@ mod tests {
                 .run_from(&mut registers, resume_pc, &mut UnavailableRuntime)
                 .unwrap(),
             Outcome::Deopt { pc: resume_pc }
+        );
+    }
+
+    #[test]
+    fn typed_scalar_overlay_guards_bool_and_preserves_python_numeric_semantics() {
+        let program = function(
+            "def choose(flag,n):\n    while flag:\n        n+=flag\n        flag=False\n    return n>2",
+        );
+        let code = &program.program().code[1];
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Bool, ScalarType::Int],
+            result: ScalarType::Bool,
+        };
+        let compiled =
+            compile_with_execution_profile_and_types(code, &[], &[], &[], Some(&signature))
+                .unwrap();
+        assert!(compiled.metadata().typed_int_guard_elisions >= 2);
+        assert!(compiled.metadata().typed_bool_guard_elisions >= 2);
+
+        for (flag, expected) in [
+            (VALUE_FALSE as u64, VALUE_FALSE as u64),
+            (VALUE_TRUE as u64, VALUE_TRUE as u64),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+            registers[0] = flag;
+            registers[1] = encode_i64(2);
+            let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+                panic!("typed scalar function unexpectedly deoptimized");
+            };
+            assert_eq!(value, expected);
+        }
+
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = encode_i64(1);
+        registers[1] = encode_i64(2);
+        assert_eq!(
+            compiled.run(&mut registers).unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let branch_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::JumpFalse))
+            .expect("typed bool branch");
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = encode_i64(1);
+        registers[1] = encode_i64(2);
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, branch_pc, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::Deopt { pc: branch_pc }
         );
     }
 

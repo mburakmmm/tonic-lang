@@ -2999,6 +2999,28 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
 }
 
 #[test]
+fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
+    let source = concat!(
+        "def choose(flag:bool,value:int)->int:\n",
+        "    if flag:\n        value+=flag\n    return value\n",
+        "def invert(flag:bool)->bool:\n    return not flag\n",
+        "print(choose(1,2))\n",
+        "print(choose(True,2),choose(False,2),invert(True),invert(False))",
+    );
+    let program = compile(source, "annotation-jit-bool").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"3\n3 2 False True\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_compiled, 2);
+    assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+    assert!(vm.stats.jit_typed_bool_guard_elisions >= 2);
+}
+
+#[test]
 fn annotation_jit_guards_arguments_mutation_replacement_and_deletion() {
     let source = concat!(
         "def identity(value:int)->int:\n    return value\n",
