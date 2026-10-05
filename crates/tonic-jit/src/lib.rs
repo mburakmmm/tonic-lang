@@ -265,6 +265,8 @@ pub struct Metadata {
     pub typed_bool_guard_elisions: usize,
     /// Every reachable RETURN is proven to match the typed signature result.
     pub typed_return_proven: bool,
+    /// Direct-call results imported from guarded annotation summaries.
+    pub typed_call_result_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +341,9 @@ pub struct DirectCall<'a> {
     /// Profile-backed exact-float leaf. Arguments are unboxed once, arithmetic
     /// stays in Cranelift F64 SSA, and only the guest-visible result is boxed.
     pub float: bool,
+    /// Guarded annotation summary for the direct callee result. The embedding
+    /// runtime owns dependency invalidation for this summary.
+    pub result: Option<ScalarType>,
 }
 
 /// Runtime-materialized value for a non-immediate CONST instruction. The word
@@ -806,6 +811,23 @@ pub fn compile_with_execution_profile(
     )
 }
 
+/// Proves that every reachable return in verified bytecode matches a typed
+/// scalar signature. Embedders may use this before importing a callee result
+/// summary, but must still guard the callee identity and signature dependencies.
+pub fn typed_return_is_proven(
+    code: &CodeObject,
+    signature: &TypedSignature,
+) -> Result<bool, Error> {
+    validate_structural_safety(code)?;
+    if signature.parameters.len() != code.params as usize {
+        return Err(Error::InvalidBytecode {
+            pc: None,
+            message: "typed signature parameter count does not match bytecode".into(),
+        });
+    }
+    Ok(analyze_typed_scalar_execution(code, signature, &[])?.return_proven)
+}
+
 pub fn compile_with_execution_profile_and_types(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
@@ -854,7 +876,7 @@ pub fn compile_with_execution_profile_and_types(
     validate_supported(code, direct_calls, materialized_constants)?;
     let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
     let typed_scalar_analysis = typed_signature
-        .map(|signature| analyze_typed_scalar_execution(code, signature))
+        .map(|signature| analyze_typed_scalar_execution(code, signature, direct_calls))
         .transpose()?;
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
@@ -1852,6 +1874,10 @@ pub fn compile_with_execution_profile_and_types(
             typed_return_proven: typed_scalar_analysis
                 .as_ref()
                 .is_some_and(|analysis| analysis.return_proven),
+            typed_call_result_sites: direct_calls
+                .iter()
+                .filter(|call| call.result.is_some())
+                .count(),
         },
     })
 }
@@ -2597,6 +2623,7 @@ fn analyze_float_execution(
 fn analyze_typed_scalar_execution(
     code: &CodeObject,
     signature: &TypedSignature,
+    direct_calls: &[DirectCall<'_>],
 ) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
     let mut initial = vec![ScalarFact::Unknown; code.registers as usize];
@@ -2677,7 +2704,14 @@ fn analyze_typed_scalar_execution(
                     };
             }
             Op::Is | Op::IsNot => after[instruction.a as usize] = ScalarFact::Bool,
-            Op::LoadGlobal | Op::Call | Op::Attr | Op::CallExpanded => {
+            Op::Call => {
+                after[instruction.a as usize] = direct_calls
+                    .iter()
+                    .find(|call| call.pc == pc)
+                    .and_then(|call| call.result)
+                    .map_or(ScalarFact::Unknown, ScalarFact::from_signature);
+            }
+            Op::LoadGlobal | Op::Attr | Op::CallExpanded => {
                 after[instruction.a as usize] = ScalarFact::Unknown;
             }
             Op::BeginArgs
@@ -4287,6 +4321,18 @@ mod tests {
     }
 
     #[test]
+    fn typed_return_proof_rejects_a_lying_callee_summary() {
+        let valid = function("def twice(value):\n    return value+value");
+        let lied = function("def lied(value):\n    return True");
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        assert!(typed_return_is_proven(&valid.program().code[1], &signature).unwrap());
+        assert!(!typed_return_is_proven(&lied.program().code[1], &signature).unwrap());
+    }
+
+    #[test]
     fn identity_comparisons_are_native_and_membership_falls_back() {
         for (source, same, different) in [
             (
@@ -4577,6 +4623,7 @@ mod tests {
                 method_binding: None,
                 expanded_begin_pc: None,
                 float: false,
+                result: None,
             }],
         )
         .unwrap();
@@ -4624,6 +4671,7 @@ mod tests {
                 method_binding: None,
                 expanded_begin_pc: None,
                 float: false,
+                result: None,
             }],
         )
         .unwrap();
@@ -4734,6 +4782,7 @@ mod tests {
                 method_binding: Some(MethodBinding::Instance),
                 expanded_begin_pc: None,
                 float: false,
+                result: None,
             }],
         )
         .unwrap();
@@ -4804,6 +4853,7 @@ mod tests {
                 method_binding: None,
                 expanded_begin_pc: None,
                 float: false,
+                result: None,
             }],
         )
         .unwrap();

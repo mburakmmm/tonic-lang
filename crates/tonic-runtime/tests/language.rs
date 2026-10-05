@@ -3023,6 +3023,46 @@ fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
 }
 
 #[test]
+fn annotation_jit_propagates_guarded_direct_callee_results() {
+    let source = concat!(
+        "def twice(value:int)->int:\n    return value+value\n",
+        "def caller(value:int)->int:\n    return twice(value)+1\n",
+        "print(caller(20))\n",
+        "twice.__annotations__['return']=float\n",
+        "print(caller(20))",
+    );
+    let program = compile(source, "annotation-jit-direct-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"41\n41\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert!(vm.stats.jit_direct_calls >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+}
+
+#[test]
+fn annotation_jit_rejects_unproven_direct_callee_result() {
+    let source = concat!(
+        "def lied(value:int)->int:\n    return True\n",
+        "def caller(value:int)->int:\n    return lied(value)+1\n",
+        "print(caller(20))",
+    );
+    let program = compile(source, "annotation-jit-direct-result-rejection").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"2\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 0);
+    assert_eq!(vm.stats.jit_direct_calls, 0);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+}
+
+#[test]
 fn annotation_jit_guards_arguments_mutation_replacement_and_deletion() {
     let source = concat!(
         "def identity(value:int)->int:\n    return value\n",

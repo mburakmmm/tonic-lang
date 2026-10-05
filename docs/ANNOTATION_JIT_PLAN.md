@@ -190,8 +190,22 @@ planıyla karşılaştırır. Her yol kanıtlandığında bu gerçek public JIT 
 yazılır ve VM, native dönüşte aynı type guard'ını ikinci kez çalıştırmaz. Tek bir
 unknown/uyuşmayan yol kanıtı düşürür; host return guard ve exact-PC advisory deopt
 korunur. Bu karar [ADR 0108](adr/0108-typed-return-proof.md) içindedir. Annotated
-call-result propagation, direct-callee özeti ve kullanıcıya açık explain/rejection
-metadata'sı sonraki dilimdir.
+call-result propagation'ın ilk exact-global dilimi aşağıda tanımlıdır; recursive/
+method özetleri ve kullanıcıya açık explain/rejection metadata'sı açık kalır.
+
+İlk call-result dilimi exact global Tonic function leaf'lerini kapsar. Caller ilk
+çağrıda derlenirken callee'nin scalar parametre/result planı çözülür; public JIT
+proof kapısı callee bytecode'undaki bütün erişilebilir dönüşlerin bu result ile
+uyuştuğunu ayrıca kanıtlar. Ancak bundan sonra `CALL` sonucu caller lattice'ine
+aktarılır ve leaf doğrudan inline edilir. Caller guard'ı callee function/code/
+execution/annotation object/version/hash bağımlılığını taşır; annotation mutasyonu
+caller'ı invalid eder, global rebinding ise generated exact-callee guard'ında
+deopt eder. Yalan annotation veya kanıtlanamayan gövde özet üretmez. Ayrıntı
+[ADR 0109](adr/0109-guarded-annotated-call-result.md) içindedir.
+
+Bu ilk kenar ordinary exact-global int/float leaf ile sınırlıdır. Recursive/SCC
+özetleri, method/class/shape kenarları, ayrı compilation unit ve graph-wide
+code-size bütçesi hâlâ açıktır.
 
 ## Kabul ölçütleri
 

@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 24, runtime unit 26,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 25, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 128, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 403 test.
+native handles 5, language/runtime 130, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 406 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -75,6 +75,13 @@ değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dön�
 host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`
 annotation'lı string dönüş vakası kanıt üretmez; mevcut return guard `RETURN`
 PC'sinde deopt ederek advisory semantiği korur.
+
+Guarded call-result testleri exact global annotated int leaf'i profil beklemeden
+caller'ın first-call compilation unit'ine alır, sonucu caller lattice'inde
+ilerletir ve direct-call/typed-result sayaçlarını doğrular. Callee annotation
+mutation'ı caller plan dependency'sini invalid ederken sonuç değişmez. Ayrı yalan
+`-> int`/`return True` vakası public callee-return proof kapısında özeti reddeder;
+caller generic kalır ve Python `True + 1 == 2` davranışı korunur.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×

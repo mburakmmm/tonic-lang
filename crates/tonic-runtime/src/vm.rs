@@ -111,6 +111,7 @@ pub struct Stats {
     pub jit_typed_int_guard_elisions: u64,
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
+    pub jit_typed_call_result_sites: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -264,6 +265,17 @@ struct AnnotationJitGuard {
     canonical_hash: u64,
     parameters: Vec<AnnotationScalar>,
     result: AnnotationScalar,
+    callees: Vec<AnnotationCalleeGuard>,
+}
+
+#[derive(Clone, Debug)]
+struct AnnotationCalleeGuard {
+    function: Value,
+    code: u16,
+    execution: u64,
+    annotations: Value,
+    annotation_version: u64,
+    canonical_hash: u64,
 }
 
 struct JitRuntime<'a> {
@@ -1903,6 +1915,7 @@ impl Vm {
             canonical_hash: plan.canonical_hash,
             parameters,
             result: scalar("return")?,
+            callees: Vec::new(),
         })
     }
 
@@ -1923,10 +1936,33 @@ impl Vm {
         if !valid_function {
             return false;
         }
-        self.annotation_type_plan(guard.function)
+        let own_plan_current = self
+            .annotation_type_plan(guard.function)
             .is_some_and(|plan| {
                 plan.annotation_version == guard.annotation_version
                     && plan.canonical_hash == guard.canonical_hash
+            });
+        own_plan_current
+            && guard.callees.iter().all(|dependency| {
+                let valid_function = matches!(
+                    self.heap.get(dependency.function),
+                    Ok(Object::Function {
+                        code,
+                        execution,
+                        annotations: Some(annotations),
+                        ..
+                    }) if *code == dependency.code
+                        && *execution == dependency.execution
+                        && *execution == self.execution
+                        && *annotations == dependency.annotations
+                );
+                valid_function
+                    && self
+                        .annotation_type_plan(dependency.function)
+                        .is_some_and(|plan| {
+                            plan.annotation_version == dependency.annotation_version
+                                && plan.canonical_hash == dependency.canonical_hash
+                        })
             })
     }
 
@@ -8493,6 +8529,7 @@ impl Vm {
                     method_binding: None,
                     expanded_begin_pc: None,
                     float,
+                    result: None,
                 })
             })
             .collect();
@@ -8665,6 +8702,7 @@ impl Vm {
                         method_binding: None,
                         expanded_begin_pc: Some(begin_pc),
                         float: false,
+                        result: None,
                     });
                 }
                 _ => {}
@@ -8718,10 +8756,133 @@ impl Vm {
                 }),
                 expanded_begin_pc: None,
                 float: false,
+                result: None,
             });
         }
         calls
     }
+
+    fn jit_annotation_direct_calls<'a>(
+        &mut self,
+        program: &'a Program,
+        code_id: usize,
+    ) -> (Vec<tonic_jit::DirectCall<'a>>, Vec<AnnotationCalleeGuard>) {
+        if !self.jit_direct_call_inlining {
+            return (Vec::new(), Vec::new());
+        }
+        let code = &program.code[code_id];
+        let mut calls = Vec::new();
+        let mut dependencies = Vec::new();
+        for (pc, instruction) in code.instructions.iter().copied().enumerate() {
+            if Op::try_from(instruction.opcode) != Ok(Op::Call) {
+                continue;
+            }
+            let Some(load) = code.instructions[..pc]
+                .iter()
+                .rev()
+                .find(|candidate| candidate.a == instruction.b)
+                .copied()
+            else {
+                continue;
+            };
+            if Op::try_from(load.opcode) != Ok(Op::LoadGlobal) {
+                continue;
+            }
+            let symbol = usize::from(load.b);
+            if !self.global_defined.get(symbol).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(callee) = self.globals.get(symbol).copied() else {
+                continue;
+            };
+            let site = &code.calls[instruction.c as usize];
+            let Some(target) = self.direct_call_target(program, callee, site, 0, true) else {
+                continue;
+            };
+            let Some(summary) = self.annotation_jit_guard(program, callee, target) else {
+                continue;
+            };
+            let scalar_type = |kind| match kind {
+                AnnotationScalar::Int => tonic_jit::ScalarType::Int,
+                AnnotationScalar::Float => tonic_jit::ScalarType::Float,
+                AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
+            };
+            let signature = tonic_jit::TypedSignature {
+                parameters: summary
+                    .parameters
+                    .iter()
+                    .copied()
+                    .map(scalar_type)
+                    .collect(),
+                result: scalar_type(summary.result),
+            };
+            if !tonic_jit::typed_return_is_proven(&program.code[target], &signature)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let scalar = match summary.result {
+                AnnotationScalar::Int
+                    if summary
+                        .parameters
+                        .iter()
+                        .all(|kind| *kind == AnnotationScalar::Int)
+                        && tonic_jit::is_direct_call_inlineable(&program.code[target]) =>
+                {
+                    tonic_jit::ScalarType::Int
+                }
+                AnnotationScalar::Float
+                    if summary
+                        .parameters
+                        .iter()
+                        .all(|kind| *kind == AnnotationScalar::Float)
+                        && tonic_jit::is_direct_float_leaf_inlineable(&program.code[target]) =>
+                {
+                    tonic_jit::ScalarType::Float
+                }
+                AnnotationScalar::Int | AnnotationScalar::Float | AnnotationScalar::Bool => {
+                    continue;
+                }
+            };
+            let Some(arguments) = self.jit_direct_arguments(program, callee, site, target, false)
+            else {
+                continue;
+            };
+            let float = scalar == tonic_jit::ScalarType::Float
+                && arguments
+                    .iter()
+                    .all(|argument| matches!(argument, tonic_jit::DirectArgument::Caller(_)));
+            if scalar == tonic_jit::ScalarType::Float && !float {
+                continue;
+            }
+            calls.push(tonic_jit::DirectCall {
+                pc,
+                callee: callee.raw(),
+                target: &program.code[target],
+                arguments,
+                method_attr_pc: None,
+                method_binding: None,
+                expanded_begin_pc: None,
+                float,
+                result: Some(scalar),
+            });
+            if !dependencies
+                .iter()
+                .any(|dependency: &AnnotationCalleeGuard| dependency.function == callee)
+            {
+                dependencies.push(AnnotationCalleeGuard {
+                    function: summary.function,
+                    code: summary.code,
+                    execution: summary.execution,
+                    annotations: summary.annotations,
+                    annotation_version: summary.annotation_version,
+                    canonical_hash: summary.canonical_hash,
+                });
+            }
+        }
+        (calls, dependencies)
+    }
+
     fn jit_direct_call_profile_pending(&self, program: &Program, code_id: usize) -> bool {
         if !self.jit_direct_call_inlining {
             return false;
@@ -9170,7 +9331,7 @@ impl Vm {
             }
         }
         if matches!(self.jit_cache[code_id], JitEntry::Untried) {
-            let annotation = if resuming {
+            let mut annotation = if resuming {
                 None
             } else {
                 callable.and_then(|function| self.annotation_jit_guard(program, function, code_id))
@@ -9225,7 +9386,20 @@ impl Vm {
                 }
             }
             self.stats.jit_compile_attempts += 1;
-            let direct_calls = self.jit_direct_calls(program, code_id);
+            let mut direct_calls = self.jit_direct_calls(program, code_id);
+            if let Some(annotation) = &mut annotation {
+                let (annotation_calls, dependencies) =
+                    self.jit_annotation_direct_calls(program, code_id);
+                for call in annotation_calls {
+                    if let Some(existing) = direct_calls.iter_mut().find(|item| item.pc == call.pc)
+                    {
+                        *existing = call;
+                    } else {
+                        direct_calls.push(call);
+                    }
+                }
+                annotation.callees = dependencies;
+            }
             let exact_float_parameters = annotation.as_ref().map_or_else(
                 || {
                     (0..program.code[code_id].params)
@@ -9301,6 +9475,8 @@ impl Vm {
                         metadata.typed_bool_guard_elisions as u64;
                     self.stats.jit_typed_return_guards_elided +=
                         u64::from(annotation.is_some() && metadata.typed_return_proven);
+                    self.stats.jit_typed_call_result_sites +=
+                        metadata.typed_call_result_sites as u64;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,

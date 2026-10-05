@@ -343,8 +343,12 @@ sonra alınır.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.
-      - [ ] Annotated call-result propagation, direct callee özeti ve kullanıcıya
-        açık explain/rejection metadata'sı.
+      - [x] Exact global function için guarded annotated leaf özeti ve call-result
+        propagation: callee return bytecode proof'u, function/code/execution/
+        annotation dependency invalidation'ı, first-call direct inline ve caller
+        return proof zinciri; yalan callee annotation'ında özet reddi.
+      - [ ] Recursive/method call-result özetleri ve kullanıcıya açık explain/
+        rejection metadata'sı.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.
@@ -363,6 +367,11 @@ sonra alınır.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.
+    - [x] Exact global int/float leaf için ilk guarded kenar: profil beklemeden
+      callee identity ve annotation-plan dependency guard'ı, kanıtlı result
+      propagation ve mutation/rebinding fallback'i.
+    - [ ] Recursion/SCC, annotated method/class/shape kenarları ve graph-wide
+      inline/code-size bütçesi.
   - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
     constructor definite-assignment analizi, descriptor/metaclass mutation
     guard'ı ve dinamik attribute fallback'i.
