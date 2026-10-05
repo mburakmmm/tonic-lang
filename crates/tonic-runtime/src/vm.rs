@@ -8833,28 +8833,85 @@ impl Vm {
             if Op::try_from(instruction.opcode) != Ok(Op::Call) {
                 continue;
             }
-            let Some(load) = code.instructions[..pc]
+            let Some(load_pc) = code.instructions[..pc]
                 .iter()
-                .rev()
-                .find(|candidate| candidate.a == instruction.b)
-                .copied()
+                .rposition(|candidate| candidate.a == instruction.b)
             else {
                 continue;
             };
-            if Op::try_from(load.opcode) != Ok(Op::LoadGlobal) {
-                continue;
-            }
-            let symbol = usize::from(load.b);
-            if !self.global_defined.get(symbol).copied().unwrap_or(false) {
-                continue;
-            }
-            let Some(callee) = self.globals.get(symbol).copied() else {
-                continue;
-            };
+            let load = code.instructions[load_pc];
             let site = &code.calls[instruction.c as usize];
-            let Some(target) = self.direct_call_target(program, callee, site, 0, true) else {
-                continue;
+            let resolved = match Op::try_from(load.opcode) {
+                Ok(Op::LoadGlobal) => {
+                    let symbol = usize::from(load.b);
+                    if !self.global_defined.get(symbol).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let Some(callee) = self.globals.get(symbol).copied() else {
+                        continue;
+                    };
+                    let Some(target) = self.direct_call_target(program, callee, site, 0, true)
+                    else {
+                        continue;
+                    };
+                    let Some(arguments) =
+                        self.jit_direct_arguments(program, callee, site, target, false)
+                    else {
+                        continue;
+                    };
+                    (callee, target, arguments, None, None)
+                }
+                Ok(Op::Attr) if method_call_pc(code, load_pc) == Some(pc) => {
+                    let Some(owner_load_pc) = code.instructions[..load_pc]
+                        .iter()
+                        .rposition(|candidate| candidate.a == load.b)
+                    else {
+                        continue;
+                    };
+                    let owner_load = code.instructions[owner_load_pc];
+                    if Op::try_from(owner_load.opcode) != Ok(Op::LoadGlobal) {
+                        continue;
+                    }
+                    let owner_symbol = usize::from(owner_load.b);
+                    if !self
+                        .global_defined
+                        .get(owner_symbol)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(owner) = self.globals.get(owner_symbol).copied() else {
+                        continue;
+                    };
+                    let Some(name) = program.symbols.get(usize::from(load.c)) else {
+                        continue;
+                    };
+                    let Some((callee, DirectMethodKind::Static, _)) =
+                        self.heap.direct_method(owner, name)
+                    else {
+                        continue;
+                    };
+                    let Some(target) = self.direct_call_target(program, callee, site, 0, false)
+                    else {
+                        continue;
+                    };
+                    let Some(arguments) =
+                        self.jit_direct_arguments(program, callee, site, target, false)
+                    else {
+                        continue;
+                    };
+                    (
+                        callee,
+                        target,
+                        arguments,
+                        Some(load_pc),
+                        Some(tonic_jit::MethodBinding::Static),
+                    )
+                }
+                _ => continue,
             };
+            let (callee, target, arguments, method_attr_pc, method_binding) = resolved;
             let Some(summary) = self.annotation_jit_guard(program, callee, target) else {
                 continue;
             };
@@ -8900,11 +8957,8 @@ impl Vm {
                     continue;
                 }
             };
-            let Some(arguments) = self.jit_direct_arguments(program, callee, site, target, false)
-            else {
-                continue;
-            };
             let float = scalar == tonic_jit::ScalarType::Float
+                && method_attr_pc.is_none()
                 && arguments
                     .iter()
                     .all(|argument| matches!(argument, tonic_jit::DirectArgument::Caller(_)));
@@ -8916,8 +8970,8 @@ impl Vm {
                 callee: callee.raw(),
                 target: &program.code[target],
                 arguments,
-                method_attr_pc: None,
-                method_binding: None,
+                method_attr_pc,
+                method_binding,
                 expanded_begin_pc: None,
                 float,
                 result: Some(scalar),

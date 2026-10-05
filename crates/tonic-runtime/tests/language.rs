@@ -3045,6 +3045,74 @@ fn annotation_jit_propagates_guarded_direct_callee_results() {
 }
 
 #[test]
+fn annotation_jit_propagates_guarded_class_function_results() {
+    let source = concat!(
+        "class Math:\n",
+        "    def twice(value:int)->int:\n        return value+value\n",
+        "def caller(value:int)->int:\n    return Math.twice(value)+1\n",
+        "print(caller(20))\n",
+        "Math.twice.__annotations__['return']=float\n",
+        "print(caller(20))",
+    );
+    let program = compile(source, "annotation-jit-class-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"41\n41\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_direct_method_sites, 1);
+    assert!(vm.stats.jit_direct_calls >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+}
+
+#[test]
+fn annotation_jit_class_function_guard_observes_rebinding() {
+    let source = concat!(
+        "class Math:\n",
+        "    @staticmethod\n",
+        "    def twice(value:int)->int:\n        return value+value\n",
+        "def caller(value:int)->int:\n    return Math.twice(value)+1\n",
+        "print(caller(20))\n",
+        "def other(value):\n    return value+value+value\n",
+        "Math.twice=other\n",
+        "print(caller(20))",
+    );
+    let program = compile(source, "annotation-jit-class-rebind").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"41\n61\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_direct_method_sites, 1);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
+fn annotation_jit_rejects_unproven_class_function_result() {
+    let source = concat!(
+        "class Bad:\n",
+        "    def lied(value:int)->int:\n        return True\n",
+        "def caller(value:int)->int:\n    return Bad.lied(value)+1\n",
+        "print(caller(20))",
+    );
+    let program = compile(source, "annotation-jit-class-result-rejection").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"2\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 0);
+    assert_eq!(vm.stats.jit_direct_method_sites, 0);
+    assert_eq!(vm.stats.jit_direct_calls, 0);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+}
+
+#[test]
 fn annotation_jit_rejects_unproven_direct_callee_result() {
     let source = concat!(
         "def lied(value:int)->int:\n    return True\n",

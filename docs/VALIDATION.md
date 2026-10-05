@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 25, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 130, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 407 test.
+native handles 5, language/runtime 133, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 410 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -82,6 +82,14 @@ ilerletir ve direct-call/typed-result sayaçlarını doğrular. Callee annotatio
 mutation'ı caller plan dependency'sini invalid ederken sonuç değişmez. Ayrı yalan
 `-> int`/`return True` vakası public callee-return proof kapısında özeti reddeder;
 caller generic kalır ve Python `True + 1 == 2` davranışı korunur.
+
+Annotated class-edge testleri exact global class üzerinden plain function ve
+`staticmethod` çağrılarını profil beklemeden fused `ATTR`+`CALL` planına alır.
+Callee annotation mutation caller entry'sini invalid eder; aynı class owner'da
+attribute rebinding exact `ATTR` PC'sine deopt ederek yeni callable'ı generic
+descriptor semantiğiyle çalıştırır. Allocation-stress GC vakası method cache
+root'larını doğrular. Ayrı `-> int`/`return True` class function vakası body-proof
+kapısında reddedilir ve typed result/direct-method sayaçları sıfır kalır.
 
 JIT rejection diagnostics CLI testi annotation first-call adayındaki destek dışı
 `Pow` opkodunu generic semantiği bozmadan çalıştırır ve `--stats` çıktısında exact

@@ -348,6 +348,12 @@ sonra alınır.
         annotation dependency invalidation'ı, first-call direct inline ve caller
         return proof zinciri; yalan callee annotation'ında özet reddi.
       - [ ] Recursive/method call-result özetleri.
+        - [x] Exact global class owner üzerinden plain function/`staticmethod`
+          leaf: profil beklemeden `ATTR`+`CALL` fusion, callee annotation/return
+          proof dependency'si, binding-kind/exact-function guard'ı ve class
+          rebinding'de exact-ATTR deopt.
+        - [ ] Annotated instance receiver/shape, `classmethod` ve recursive/SCC
+          özetleri.
       - [x] Kullanıcıya açık deterministic rejection metadata'sı: function/code,
         kategori, bytecode PC/opcode ve sabit neden; public runtime accessor ve
         CLI `--stats` explain satırları.
@@ -374,8 +380,11 @@ sonra alınır.
     - [x] Exact global int/float leaf için ilk guarded kenar: profil beklemeden
       callee identity ve annotation-plan dependency guard'ı, kanıtlı result
       propagation ve mutation/rebinding fallback'i.
-    - [ ] Recursion/SCC, annotated method/class/shape kenarları ve graph-wide
-      inline/code-size bütçesi.
+    - [x] Exact global class owner'lı plain function/`staticmethod` için ilk
+      annotated class edge: allocation-free method load, static binding guard'ı,
+      callee plan invalidation'ı ve class mutation fallback'i.
+    - [ ] Recursion/SCC, annotated instance/`classmethod`/shape kenarları ve
+      graph-wide inline/code-size bütçesi.
   - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
     constructor definite-assignment analizi, descriptor/metaclass mutation
     guard'ı ve dinamik attribute fallback'i.

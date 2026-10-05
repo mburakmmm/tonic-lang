@@ -203,9 +203,19 @@ caller'ı invalid eder, global rebinding ise generated exact-callee guard'ında
 deopt eder. Yalan annotation veya kanıtlanamayan gövde özet üretmez. Ayrıntı
 [ADR 0109](adr/0109-guarded-annotated-call-result.md) içindedir.
 
-Bu ilk kenar ordinary exact-global int/float leaf ile sınırlıdır. Recursive/SCC
-özetleri, method/class/shape kenarları, ayrı compilation unit ve graph-wide
-code-size bütçesi hâlâ açıktır.
+İkinci kenar `Math.leaf(...)` biçiminde, `Math` exact global class olduğunda ve
+attribute plain class-level function ya da `staticmethod` olarak çözüldüğünde
+çalışır. Mevcut allocation-free `ATTR`+`CALL` fusion kullanılır fakat method
+profili beklenmez: callee annotation planı ve bytecode return proof caller'ın ilk
+derlemesinde result fact'i kurar. Generated code güncel owner'ı tekrar yükler;
+static binding kind ve exact function identity'yi `ATTR` PC'sinde guard eder.
+Callee annotation mutasyonu caller entry'sini invalid eder; class attribute
+rebinding atomik deopt ile normal descriptor semantiğini tekrarlar. Yalan return
+annotation'ı kenar üretmez. Karar
+[ADR 0111](adr/0111-annotated-class-function-edge.md) içindedir.
+
+Instance receiver/shape özetleri, `classmethod`, recursive/SCC özetleri, ayrı
+compilation unit ve graph-wide code-size bütçesi hâlâ açıktır.
 
 JIT reddi sessiz bir `Unsupported` biti değildir. Runtime her code object için
 son kalıcı ret kararını function/code kimliği, `unprofitable`/`code-budget`/
