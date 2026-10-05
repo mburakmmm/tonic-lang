@@ -7,7 +7,9 @@ Tamamlanma hedefi bu listedeki bütün açık kutuların kapanması ve JIT'in ya
 bir demo yolu değil, tier seçimi, çalışma zamanı yardımcıları, GC safepoint'leri,
 guard/deopt, hata yayılımı ve ölçüm kapılarıyla kullanılmaya hazır olmasıdır.
 Yeni HPy/aHPy native ekosistem kapsamının aşağıdaki kabul kapıları da bu hedefe
-dahildir. Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan
+dahildir. Annotation destekli kısmi statik tier da Python semantiğini koruyan
+guard/deopt yolu ve açık opt-in strict değer türleriyle tamamlanmadan JIT hazır
+sayılmaz. Python karşılaştırmalı nihai benchmark ancak bu koşullar sağlandıktan
 sonra alınır.
 
 - [x] Workspace, Rust stable, CLI, tanı, benchmark harness.
@@ -306,6 +308,48 @@ sonra alınır.
 - [x] Linux x86-64 ve macOS AArch64 debug/release JIT platform matrisi; iki
   mimaride parser ve public JIT girişi için 10.000'er gerçek AddressSanitizer
   libFuzzer koşusu. CI run 35772128579 ile doğrulandı.
+- [ ] Annotation destekli kısmi statik derleme ve doğrudan typed-JIT tier'ı.
+  Standart Python annotation'ları dil semantiğini değiştirmeden optimizasyon
+  varsayımıdır; yanlış tipte çağrı generic Python yoluna deopt eder.
+  - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
+    union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
+    callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
+    deterministic “optimize edilmedi” nedeni.
+  - [ ] Function identity + code/version + annotation-dict version guard'ı;
+    `__annotations__` mutation/replacement, global alias rebinding ve class/MRO
+    değişiminde cache invalidation veya atomik deopt.
+  - [ ] Verified bytecode üzerinde typed data-flow/SSA overlay; parametre,
+    local, branch merge, loop phi, dönüş ve çağrı sonucu propagation'ı. Dinamik
+    bytecode ve object model tek doğruluk kaynağı olarak kalır.
+  - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
+    typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
+    warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.
+  - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için
+    overflow'da bigint deopt'u, IEEE float sınırları, exact exception PC'si,
+    safepoint stack-map ve interpreter state rekonstrüksiyonu.
+  - [ ] Typed container/buffer yolu: bounds/shape/dtype/mutability guards,
+    allocation-free numeric loop, write barrier ve alias/escape halinde doğru
+    materialization. NumPy C ABI veya raw object layout varsayımı yapılmaz.
+  - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
+    monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
+    unit/code-size sınırı.
+  - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
+    constructor definite-assignment analizi, descriptor/metaclass mutation
+    guard'ı ve dinamik attribute fallback'i.
+  - [ ] Python-compatible advisory kip ile açık strict kip ayrımı. Advisory kip
+    annotation'ı runtime type check'e dönüştürmez; strict kip yalnız Tonic'e ait
+    `i8..i64`, `u8..u64`, `f32/f64`, packed struct ve checked/wrapping politika
+    türlerinde tanımlı hata/overflow ve FFI layout sözleşmesi uygular.
+  - [ ] Ahead-of-time cache için canonical type-plan hash'i, bytecode/runtime/
+    target/CPU feature sürümü, doğrulanmış yükleme ve stale-cache reddi; cache
+    içinde raw Rust layout'u veya native heap adresi yoktur.
+  - [ ] Interpreter/adaptive/profile-JIT/annotation-JIT eşdeğerlik korpusu;
+    doğru/yanlış tip, overflow, mutation, exceptions, moving/stress GC, deopt,
+    code budget ve compile-failure testleri. Son kabul Cython/CPython karşılaştırmalı
+    micro/macro ölçüm, compile latency, code size, allocation ve bottleneck profili.
+  Ayrıntılı tasarım ve teslim sırası:
+  [ANNOTATION_JIT_PLAN.md](ANNOTATION_JIT_PLAN.md), karar:
+  [ADR 0101](adr/0101-annotation-guided-partial-static-jit.md).
 - [x] Native C function-table ABI/version/capability, exception status ve panic guard.
 - [x] Buffer descriptor, dtype/shape/stride, owner, mutability; fastmath.sum zero-copy örneği.
 - [x] Thread attach, persistent callback, reentry, shutdown/finalization.
@@ -369,8 +413,8 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler REPL/bytecode cache/stdlib, coverage-guided güvenlik
-testleri, OS destekli async I/O ve HPy H1 shared-library loader/handle yüzeyidir.
+Sıradaki çekirdek işler HPy H3 global/field yüzeyi, annotation destekli typed-JIT,
+REPL/bytecode cache/stdlib ve coverage-guided güvenlik testleridir.
 JIT'in desteklenen tier'ı
 x86-64/AArch64 debug-release, normal/stress
 GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;

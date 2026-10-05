@@ -479,6 +479,13 @@ Cranelift call ABI'si ve exact-callee guard'ları annotation depolamasından
 bağımsız kalır. Ayrıntılar [ADR 0079](adr/0079-function-annotations.md)
 dosyasındadır.
 
+Bu mevcut semantic ABI ayrımı korunarak annotation değerleri için ayrı bir
+typed-JIT planı yol haritasına eklenmiştir. Standart Python annotation'ları
+advisory kalır; guard failure veya mutation generic bytecode PC'sine deopt eder.
+Sabit genişlik ve layout sözleşmesi yalnız açık Tonic strict değer türleriyle
+seçilir. Tasarım [ANNOTATION_JIT_PLAN.md](ANNOTATION_JIT_PLAN.md) ve
+[ADR 0101](adr/0101-annotation-guided-partial-static-jit.md) içindedir.
+
 Değişken annotation'ları da parser-owned düğüm taşımadan Tonic AST/HIR'ine
 alınır. Module ve class code prologue'u aynı lexical scope'ta basit isim
 annotation'ı bulunduğunda managed `__annotations__` dict'i kurar; çalışma
@@ -622,6 +629,7 @@ dosyasındadır.
 | M4 specialization | genel yol ile eş sonuç, guard failure, istikrarsız site de-specialization; önce/sonra benchmark |
 | M5 GC | explicit roots, cycle, old→young barrier, hareket, stale handle, stress collection |
 | M6–M7 JIT | interpreter eşdeğerliği, safepoints, exception ve guard deopt; compile time/code size ölçümleri |
+| Annotation typed-JIT | advisory/strict kip ayrımı, canonical TypePlan, version guard, unboxed ABI, exact-PC deopt, cache ve CPython/Cython ölçümü |
 | Geniş sözdizimi | conformance korpusu, comprehension scope, closure, generator/async, match |
 | Native C ABI | version/capability, init/exception protokolü, panic sınırı, trusted-code belgesi |
 | Buffer/callback/foreign | zero-copy owner ömrü, thread attach, shutdown, tam bir kez destructor |
