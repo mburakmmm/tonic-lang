@@ -2995,6 +2995,7 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
     assert_eq!(vm.stats.jit_calls, 2);
     assert_eq!(vm.stats.jit_returns, 2);
     assert_eq!(vm.stats.jit_deferred, 0);
+    assert!(vm.stats.jit_typed_int_guard_elisions >= 1);
 }
 
 #[test]

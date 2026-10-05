@@ -330,6 +330,12 @@ sonra alınır.
   - [ ] Verified bytecode üzerinde typed data-flow/SSA overlay; parametre,
     local, branch merge, loop phi, dönüş ve çağrı sonucu propagation'ı. Dinamik
     bytecode ve object model tek doğruluk kaynağı olarak kalır.
+    - [x] Exact-small-int forward overlay: typed parametre, immediate sabit,
+      `Move`, unary/binary integer sonuçları, branch merge ve loop fixed-point;
+      arbitrary-PC giriş guard'ı ve ispatlanan aritmetik/karşılaştırma
+      noktalarında redundant tag-guard elimination.
+    - [ ] Birleşik `int/float/bool` lattice, dönüş/call-result propagation,
+      direct annotated callee özeti ve diagnostics/explain metadata'sı.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.

@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 26,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 23, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 127, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 400 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 401 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -55,6 +55,13 @@ replacement `TypeError`'ı; class dependency version yenilemesi ve yanlış dön
 GC altında da aynı çıktıyı ve sayaçları verir. Ayrı vakalar eager global alias
 rebinding kararını ve user-class dependency değişiminin canlı native entry'yi
 invalid etmesini doğrular.
+
+Typed integer overlay testi verified loop bytecode'unda parametre/sabit/local,
+branch merge ve loop fixed-point sonucunun redundant tag guard'larını gerçekten
+azalttığını metadata sayacıyla doğrular. Doğru exact-int giriş native sonucu
+verir; bool ile normal giriş ve eksik/corrupt register'larla arbitrary-PC resume
+aynı giriş PC'sinde deopt eder. Public JIT API uyumsuz typed-signature arity'sini
+Cranelift codegen öncesinde `InvalidBytecode` olarak reddeder.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×

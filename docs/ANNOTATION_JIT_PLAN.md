@@ -162,6 +162,21 @@ typed container, decorator/import-time warmup veya disk cache değildir. Float
 işlemleri mevcut F64 data-flow/stack-map yolunu kullanır; integer işlem guard'ları
 taşmada mevcut BigInt deopt yoluna döner.
 
+Verified-bytecode typed overlay'in exact-small-int dilimi de uygulanmıştır.
+Parametre, immediate integer sabiti, `Move`, integer unary/binary sonucu, branch
+merge ve loop fixed-point bilgisi her bytecode PC'si için hesaplanır. Cranelift
+normal girişte ve side-exit/OSR sonrası arbitrary-PC girişte o PC'de canlı olduğu
+ispatlanan integer register'larını tag-guard eder. Bu tek giriş doğrulamasından
+sonra aritmetik ve karşılaştırma noktalarındaki yinelenen tag guard'ları üretilmez;
+overflow, sıfıra bölme veya bozulmuş resume state yine tam PC'de deopt eder.
+Elision sayısı JIT metadata'sı ve VM istatistiklerinde yayımlanır. Karar ayrıntısı
+[ADR 0106](adr/0106-typed-int-dataflow-overlay.md) içindedir.
+
+Bu overlay henüz raw `i64` register/çağrı ABI'si değildir: integer değerler precise
+root buffer'da tagged `Value` olarak kalır ve işlem sınırında decode/encode edilir.
+Birleşik float/bool lattice, annotated call-result propagation ve typed direct-call
+özeti sonraki dilimdir.
+
 ## Kabul ölçütleri
 
 - Advisory kipte annotation eklemek veya kaldırmak program çıktısını ve exception

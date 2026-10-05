@@ -108,6 +108,7 @@ pub struct Stats {
     pub jit_annotation_compiled: u64,
     pub jit_annotation_guard_misses: u64,
     pub jit_annotation_invalidations: u64,
+    pub jit_typed_int_guard_elisions: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -9241,6 +9242,16 @@ impl Vm {
                         .collect()
                 },
             );
+            let typed_signature = annotation.as_ref().map(|annotation| {
+                let scalar = |kind| match kind {
+                    AnnotationScalar::Int => tonic_jit::ScalarType::Int,
+                    AnnotationScalar::Float => tonic_jit::ScalarType::Float,
+                };
+                tonic_jit::TypedSignature {
+                    parameters: annotation.parameters.iter().copied().map(scalar).collect(),
+                    result: scalar(annotation.result),
+                }
+            });
             let materialized_constants = program.code[code_id]
                 .instructions
                 .iter()
@@ -9251,11 +9262,12 @@ impl Vm {
                     value: self.constants[code_id][instruction.b as usize].raw(),
                 })
                 .collect::<Vec<_>>();
-            match tonic_jit::compile_with_execution_profile(
+            match tonic_jit::compile_with_execution_profile_and_types(
                 &program.code[code_id],
                 &direct_calls,
                 &materialized_constants,
                 &exact_float_parameters,
+                typed_signature.as_ref(),
             ) {
                 Ok(compiled) => {
                     let metadata = compiled.metadata();
@@ -9276,6 +9288,8 @@ impl Vm {
                     self.stats.jit_code_bytes += metadata.code_bytes;
                     self.stats.jit_direct_call_sites += metadata.direct_call_sites as u64;
                     self.stats.jit_direct_method_sites += metadata.direct_method_sites as u64;
+                    self.stats.jit_typed_int_guard_elisions +=
+                        metadata.typed_int_guard_elisions as u64;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,

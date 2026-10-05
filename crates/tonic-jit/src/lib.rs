@@ -259,6 +259,20 @@ pub struct Metadata {
     pub instruction_count: usize,
     pub direct_call_sites: usize,
     pub direct_method_sites: usize,
+    /// Integer tag guards proven redundant by the verified typed overlay.
+    pub typed_int_guard_elisions: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarType {
+    Int,
+    Float,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedSignature {
+    pub parameters: Vec<ScalarType>,
+    pub result: ScalarType,
 }
 
 /// Profile-backed exact-callee call that may be folded into a caller. The
@@ -345,6 +359,12 @@ struct FloatAnalysis {
     before: Vec<Option<Vec<bool>>>,
     slots: Vec<bool>,
     deopt_maps: Vec<DeoptMap>,
+}
+
+struct TypedIntAnalysis {
+    before: Vec<Option<Vec<bool>>>,
+    slots: Vec<bool>,
+    guard_elisions: usize,
 }
 
 type RuntimeHelper = extern "C" fn(*mut c_void, *const u64, usize, u32, u64, u64, *mut u64) -> u32;
@@ -745,6 +765,22 @@ pub fn compile_with_execution_profile(
     materialized_constants: &[MaterializedConstant],
     exact_float_parameters: &[u16],
 ) -> Result<CompiledFunction, Error> {
+    compile_with_execution_profile_and_types(
+        code,
+        direct_calls,
+        materialized_constants,
+        exact_float_parameters,
+        None,
+    )
+}
+
+pub fn compile_with_execution_profile_and_types(
+    code: &CodeObject,
+    direct_calls: &[DirectCall<'_>],
+    materialized_constants: &[MaterializedConstant],
+    exact_float_parameters: &[u16],
+    typed_signature: Option<&TypedSignature>,
+) -> Result<CompiledFunction, Error> {
     validate_structural_safety(code)?;
     for direct in direct_calls {
         validate_structural_safety(direct.target)?;
@@ -761,10 +797,33 @@ pub fn compile_with_execution_profile(
             message: "invalid exact-float parameter profile".into(),
         });
     }
+    if let Some(signature) = typed_signature {
+        if signature.parameters.len() != code.params as usize {
+            return Err(Error::InvalidBytecode {
+                pc: None,
+                message: "typed signature parameter count does not match bytecode".into(),
+            });
+        }
+        let typed_floats = signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(register, kind)| (*kind == ScalarType::Float).then_some(register as u16))
+            .collect::<Vec<_>>();
+        if typed_floats != exact_float_parameters {
+            return Err(Error::InvalidBytecode {
+                pc: None,
+                message: "typed float parameters disagree with the execution profile".into(),
+            });
+        }
+    }
     validate_direct_calls(code, direct_calls)?;
     validate_materialized_constants(code, materialized_constants)?;
     validate_supported(code, direct_calls, materialized_constants)?;
     let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
+    let typed_int_analysis = typed_signature
+        .map(|signature| analyze_typed_int_execution(code, signature))
+        .transpose()?;
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
         .iter()
@@ -913,6 +972,15 @@ pub fn compile_with_execution_profile(
             let interval = builder.ins().iconst(types::I64, BACKEDGE_POLL_INTERVAL);
             builder.ins().stack_store(interval, slot, 0);
         }
+        if let Some(analysis) = &typed_int_analysis {
+            registers = emit_typed_int_entry_guards(
+                &mut builder,
+                registers,
+                start_pc,
+                analysis,
+                pointer_type,
+            );
+        }
         if let Some(analysis) = &float_analysis {
             registers = emit_float_entry_initialization(
                 &mut builder,
@@ -969,6 +1037,9 @@ pub fn compile_with_execution_profile(
                 Error::Backend(format!("verified opcode could not be decoded: {error}"))
             })?;
             let float_state = float_analysis
+                .as_ref()
+                .and_then(|analysis| analysis.before[pc].as_ref());
+            let typed_int_state = typed_int_analysis
                 .as_ref()
                 .and_then(|analysis| analysis.before[pc].as_ref());
             match op {
@@ -1144,10 +1215,15 @@ pub fn compile_with_execution_profile(
                         );
                         continue;
                     }
-                    let left = load(&mut builder, registers, instruction.b);
-                    let right = load(&mut builder, registers, instruction.c);
-                    let condition = both_exact_int(&mut builder, left, right);
-                    let registers = if backedges > 0 {
+                    let statically_int = typed_int_state.is_some_and(|state| {
+                        state[instruction.b as usize] && state[instruction.c as usize]
+                    });
+                    let registers = if statically_int {
+                        registers
+                    } else if backedges > 0 {
+                        let left = load(&mut builder, registers, instruction.b);
+                        let right = load(&mut builder, registers, instruction.c);
+                        let condition = both_exact_int(&mut builder, left, right);
                         let integer = builder.create_block();
                         builder.append_block_param(integer, pointer_type);
                         let generic = builder.create_block();
@@ -1194,6 +1270,9 @@ pub fn compile_with_execution_profile(
                         builder.switch_to_block(integer);
                         builder.block_params(integer)[0]
                     } else {
+                        let left = load(&mut builder, registers, instruction.b);
+                        let right = load(&mut builder, registers, instruction.c);
+                        let condition = both_exact_int(&mut builder, left, right);
                         guard(&mut builder, condition, registers, pc, pointer_type)
                     };
                     let left_raw = load(&mut builder, registers, instruction.b);
@@ -1292,9 +1371,15 @@ pub fn compile_with_execution_profile(
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::Neg | Op::Pos => {
-                    let operand = load(&mut builder, registers, instruction.b);
-                    let condition = exact_int(&mut builder, operand);
-                    let registers = guard(&mut builder, condition, registers, pc, pointer_type);
+                    let statically_int =
+                        typed_int_state.is_some_and(|state| state[instruction.b as usize]);
+                    let registers = if statically_int {
+                        registers
+                    } else {
+                        let operand = load(&mut builder, registers, instruction.b);
+                        let condition = exact_int(&mut builder, operand);
+                        guard(&mut builder, condition, registers, pc, pointer_type)
+                    };
                     let raw = load(&mut builder, registers, instruction.b);
                     let operand = decode_int(&mut builder, raw);
                     let result = if matches!(op, Op::Neg) {
@@ -1326,10 +1411,17 @@ pub fn compile_with_execution_profile(
                         );
                         continue;
                     }
-                    let left = load(&mut builder, registers, instruction.b);
-                    let right = load(&mut builder, registers, instruction.c);
-                    let condition = both_exact_int(&mut builder, left, right);
-                    let registers = guard(&mut builder, condition, registers, pc, pointer_type);
+                    let statically_int = typed_int_state.is_some_and(|state| {
+                        state[instruction.b as usize] && state[instruction.c as usize]
+                    });
+                    let registers = if statically_int {
+                        registers
+                    } else {
+                        let left = load(&mut builder, registers, instruction.b);
+                        let right = load(&mut builder, registers, instruction.c);
+                        let condition = both_exact_int(&mut builder, left, right);
+                        guard(&mut builder, condition, registers, pc, pointer_type)
+                    };
                     let left_raw = load(&mut builder, registers, instruction.b);
                     let right_raw = load(&mut builder, registers, instruction.c);
                     let left = decode_int(&mut builder, left_raw);
@@ -1680,6 +1772,9 @@ pub fn compile_with_execution_profile(
                 .iter()
                 .filter(|call| call.method_attr_pc.is_some())
                 .count(),
+            typed_int_guard_elisions: typed_int_analysis
+                .as_ref()
+                .map_or(0, |analysis| analysis.guard_elisions),
         },
     })
 }
@@ -2422,6 +2517,128 @@ fn analyze_float_execution(
     }))
 }
 
+fn analyze_typed_int_execution(
+    code: &CodeObject,
+    signature: &TypedSignature,
+) -> Result<TypedIntAnalysis, Error> {
+    let mut before = vec![None; code.instructions.len()];
+    let mut initial = vec![false; code.registers as usize];
+    for (register, kind) in signature.parameters.iter().enumerate() {
+        initial[register] = *kind == ScalarType::Int;
+    }
+    before[0] = Some(initial);
+    let mut queue = VecDeque::from([0usize]);
+    while let Some(pc) = queue.pop_front() {
+        let mut after = before[pc].clone().expect("queued typed state exists");
+        let instruction = code.instructions[pc];
+        let op = Op::try_from(instruction.opcode).map_err(|error| {
+            Error::Backend(format!("verified opcode could not be decoded: {error}"))
+        })?;
+        let is_int = |register: u16| after[register as usize];
+        match op {
+            Op::Const => {
+                after[instruction.a as usize] =
+                    encode_constant(&code.constants[instruction.b as usize])
+                        .is_some_and(|value| value & TAG_MASK as u64 == INT_TAG as u64);
+            }
+            Op::Move => after[instruction.a as usize] = is_int(instruction.b),
+            Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul | Op::FloorDiv | Op::Mod => {
+                after[instruction.a as usize] = is_int(instruction.b) && is_int(instruction.c);
+            }
+            Op::Neg | Op::Pos => after[instruction.a as usize] = is_int(instruction.b),
+            Op::LoadGlobal
+            | Op::Div
+            | Op::Not
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge
+            | Op::Is
+            | Op::IsNot
+            | Op::Call
+            | Op::Attr
+            | Op::CallExpanded => after[instruction.a as usize] = false,
+            Op::BeginArgs
+            | Op::ArgPos
+            | Op::ArgStar
+            | Op::ArgNamed
+            | Op::ArgMapping
+            | Op::Jump
+            | Op::JumpFalse
+            | Op::JumpTrue
+            | Op::Return => {}
+            _ => {
+                return Err(Error::Backend(
+                    "typed analysis received an unsupported opcode".into(),
+                ));
+            }
+        }
+        let mut successors = [None, None];
+        match op {
+            Op::Return => {}
+            Op::Jump => successors[0] = Some(instruction.a as usize),
+            Op::JumpFalse | Op::JumpTrue => {
+                successors[0] = Some(instruction.b as usize);
+                successors[1] = (pc + 1 < code.instructions.len()).then_some(pc + 1);
+            }
+            _ => successors[0] = (pc + 1 < code.instructions.len()).then_some(pc + 1),
+        }
+        for successor in successors.into_iter().flatten() {
+            let changed = match &mut before[successor] {
+                None => {
+                    before[successor] = Some(after.clone());
+                    true
+                }
+                Some(existing) => {
+                    let mut changed = false;
+                    for (known, incoming) in existing.iter_mut().zip(&after) {
+                        let merged = *known && *incoming;
+                        changed |= merged != *known;
+                        *known = merged;
+                    }
+                    changed
+                }
+            };
+            if changed {
+                queue.push_back(successor);
+            }
+        }
+    }
+    let mut slots = vec![false; code.registers as usize];
+    let mut guard_elisions = 0;
+    for (pc, state) in before.iter().enumerate() {
+        let Some(state) = state else { continue };
+        for (slot, known) in slots.iter_mut().zip(state) {
+            *slot |= *known;
+        }
+        let instruction = code.instructions[pc];
+        let op = Op::try_from(instruction.opcode).expect("verified typed opcode");
+        guard_elisions += usize::from(match op {
+            Op::Add
+            | Op::InplaceAdd
+            | Op::Sub
+            | Op::Mul
+            | Op::FloorDiv
+            | Op::Mod
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge => state[instruction.b as usize] && state[instruction.c as usize],
+            Op::Neg | Op::Pos => state[instruction.b as usize],
+            _ => false,
+        });
+    }
+    Ok(TypedIntAnalysis {
+        before,
+        slots,
+        guard_elisions,
+    })
+}
+
 fn validate_materialized_constants(
     code: &CodeObject,
     constants: &[MaterializedConstant],
@@ -2776,6 +2993,66 @@ fn runtime_guard(
     builder.ins().return_(&[status]);
     builder.switch_to_block(pass);
     builder.block_params(pass)[0]
+}
+
+fn emit_typed_int_entry_guards(
+    builder: &mut FunctionBuilder<'_>,
+    mut registers: Value,
+    start_pc: Value,
+    analysis: &TypedIntAnalysis,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    for (register, used) in analysis.slots.iter().copied().enumerate() {
+        if !used {
+            continue;
+        }
+        let mut needed = None;
+        for (pc, state) in analysis.before.iter().enumerate() {
+            if state.as_ref().is_some_and(|state| state[register]) {
+                let at_pc = builder.ins().icmp_imm(IntCC::Equal, start_pc, pc as i64);
+                needed = Some(match needed {
+                    Some(previous) => builder.ins().bor(previous, at_pc),
+                    None => at_pc,
+                });
+            }
+        }
+        let inspect = builder.create_block();
+        builder.append_block_param(inspect, pointer_type);
+        let skip = builder.create_block();
+        builder.append_block_param(skip, pointer_type);
+        let next = builder.create_block();
+        builder.append_block_param(next, pointer_type);
+        builder.ins().brif(
+            needed.expect("typed integer slot has at least one live PC"),
+            inspect,
+            &[registers],
+            skip,
+            &[registers],
+        );
+
+        builder.switch_to_block(inspect);
+        let inspect_registers = builder.block_params(inspect)[0];
+        let raw = load(builder, inspect_registers, register as u16);
+        let exact = exact_int(builder, raw);
+        let valid = builder.create_block();
+        builder.append_block_param(valid, pointer_type);
+        let invalid = builder.create_block();
+        builder
+            .ins()
+            .brif(exact, valid, &[inspect_registers], invalid, &[]);
+        builder.switch_to_block(invalid);
+        builder.ins().return_(&[start_pc]);
+        builder.switch_to_block(valid);
+        let valid_registers = builder.block_params(valid)[0];
+        builder.ins().jump(next, &[valid_registers]);
+
+        builder.switch_to_block(skip);
+        let skip_registers = builder.block_params(skip)[0];
+        builder.ins().jump(next, &[skip_registers]);
+        builder.switch_to_block(next);
+        registers = builder.block_params(next)[0];
+    }
+    registers
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3682,6 +3959,24 @@ mod tests {
                 ref message
             }) if message == "invalid exact-float parameter profile"
         ));
+
+        let invalid_types = TypedSignature {
+            parameters: vec![ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        assert!(matches!(
+            compile_with_execution_profile_and_types(
+                original,
+                &[],
+                &[],
+                &[],
+                Some(&invalid_types),
+            ),
+            Err(Error::InvalidBytecode {
+                pc: None,
+                ref message
+            }) if message == "typed signature parameter count does not match bytecode"
+        ));
     }
 
     #[test]
@@ -3703,6 +3998,54 @@ mod tests {
         assert_eq!(
             Op::try_from(code.instructions[pc].opcode).unwrap(),
             Op::Return
+        );
+    }
+
+    #[test]
+    fn typed_integer_overlay_guards_entry_and_elides_redundant_tags() {
+        let program = function(
+            "def sum_to(n):\n    total=0\n    i=0\n    while i<n:\n        total+=i\n        i+=1\n    return total",
+        );
+        let code = &program.program().code[1];
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        let compiled =
+            compile_with_execution_profile_and_types(code, &[], &[], &[], Some(&signature))
+                .unwrap();
+        assert!(compiled.metadata().typed_int_guard_elisions >= 3);
+
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = encode_i64(10);
+        let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+            panic!("typed integer loop unexpectedly deoptimized");
+        };
+        assert_eq!(value, encode_i64(45));
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = VALUE_TRUE as u64;
+        assert_eq!(
+            compiled.run(&mut registers).unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let resume_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    Op::try_from(instruction.opcode),
+                    Ok(Op::Add | Op::InplaceAdd)
+                )
+            })
+            .expect("numeric loop add");
+        registers.fill(VALUE_UNBOUND);
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, resume_pc, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::Deopt { pc: resume_pc }
         );
     }
 
