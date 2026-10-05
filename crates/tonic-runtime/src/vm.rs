@@ -280,6 +280,7 @@ enum JitEntry {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AnnotationScalar {
+    Dynamic,
     Int,
     Float,
     Bool,
@@ -1899,6 +1900,16 @@ impl Vm {
         function: Value,
         code_id: usize,
     ) -> Option<AnnotationJitGuard> {
+        self.annotation_jit_guard_with_dynamic_prefix(program, function, code_id, 0)
+    }
+
+    fn annotation_jit_guard_with_dynamic_prefix(
+        &mut self,
+        program: &Program,
+        function: Value,
+        code_id: usize,
+        dynamic_prefix: usize,
+    ) -> Option<AnnotationJitGuard> {
         let (code, execution, annotations) = match self.heap.get(function).ok()? {
             Object::Function {
                 code,
@@ -1912,7 +1923,10 @@ impl Vm {
             return None;
         }
         let metadata = &program.code[code_id];
-        if metadata.signature.vararg.is_some() || metadata.signature.kwarg.is_some() {
+        if metadata.signature.vararg.is_some()
+            || metadata.signature.kwarg.is_some()
+            || dynamic_prefix > metadata.params as usize
+        {
             return None;
         }
         let plan = self.annotation_type_plan(function)?;
@@ -1932,7 +1946,12 @@ impl Vm {
             .locals
             .iter()
             .take(metadata.params as usize)
-            .map(|symbol| scalar(&program.symbols[symbol.0 as usize]))
+            .enumerate()
+            .map(|(index, symbol)| {
+                (index < dynamic_prefix)
+                    .then_some(AnnotationScalar::Dynamic)
+                    .or_else(|| scalar(&program.symbols[symbol.0 as usize]))
+            })
             .collect::<Option<Vec<_>>>()?;
         if parameters.len() != metadata.params as usize {
             return None;
@@ -2005,6 +2024,7 @@ impl Vm {
 
     fn annotation_parameter_matches(&self, kind: AnnotationScalar, value: Value) -> bool {
         match kind {
+            AnnotationScalar::Dynamic => true,
             AnnotationScalar::Int => value.as_int().is_some(),
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
             AnnotationScalar::Bool => value.as_bool().is_some(),
@@ -2013,6 +2033,7 @@ impl Vm {
 
     fn annotation_result_matches(&self, kind: AnnotationScalar, value: Value) -> bool {
         match kind {
+            AnnotationScalar::Dynamic => false,
             AnnotationScalar::Int => {
                 value.as_int().is_some() || matches!(self.heap.get(value), Ok(Object::Int(_)))
             }
@@ -8859,7 +8880,7 @@ impl Vm {
                     else {
                         continue;
                     };
-                    (callee, target, arguments, None, None)
+                    (callee, target, arguments, None, None, 0)
                 }
                 Ok(Op::Attr) if method_call_pc(code, load_pc) == Some(pc) => {
                     let Some(owner_load_pc) = code.instructions[..load_pc]
@@ -8887,17 +8908,21 @@ impl Vm {
                     let Some(name) = program.symbols.get(usize::from(load.c)) else {
                         continue;
                     };
-                    let Some((callee, DirectMethodKind::Static, _)) =
-                        self.heap.direct_method(owner, name)
-                    else {
+                    let Some((callee, kind, _)) = self.heap.direct_method(owner, name) else {
                         continue;
                     };
-                    let Some(target) = self.direct_call_target(program, callee, site, 0, false)
-                    else {
+                    let implicit_receiver = !matches!(kind, DirectMethodKind::Static);
+                    let Some(target) = self.direct_call_target(
+                        program,
+                        callee,
+                        site,
+                        usize::from(implicit_receiver),
+                        false,
+                    ) else {
                         continue;
                     };
                     let Some(arguments) =
-                        self.jit_direct_arguments(program, callee, site, target, false)
+                        self.jit_direct_arguments(program, callee, site, target, implicit_receiver)
                     else {
                         continue;
                     };
@@ -8906,16 +8931,28 @@ impl Vm {
                         target,
                         arguments,
                         Some(load_pc),
-                        Some(tonic_jit::MethodBinding::Static),
+                        Some(match kind {
+                            DirectMethodKind::Static => tonic_jit::MethodBinding::Static,
+                            DirectMethodKind::Instance => tonic_jit::MethodBinding::Instance,
+                            DirectMethodKind::Class => tonic_jit::MethodBinding::Class,
+                        }),
+                        usize::from(implicit_receiver),
                     )
                 }
                 _ => continue,
             };
-            let (callee, target, arguments, method_attr_pc, method_binding) = resolved;
-            let Some(summary) = self.annotation_jit_guard(program, callee, target) else {
+            let (callee, target, arguments, method_attr_pc, method_binding, dynamic_prefix) =
+                resolved;
+            let Some(summary) = self.annotation_jit_guard_with_dynamic_prefix(
+                program,
+                callee,
+                target,
+                dynamic_prefix,
+            ) else {
                 continue;
             };
             let scalar_type = |kind| match kind {
+                AnnotationScalar::Dynamic => tonic_jit::ScalarType::Dynamic,
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                 AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
@@ -8936,11 +8973,10 @@ impl Vm {
             }
             let scalar = match summary.result {
                 AnnotationScalar::Int
-                    if summary
-                        .parameters
-                        .iter()
-                        .all(|kind| *kind == AnnotationScalar::Int)
-                        && tonic_jit::is_direct_call_inlineable(&program.code[target]) =>
+                    if summary.parameters.iter().enumerate().all(|(index, kind)| {
+                        *kind == AnnotationScalar::Int
+                            || index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
+                    }) && tonic_jit::is_direct_call_inlineable(&program.code[target]) =>
                 {
                     tonic_jit::ScalarType::Int
                 }
@@ -8953,7 +8989,10 @@ impl Vm {
                 {
                     tonic_jit::ScalarType::Float
                 }
-                AnnotationScalar::Int | AnnotationScalar::Float | AnnotationScalar::Bool => {
+                AnnotationScalar::Dynamic
+                | AnnotationScalar::Int
+                | AnnotationScalar::Float
+                | AnnotationScalar::Bool => {
                     continue;
                 }
             };
@@ -9554,6 +9593,7 @@ impl Vm {
             );
             let typed_signature = annotation.as_ref().map(|annotation| {
                 let scalar = |kind| match kind {
+                    AnnotationScalar::Dynamic => tonic_jit::ScalarType::Dynamic,
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                     AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,

@@ -352,8 +352,10 @@ sonra alınır.
           leaf: profil beklemeden `ATTR`+`CALL` fusion, callee annotation/return
           proof dependency'si, binding-kind/exact-function guard'ı ve class
           rebinding'de exact-ATTR deopt.
-        - [ ] Annotated instance receiver/shape, `classmethod` ve recursive/SCC
-          özetleri.
+        - [x] Exact global instance owner ve exact global class `classmethod`
+          leaf: annotation gerektirmeyen opaque `self/cls` parametresi, normal
+          method/class binding guard'ı, instance shadow/class mutation deopt'u.
+        - [ ] Annotated parameter receiver/shape ve recursive/SCC özetleri.
       - [x] Kullanıcıya açık deterministic rejection metadata'sı: function/code,
         kategori, bytecode PC/opcode ve sabit neden; public runtime accessor ve
         CLI `--stats` explain satırları.
@@ -383,8 +385,11 @@ sonra alınır.
     - [x] Exact global class owner'lı plain function/`staticmethod` için ilk
       annotated class edge: allocation-free method load, static binding guard'ı,
       callee plan invalidation'ı ve class mutation fallback'i.
-    - [ ] Recursion/SCC, annotated instance/`classmethod`/shape kenarları ve
-      graph-wide inline/code-size bütçesi.
+    - [x] Exact global instance method ve global class `classmethod` edge'i:
+      opaque receiver parametresi, instance/class binding guard'ı ve
+      shadow/rebinding fallback'i.
+    - [ ] Recursion/SCC, annotated parameter/shape kenarları ve graph-wide
+      inline/code-size bütçesi.
   - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
     constructor definite-assignment analizi, descriptor/metaclass mutation
     guard'ı ve dinamik attribute fallback'i.

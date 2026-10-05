@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 25, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 26, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 133, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 410 test.
+native handles 5, language/runtime 135, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 413 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -90,6 +90,13 @@ attribute rebinding exact `ATTR` PC'sine deopt ederek yeni callable'ı generic
 descriptor semantiğiyle çalıştırır. Allocation-stress GC vakası method cache
 root'larını doğrular. Ayrı `-> int`/`return True` class function vakası body-proof
 kapısında reddedilir ve typed result/direct-method sayaçları sıfır kalır.
+
+Opaque-receiver testleri public JIT `Dynamic` parametresinin entry scalar guard'ı
+ve return proof üretmediğini, buna karşılık kullanılmayan `self/cls` slotuyla
+exact-int dönüşün kanıtlanabildiğini doğrular; `Dynamic` result public compile
+API'sinde deterministik olarak reddedilir. Runtime vakaları exact global instance
+methodunda shadowing sonrası ATTR deopt'unu ve global class `classmethod` çağrısında
+annotation mutation invalidation'ını allocation-stress GC altında kapsar.
 
 JIT rejection diagnostics CLI testi annotation first-call adayındaki destek dışı
 `Pow` opkodunu generic semantiği bozmadan çalıştırır ve `--stats` çıktısında exact

@@ -214,8 +214,19 @@ rebinding atomik deopt ile normal descriptor semantiğini tekrarlar. Yalan retur
 annotation'ı kenar üretmez. Karar
 [ADR 0111](adr/0111-annotated-class-function-edge.md) içindedir.
 
-Instance receiver/shape özetleri, `classmethod`, recursive/SCC özetleri, ayrı
-compilation unit ve graph-wide code-size bütçesi hâlâ açıktır.
+Exact global instance method ve exact global class `classmethod` kenarları da
+aynı first-call yola katılır. Public typed signature receiver slotunu
+`Dynamic` olarak işaretleyebilir: değer materialized guest `Value` olarak kalır,
+scalar guard/elision üretmez ve typed dönüş olarak kabul edilmez. `self`/`cls`
+annotation'ı gerekmeksizin kalan parametreler ile dönüş exact scalar planından
+gelir; return proof receiver'ı `Unknown` fact olarak taşır. Generated method
+helper instance/class binding türünü ve exact function kimliğini korur. Instance
+attribute shadowing, class rebinding ve callee annotation mutasyonu sırasıyla
+exact-PC deopt veya caller invalidation üretir. Karar
+[ADR 0112](adr/0112-opaque-receiver-call-summary.md) içindedir.
+
+Annotation'lı caller parametresinden instance/shape özeti, recursive/SCC
+özetleri, ayrı compilation unit ve graph-wide code-size bütçesi hâlâ açıktır.
 
 JIT reddi sessiz bir `Unsupported` biti değildir. Runtime her code object için
 son kalıcı ret kararını function/code kimliği, `unprofitable`/`code-budget`/

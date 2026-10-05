@@ -271,6 +271,10 @@ pub struct Metadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
+    /// A materialized guest value with no scalar representation assumption.
+    /// This is valid for parameters used only as opaque receivers, but never
+    /// proves a typed return.
+    Dynamic,
     Int,
     Float,
     Bool,
@@ -382,6 +386,7 @@ enum ScalarFact {
 impl ScalarFact {
     fn from_signature(kind: ScalarType) -> Self {
         match kind {
+            ScalarType::Dynamic => Self::Unknown,
             ScalarType::Int => Self::Int,
             ScalarType::Float => Self::Float,
             ScalarType::Bool => Self::Bool,
@@ -393,7 +398,7 @@ impl ScalarFact {
     }
 
     fn matches_signature(self, kind: ScalarType) -> bool {
-        self == Self::from_signature(kind)
+        kind != ScalarType::Dynamic && self == Self::from_signature(kind)
     }
 }
 
@@ -825,6 +830,9 @@ pub fn typed_return_is_proven(
             message: "typed signature parameter count does not match bytecode".into(),
         });
     }
+    if signature.result == ScalarType::Dynamic {
+        return Ok(false);
+    }
     Ok(analyze_typed_scalar_execution(code, signature, &[])?.return_proven)
 }
 
@@ -856,6 +864,12 @@ pub fn compile_with_execution_profile_and_types(
             return Err(Error::InvalidBytecode {
                 pc: None,
                 message: "typed signature parameter count does not match bytecode".into(),
+            });
+        }
+        if signature.result == ScalarType::Dynamic {
+            return Err(Error::InvalidBytecode {
+                pc: None,
+                message: "typed signature result cannot be dynamic".into(),
             });
         }
         let typed_floats = signature
@@ -4330,6 +4344,35 @@ mod tests {
         };
         assert!(typed_return_is_proven(&valid.program().code[1], &signature).unwrap());
         assert!(!typed_return_is_proven(&lied.program().code[1], &signature).unwrap());
+    }
+
+    #[test]
+    fn typed_return_proof_allows_an_opaque_receiver_parameter() {
+        let method = function("def twice(self,value):\n    return value+value");
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Dynamic, ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        assert!(typed_return_is_proven(&method.program().code[1], &signature).unwrap());
+
+        let dynamic_result = TypedSignature {
+            parameters: signature.parameters,
+            result: ScalarType::Dynamic,
+        };
+        assert!(!typed_return_is_proven(&method.program().code[1], &dynamic_result).unwrap());
+        assert!(matches!(
+            compile_with_execution_profile_and_types(
+                &method.program().code[1],
+                &[],
+                &[],
+                &[],
+                Some(&dynamic_result),
+            ),
+            Err(Error::InvalidBytecode {
+                pc: None,
+                ref message
+            }) if message == "typed signature result cannot be dynamic"
+        ));
     }
 
     #[test]
