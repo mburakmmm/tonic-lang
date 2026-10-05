@@ -289,6 +289,7 @@ mod tests {
                 captures: vec![cell],
                 defaults: vec![default],
                 annotations: None,
+                annotation_plan: None,
                 type_params: None,
             })
             .unwrap();

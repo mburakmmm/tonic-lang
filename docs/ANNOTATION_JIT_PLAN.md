@@ -123,6 +123,22 @@ sayılmaz.
 10. Yalnız bütün roadmap/coverage kapıları kapandıktan sonra CPython/Cython ile
     nihai benchmark ve bottleneck profili.
 
+## Uygulama durumu
+
+TypePlan v1 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
+`list`/`dict`/`set`, fixed tuple ve kullanıcı class identity/version planlarına
+dönüşür. Planlar isim sırasına göre canonical hale getirilip açık schema sürümü
+ve sabit FNV-1a kodlamasıyla hash'lenir. Desteklenmeyen değer, generic origin,
+arity, type parameter, recursive alias ve recursion limit ayrı reason code üretir.
+
+Fonksiyonun `__annotations__` dict'i için structural iterator epoch'undan ayrı
+bir content-mutation epoch vardır. Var olan anahtarın değerini değiştirmek de bu
+epoch'u artırır; function içindeki plan cache yalnız epoch eşleşiyorsa kullanılır.
+Bu temel henüz typed native entry seçmez. Union/Optional/Literal/Callable,
+variadic tuple, bytes, buffer/dtype ve full dependency guard'ları sonraki
+dilimlerdir. Karar ayrıntısı [ADR 0104](adr/0104-type-plan-v1.md) içindedir.
+
 ## Kabul ölçütleri
 
 - Advisory kipte annotation eklemek veya kaldırmak program çıktısını ve exception

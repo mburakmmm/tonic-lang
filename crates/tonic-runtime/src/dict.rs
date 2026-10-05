@@ -39,6 +39,9 @@ pub(crate) struct Dict {
     hashes: Vec<u64>,
     index: HashMap<u64, Vec<usize>>,
     pub version: u64,
+    /// Changes on every successful content mutation. Structural iterators use
+    /// `version`; annotation/JIT dependency guards use this stronger epoch.
+    pub mutation_version: u64,
 }
 impl Dict {
     pub fn estimated_bytes(&self) -> usize {
@@ -208,6 +211,10 @@ impl Heap {
             return Err(Diagnostic::new("TypeError", "expected dict"));
         };
         let before = dict.estimated_bytes();
+        let mutation_version = dict
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict mutation version exhausted"))?;
         if let Some(index) = find_material(dict, &material) {
             dict.entries[index].1 = value;
         } else {
@@ -225,6 +232,7 @@ impl Heap {
             dict.hashes.push(key_hash(&dict.materials[index]));
             dict.version = version;
         }
+        dict.mutation_version = mutation_version;
         self.bytes += dict.estimated_bytes() - before;
         self.peak_bytes = self.peak_bytes.max(self.bytes);
         Ok(())
@@ -275,6 +283,10 @@ impl Heap {
             .version
             .checked_add(1)
             .ok_or_else(|| Diagnostic::new("RuntimeError", "dict version exhausted"))?;
+        dict.mutation_version = dict
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict mutation version exhausted"))?;
         Ok(())
     }
     pub fn dict_merge(&mut self, owner: Value, other: Value) -> Result<()> {
@@ -313,6 +325,10 @@ impl Heap {
             .version
             .checked_add(1)
             .ok_or_else(|| Diagnostic::new("RuntimeError", "dict version exhausted"))?;
+        dict.mutation_version = dict
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict mutation version exhausted"))?;
         let after = dict.estimated_bytes();
         self.bytes -= before - after;
         Ok(())
@@ -438,6 +454,10 @@ impl Heap {
             _ => return Err(Diagnostic::new("TypeError", "expected hashed container")),
         };
         let before = dict.estimated_bytes();
+        let mutation_version = dict
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict mutation version exhausted"))?;
         if let Some(index) = matched {
             let entry = dict
                 .entries
@@ -456,6 +476,7 @@ impl Heap {
             dict.hashes.push(hash as u64);
             dict.version = version;
         }
+        dict.mutation_version = mutation_version;
         self.bytes += dict.estimated_bytes() - before;
         self.peak_bytes = self.peak_bytes.max(self.bytes);
         Ok(())
@@ -503,6 +524,10 @@ impl Heap {
             .version
             .checked_add(1)
             .ok_or_else(|| Diagnostic::new("RuntimeError", "dict version exhausted"))?;
+        dict.mutation_version = dict
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "dict mutation version exhausted"))?;
         let after = dict.estimated_bytes();
         self.bytes -= before - after;
         Ok(())

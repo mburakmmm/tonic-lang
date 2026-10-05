@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 25,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 122, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 394 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 395 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -292,6 +292,11 @@ H3 tracker fixture `Close` ile sahip olunan local handle'ların kapandığını,
 `ForgetAll` sonrasında sahipliğin çağıranda kaldığını ve stale token, kapanmış
 handle, negatif kapasite ile açık tracker dönüşlerinin interpreter/JIT ×
 default/her-allocation GC matrisinde deterministic hata verdiğini doğrular.
+Annotation TypePlan unit testi exact scalar/plain container, nested list/dict,
+fixed tuple, set class'ı, kullanıcı class identity/version ve unsupported-value
+reason code'unu doğrular. Var olan `__annotations__` anahtarının değeri
+değiştirildiğinde structural dict epoch'u korunurken content epoch'u ve canonical
+plan hash'i değişir; lazy function cache yeni planla yenilenir.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

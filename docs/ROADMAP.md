@@ -311,10 +311,16 @@ sonra alınır.
 - [ ] Annotation destekli kısmi statik derleme ve doğrudan typed-JIT tier'ı.
   Standart Python annotation'ları dil semantiğini değiştirmeden optimizasyon
   varsayımıdır; yanlış tipte çağrı generic Python yoluna deopt eder.
+  - [x] TypePlan v1 temeli: exact `None/bool/int/float/str`, plain container,
+    nested homogeneous list/dict/set, fixed tuple, class identity/version,
+    canonical hash, deterministic rejection code ve annotation-dict content
+    mutation epoch'uyla lazy cache yenileme.
   - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
     union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
     callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
-    deterministic “optimize edilmedi” nedeni.
+    deterministic “optimize edilmedi” nedeni. V1 temeli tamamlandı; union,
+    optional/literal/callable, variadic tuple, bytes ve buffer/dtype genişlemesi
+    açık.
   - [ ] Function identity + code/version + annotation-dict version guard'ı;
     `__annotations__` mutation/replacement, global alias rebinding ve class/MRO
     değişiminde cache invalidation veya atomik deopt.

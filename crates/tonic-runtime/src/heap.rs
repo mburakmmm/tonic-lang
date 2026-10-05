@@ -1,6 +1,6 @@
 #[path = "gc.rs"]
 mod gc;
-use crate::{classes::ClassDictionaryKey, value::Value};
+use crate::{classes::ClassDictionaryKey, type_plan::FunctionTypePlan, value::Value};
 pub use gc::CollectionStats;
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -287,6 +287,7 @@ pub(crate) enum Object {
         captures: Vec<Value>,
         defaults: Vec<Value>,
         annotations: Option<Value>,
+        annotation_plan: Option<FunctionTypePlan>,
         type_params: Option<Value>,
     },
     TypeParam {
@@ -2477,8 +2478,16 @@ impl Object {
                         + m.iter().map(|(name, _)| name.capacity()).sum::<usize>()
                 }
                 Self::Function {
-                    captures, defaults, ..
-                } => (captures.capacity() + defaults.capacity()) * 8,
+                    captures,
+                    defaults,
+                    annotation_plan,
+                    ..
+                } => {
+                    (captures.capacity() + defaults.capacity()) * 8
+                        + annotation_plan
+                            .as_ref()
+                            .map_or(0, FunctionTypePlan::estimated_bytes)
+                }
                 Self::TypeParam { name, .. } | Self::TypeAlias { name, .. } => name.capacity(),
                 Self::Generator(frame) => frame.payload_bytes(),
                 Self::AsyncFuture(future) => {

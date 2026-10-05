@@ -14,6 +14,7 @@ mod number;
 mod ops;
 mod runtime_owner;
 mod shapes;
+mod type_plan;
 mod value;
 mod vm;
 
@@ -30,5 +31,9 @@ pub use heap::CollectionStats;
 pub use native::{
     Context, Handle, NativeFn, PersistentHandle, StatefulKeywordNativeFn, StatefulNativeFn,
     StatefulNativeSignature,
+};
+pub use type_plan::{
+    AnnotationTypePlan, ExactTypePlan, FunctionTypePlan, TypePlan, TypePlanRejection,
+    TYPE_PLAN_SCHEMA_VERSION,
 };
 pub use vm::{ExecutionMode, Limits, RuntimePhase, Stats, Vm};

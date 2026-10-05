@@ -12,6 +12,7 @@ use crate::{
     },
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
+    type_plan::{resolve_function_type_plan, FunctionTypePlan, TypePlanBuiltins},
     value::Value,
 };
 use calls::{Arguments, ExpandedArgs};
@@ -1775,6 +1776,52 @@ pub struct Vm {
     float_call_profiles: Vec<Vec<Option<FloatCallProfile>>>,
 }
 impl Vm {
+    fn annotation_type_plan(&mut self, function: Value) -> Option<FunctionTypePlan> {
+        let Object::Function {
+            annotations: Some(annotations),
+            annotation_plan,
+            ..
+        } = self.heap.get(function).ok()?
+        else {
+            return None;
+        };
+        let annotations = *annotations;
+        let cached = annotation_plan.clone();
+        let version = match self.heap.get(annotations).ok()? {
+            Object::Dict(dictionary) => dictionary.mutation_version,
+            _ => return None,
+        };
+        if cached
+            .as_ref()
+            .is_some_and(|plan| plan.annotation_version == version)
+        {
+            return cached;
+        }
+        let plan = resolve_function_type_plan(
+            &self.heap,
+            TypePlanBuiltins {
+                none_type: self.runtime_types.none,
+                bool_: self.runtime_types.bool_,
+                int: self.runtime_types.int,
+                float: self.runtime_types.float,
+                str_: self.runtime_types.str_,
+                list: self.runtime_types.list,
+                tuple: self.runtime_types.tuple,
+                dict: self.runtime_types.dict,
+                set: self.runtime_types.set,
+            },
+            annotations,
+        )?;
+        let Object::Function {
+            annotation_plan, ..
+        } = self.heap.get_mut(function).ok()?
+        else {
+            return None;
+        };
+        *annotation_plan = Some(plan.clone());
+        Some(plan)
+    }
+
     fn generic_alias_arguments(&mut self, owner: Value, key: Value) -> Result<Value> {
         let mut arguments = match self.heap.get(key)? {
             Object::Tuple(values) => values.clone(),
@@ -5589,7 +5636,7 @@ impl Vm {
                                 .collect::<Result<Vec<_>>>()?;
                             Some(self.heap.alloc(Object::Tuple(values))?)
                         };
-                        self.registers[a] = self.heap.alloc(Object::Function {
+                        let function = self.heap.alloc(Object::Function {
                             code: site.code,
                             execution: self.execution,
                             captures,
@@ -5599,8 +5646,13 @@ impl Vm {
                                 .map(|r| self.read(base + *r as usize))
                                 .collect::<Result<_>>()?,
                             annotations,
+                            annotation_plan: None,
                             type_params,
-                        })?
+                        })?;
+                        if annotations.is_some() {
+                            let _ = self.annotation_type_plan(function);
+                        }
+                        self.registers[a] = function;
                     }
                     Op::TypeParam => {
                         let bound = (i.c == 1).then(|| self.read(a)).transpose()?;
@@ -9678,5 +9730,110 @@ pub(super) fn base_binary_op(op: Op) -> Op {
         Op::InplaceRightShift => Op::RightShift,
         Op::InplaceMatMul => Op::MatMul,
         op => op,
+    }
+}
+
+#[cfg(test)]
+mod annotation_type_plan_tests {
+    use super::*;
+    use crate::{ExactTypePlan, TypePlan, TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION};
+    use tonic_compiler::compile;
+
+    fn global(program: &Program, vm: &Vm, name: &str) -> Value {
+        let index = program
+            .symbols
+            .iter()
+            .position(|symbol| symbol == name)
+            .expect("global symbol");
+        vm.globals[index]
+    }
+
+    #[test]
+    fn resolved_annotations_have_canonical_plans_and_content_versions() {
+        let source = concat!(
+            "class Marker:\n    pass\n",
+            "def typed(x:int,y:list[float],z:dict[str,int],",
+            "t:tuple[int,str],s:type({1}),m:Marker,bad:42)->float:\n",
+            "    return 1.0\n",
+        );
+        let program = compile(source, "annotation-type-plan").unwrap();
+        let mut vm = Vm::new().unwrap();
+        vm.run(&program, &mut Vec::new()).unwrap();
+        let function = global(program.program(), &vm, "typed");
+        let marker = global(program.program(), &vm, "Marker");
+        let marker_class = vm.heap.class(marker).unwrap();
+        let marker_plan = (marker_class.id.0, marker_class.version);
+        let plan = vm.annotation_type_plan(function).unwrap();
+
+        assert_eq!(plan.schema_version, TYPE_PLAN_SCHEMA_VERSION);
+        assert_ne!(plan.canonical_hash, 0);
+        let entry = |name: &str| {
+            plan.annotations
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .plan
+                .clone()
+        };
+        assert_eq!(entry("x"), Ok(TypePlan::Exact(ExactTypePlan::Int)));
+        assert_eq!(
+            entry("y"),
+            Ok(TypePlan::List(Box::new(TypePlan::Exact(
+                ExactTypePlan::Float
+            ))))
+        );
+        assert_eq!(
+            entry("z"),
+            Ok(TypePlan::Dict(
+                Box::new(TypePlan::Exact(ExactTypePlan::Str)),
+                Box::new(TypePlan::Exact(ExactTypePlan::Int)),
+            ))
+        );
+        assert_eq!(
+            entry("t"),
+            Ok(TypePlan::FixedTuple(vec![
+                TypePlan::Exact(ExactTypePlan::Int),
+                TypePlan::Exact(ExactTypePlan::Str),
+            ]))
+        );
+        assert_eq!(entry("s"), Ok(TypePlan::Exact(ExactTypePlan::Set)));
+        assert_eq!(
+            entry("m"),
+            Ok(TypePlan::Class {
+                type_id: marker_plan.0,
+                version: marker_plan.1,
+            })
+        );
+        assert_eq!(entry("bad"), Err(TypePlanRejection::UnsupportedValue));
+        assert_eq!(entry("return"), Ok(TypePlan::Exact(ExactTypePlan::Float)));
+
+        let annotations = match vm.heap.get(function).unwrap() {
+            Object::Function {
+                annotations: Some(annotations),
+                ..
+            } => *annotations,
+            _ => panic!("expected annotated function"),
+        };
+        let structural_version = vm.heap.hash_version(annotations).unwrap();
+        let key = vm.heap.alloc(Object::Str("x".into())).unwrap();
+        vm.heap
+            .dict_set(annotations, key, vm.runtime_types.float)
+            .unwrap();
+        let updated = vm.annotation_type_plan(function).unwrap();
+        assert!(updated.annotation_version > plan.annotation_version);
+        assert_eq!(
+            vm.heap.hash_version(annotations).unwrap(),
+            structural_version
+        );
+        assert_ne!(updated.canonical_hash, plan.canonical_hash);
+        assert_eq!(
+            updated
+                .annotations
+                .iter()
+                .find(|entry| entry.name == "x")
+                .unwrap()
+                .plan,
+            Ok(TypePlan::Exact(ExactTypePlan::Float))
+        );
     }
 }
