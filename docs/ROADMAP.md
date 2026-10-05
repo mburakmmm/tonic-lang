@@ -347,8 +347,10 @@ sonra alınır.
         propagation: callee return bytecode proof'u, function/code/execution/
         annotation dependency invalidation'ı, first-call direct inline ve caller
         return proof zinciri; yalan callee annotation'ında özet reddi.
-      - [ ] Recursive/method call-result özetleri ve kullanıcıya açık explain/
-        rejection metadata'sı.
+      - [ ] Recursive/method call-result özetleri.
+      - [x] Kullanıcıya açık deterministic rejection metadata'sı: function/code,
+        kategori, bytecode PC/opcode ve sabit neden; public runtime accessor ve
+        CLI `--stats` explain satırları.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.
@@ -356,8 +358,10 @@ sonra alınır.
       Cranelift seçimi; exact function/code/execution/plan/argument guard'ı,
       return guard'lı exact-PC deopt, annotation invalidation sayaçları ve
       normal/stress-GC testleri.
-    - [ ] `@tonic.compile`, modül warmup politikası, compile-rejection tanısı ve
-      import-time code-budget planlaması.
+    - [ ] `@tonic.compile`, modül warmup politikası ve import-time code-budget
+      planlaması.
+    - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code
+      budget ve guard-instability için deterministic kayıt ve CLI açıklaması.
   - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için
     overflow'da bigint deopt'u, IEEE float sınırları, exact exception PC'si,
     safepoint stack-map ve interpreter state rekonstrüksiyonu.

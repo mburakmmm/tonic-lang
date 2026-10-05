@@ -81,6 +81,22 @@ fn collection_options() {
     assert!(!String::from_utf8_lossy(&stress.stderr).contains(", gc_collections: 0,"));
     assert!(String::from_utf8_lossy(&disabled.stderr).contains(", gc_collections: 0,"));
 }
+
+#[test]
+fn jit_stats_explain_deterministic_compile_rejection() {
+    let result = tonic(&[
+        "--jit",
+        "--stats",
+        "-c",
+        "def square(value:int)->int:\n    return value**2\nprint(square(3))",
+    ]);
+    assert!(result.status.success());
+    assert_eq!(result.stdout, b"9\n");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("function=\"square\" kind=unsupported-bytecode"));
+    assert!(stderr.contains("opcode=Some(Pow)"));
+    assert!(stderr.contains("reason=\"opcode needs the generic runtime\""));
+}
 #[test]
 fn jit_executes_leaf_loops_and_deoptimizes_to_the_interpreter() {
     let loop_source = "def sum_to(n):\n    total=0\n    i=0\n    while i<n:\n        total+=i\n        i+=1\n    return total\nprint(sum_to(100))";

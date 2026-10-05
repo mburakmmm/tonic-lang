@@ -7,7 +7,7 @@ use std::{
 };
 use tonic_core::diagnostic::Diagnostic;
 use tonic_runtime::{ExecutionMode, Vm};
-const HELP:&str="Tonic 0.1.0 — bootstrap Python-syntax runtime\n\nUsage: tonic [--check | --dump-bytecode] [--stats] [--jit] [--fuel N] FILE\n       tonic [options] -c SOURCE\n       tonic [options] -\n\n  --check          Parse, compile and verify without executing\n  --dump-bytecode  Show verified register bytecode without executing\n  --stats          Write interpreter and JIT counters to stderr\n  --jit            Promote supported hot functions with Cranelift\n  --fuel N         Stop after N VM instructions (disables JIT execution)\n  --gc-every N     Collect after N allocations (1 for stress testing)\n  --no-gc          Disable automatic collection\n  -                Read UTF-8 source from stdin\n  -h, --help       Show help\n  -V, --version    Show version\n\nUnsupported functions use the generic interpreter. CPython bridge and interactive REPL are not implemented yet.\n";
+const HELP:&str="Tonic 0.1.0 — bootstrap Python-syntax runtime\n\nUsage: tonic [--check | --dump-bytecode] [--stats] [--jit] [--fuel N] FILE\n       tonic [options] -c SOURCE\n       tonic [options] -\n\n  --check          Parse, compile and verify without executing\n  --dump-bytecode  Show verified register bytecode without executing\n  --stats          Write counters and JIT rejection explanations to stderr\n  --jit            Promote supported hot functions with Cranelift\n  --fuel N         Stop after N VM instructions (disables JIT execution)\n  --gc-every N     Collect after N allocations (1 for stress testing)\n  --no-gc          Disable automatic collection\n  -                Read UTF-8 source from stdin\n  -h, --help       Show help\n  -V, --version    Show version\n\nUnsupported functions use the generic interpreter. CPython bridge and interactive REPL are not implemented yet.\n";
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -120,6 +120,17 @@ fn run() -> std::result::Result<(), (u8, String)> {
     vm.run(&program, &mut io::stdout().lock()).map_err(render)?;
     if stats {
         eprintln!("{:?}", vm.stats);
+        for rejection in vm.jit_rejections() {
+            eprintln!(
+                "jit-rejection code_id={} function={:?} kind={} pc={:?} opcode={:?} reason={:?}",
+                rejection.code_id,
+                rejection.function,
+                rejection.kind.code(),
+                rejection.pc,
+                rejection.opcode,
+                rejection.reason,
+            );
+        }
     }
     Ok(())
 }

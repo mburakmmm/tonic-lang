@@ -122,6 +122,36 @@ pub struct Stats {
     pub attr_pic_promotions: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JitRejectionKind {
+    Unprofitable,
+    CodeBudget,
+    UnsupportedBytecode,
+    UnstableGuards,
+}
+
+impl JitRejectionKind {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Unprofitable => "unprofitable",
+            Self::CodeBudget => "code-budget",
+            Self::UnsupportedBytecode => "unsupported-bytecode",
+            Self::UnstableGuards => "unstable-guards",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JitRejection {
+    pub code_id: usize,
+    pub function: String,
+    pub kind: JitRejectionKind,
+    pub pc: Option<usize>,
+    pub opcode: Option<Op>,
+    pub reason: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimePhase {
     Running,
@@ -1803,6 +1833,7 @@ pub struct Vm {
     pub jit_max_code_bytes: usize,
     jit_code_budget_used: usize,
     jit_cache: Vec<JitEntry>,
+    jit_rejections: Vec<Option<JitRejection>>,
     jit_hotness: Vec<u32>,
     jit_registers: Vec<u64>,
     jit_globals: Vec<u64>,
@@ -2148,6 +2179,7 @@ impl Vm {
             jit_max_code_bytes: DEFAULT_JIT_MAX_CODE_BYTES,
             jit_code_budget_used: 0,
             jit_cache: Vec::new(),
+            jit_rejections: Vec::new(),
             jit_hotness: Vec::new(),
             jit_registers: Vec::new(),
             jit_globals: Vec::new(),
@@ -3511,6 +3543,29 @@ impl Vm {
         self.heap.trace_all(|_| edges += 1);
         (roots, edges)
     }
+    pub fn jit_rejections(&self) -> impl Iterator<Item = &JitRejection> {
+        self.jit_rejections.iter().flatten()
+    }
+
+    fn record_jit_rejection(
+        &mut self,
+        program: &Program,
+        code_id: usize,
+        kind: JitRejectionKind,
+        pc: Option<usize>,
+        opcode: Option<Op>,
+        reason: impl Into<String>,
+    ) {
+        self.jit_rejections[code_id] = Some(JitRejection {
+            code_id,
+            function: program.code[code_id].name.clone(),
+            kind,
+            pc,
+            opcode,
+            reason: reason.into(),
+        });
+    }
+
     pub fn run(&mut self, verified: &VerifiedProgram, output: &mut dyn Write) -> Result<()> {
         self.ensure_running()?;
         self.drain_deferred_persistent_releases()?;
@@ -3550,6 +3605,7 @@ impl Vm {
         self.global_owners.clear();
         self.global_defined.clear();
         self.jit_cache = (0..program.code.len()).map(|_| JitEntry::Untried).collect();
+        self.jit_rejections = vec![None; program.code.len()];
         self.jit_code_budget_used = 0;
         self.jit_hotness = vec![0; program.code.len()];
         self.jit_registers.clear();
@@ -9322,6 +9378,7 @@ impl Vm {
                 self.stats.jit_annotation_invalidations += 1;
                 self.stats.jit_fallbacks += 1;
                 self.jit_cache[code_id] = JitEntry::Untried;
+                self.jit_rejections[code_id] = None;
                 return Ok(false);
             }
             if !self.annotation_arguments_match(annotation, base) {
@@ -9353,6 +9410,14 @@ impl Vm {
                     .all(|value| matches!(self.heap.get(*value), Ok(Object::Float(_))));
             if annotation.is_none() && float_leaf {
                 self.stats.jit_unprofitable += 1;
+                self.record_jit_rejection(
+                    program,
+                    code_id,
+                    JitRejectionKind::Unprofitable,
+                    None,
+                    None,
+                    "profiled exact-float leaf is below direct-call profitability",
+                );
                 self.jit_cache[code_id] = JitEntry::Unsupported;
                 return Ok(false);
             }
@@ -9368,6 +9433,17 @@ impl Vm {
                 && program.code[code_id].instructions.len() < profitable_size
             {
                 self.stats.jit_unprofitable += 1;
+                self.record_jit_rejection(
+                    program,
+                    code_id,
+                    JitRejectionKind::Unprofitable,
+                    None,
+                    None,
+                    format!(
+                        "{} instructions are below the profitability threshold {profitable_size}",
+                        program.code[code_id].instructions.len()
+                    ),
+                );
                 self.jit_cache[code_id] = JitEntry::Unsupported;
                 return Ok(false);
             }
@@ -9459,6 +9535,19 @@ impl Vm {
                     else {
                         self.stats.jit_code_budget_rejections += 1;
                         self.stats.jit_fallbacks += 1;
+                        self.record_jit_rejection(
+                            program,
+                            code_id,
+                            JitRejectionKind::CodeBudget,
+                            None,
+                            None,
+                            format!(
+                                "native code budget {} would exceed limit {}",
+                                self.jit_code_budget_used
+                                    .saturating_add(metadata.code_bytes),
+                                self.jit_max_code_bytes
+                            ),
+                        );
                         self.jit_cache[code_id] = JitEntry::Unsupported;
                         return Ok(false);
                     };
@@ -9477,6 +9566,7 @@ impl Vm {
                         u64::from(annotation.is_some() && metadata.typed_return_proven);
                     self.stats.jit_typed_call_result_sites +=
                         metadata.typed_call_result_sites as u64;
+                    self.jit_rejections[code_id] = None;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,
@@ -9486,8 +9576,16 @@ impl Vm {
                         self.stats.jit_osr_entries += 1;
                     }
                 }
-                Err(tonic_jit::Error::Unsupported(_)) => {
+                Err(tonic_jit::Error::Unsupported(unsupported)) => {
                     self.stats.jit_fallbacks += 1;
+                    self.record_jit_rejection(
+                        program,
+                        code_id,
+                        JitRejectionKind::UnsupportedBytecode,
+                        Some(unsupported.pc),
+                        unsupported.opcode,
+                        unsupported.reason,
+                    );
                     self.jit_cache[code_id] = JitEntry::Unsupported;
                     return Ok(false);
                 }
@@ -9602,6 +9700,14 @@ impl Vm {
                 };
                 *deopts += 1;
                 if *deopts >= JIT_DEOPT_LIMIT {
+                    self.record_jit_rejection(
+                        program,
+                        code_id,
+                        JitRejectionKind::UnstableGuards,
+                        Some(pc),
+                        Op::try_from(program.code[code_id].instructions[pc].opcode).ok(),
+                        format!("guard deoptimized {JIT_DEOPT_LIMIT} times"),
+                    );
                     self.jit_cache[code_id] = JitEntry::Unsupported;
                     self.stats.jit_despecialized += 1;
                 }

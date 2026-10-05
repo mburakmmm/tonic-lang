@@ -36,4 +36,4 @@ pub use type_plan::{
     AnnotationTypePlan, ExactTypePlan, FunctionTypePlan, TypePlan, TypePlanRejection,
     TYPE_PLAN_SCHEMA_VERSION,
 };
-pub use vm::{ExecutionMode, Limits, RuntimePhase, Stats, Vm};
+pub use vm::{ExecutionMode, JitRejection, JitRejectionKind, Limits, RuntimePhase, Stats, Vm};

@@ -1,6 +1,6 @@
 use tonic_compiler::{compile, compile_modules, ModuleSource};
 use tonic_core::diagnostic::{Diagnostic, Result};
-use tonic_runtime::{Context, ExecutionMode, Handle, Vm};
+use tonic_runtime::{Context, ExecutionMode, Handle, JitRejectionKind, Vm};
 fn output(source: &str) -> String {
     let p = compile(source, "test.tonic").unwrap();
     let mut out = Vec::new();
@@ -3168,6 +3168,10 @@ fn jit_code_budget_rejects_native_code_and_preserves_interpreter_execution() {
     assert_eq!(vm.stats.jit_code_budget_rejections, 1);
     assert_eq!(vm.stats.jit_fallbacks, 1);
     assert_eq!(vm.stats.jit_calls, 0);
+    let rejection = vm.jit_rejections().next().expect("code-budget rejection");
+    assert_eq!(rejection.function, "add");
+    assert_eq!(rejection.kind, JitRejectionKind::CodeBudget);
+    assert!(rejection.reason.contains("would exceed limit 0"));
 }
 
 #[test]

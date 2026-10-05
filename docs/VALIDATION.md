@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 25, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 25, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 130, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 406 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 407 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -82,6 +82,12 @@ ilerletir ve direct-call/typed-result sayaçlarını doğrular. Callee annotatio
 mutation'ı caller plan dependency'sini invalid ederken sonuç değişmez. Ayrı yalan
 `-> int`/`return True` vakası public callee-return proof kapısında özeti reddeder;
 caller generic kalır ve Python `True + 1 == 2` davranışı korunur.
+
+JIT rejection diagnostics CLI testi annotation first-call adayındaki destek dışı
+`Pow` opkodunu generic semantiği bozmadan çalıştırır ve `--stats` çıktısında exact
+function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
+deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
+`code-budget` kaydını ve limit açıklamasını doğrular.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×

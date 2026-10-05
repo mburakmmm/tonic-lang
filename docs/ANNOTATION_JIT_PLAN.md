@@ -207,6 +207,13 @@ Bu ilk kenar ordinary exact-global int/float leaf ile sınırlıdır. Recursive/
 özetleri, method/class/shape kenarları, ayrı compilation unit ve graph-wide
 code-size bütçesi hâlâ açıktır.
 
+JIT reddi sessiz bir `Unsupported` biti değildir. Runtime her code object için
+son kalıcı ret kararını function/code kimliği, `unprofitable`/`code-budget`/
+`unsupported-bytecode`/`unstable-guards` kategorisi, varsa bytecode PC/opcode ve
+deterministic neden ile saklar. Embedder bu kayıtlara public accessor ile ulaşır;
+CLI `--stats` her kaydı makinece ayrıştırılabilir tek satır halinde yazar. Karar
+[ADR 0110](adr/0110-jit-rejection-diagnostics.md) içindedir.
+
 ## Kabul ölçütleri
 
 - Advisory kipte annotation eklemek veya kaldırmak program çıktısını ve exception
