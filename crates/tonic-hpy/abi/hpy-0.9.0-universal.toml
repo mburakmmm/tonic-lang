@@ -1,5 +1,5 @@
 schema_version = 1
-implementation_status = "h2-scalars-exceptions"
+implementation_status = "h3-globals-fields"
 
 [upstream]
 hpy_version = "0.9.0"
@@ -69,6 +69,10 @@ implemented_functions = [
   "HPyTupleBuilder_Set",
   "HPyTupleBuilder_Build",
   "HPyTupleBuilder_Cancel",
+  "HPyField_Store",
+  "HPyField_Load",
+  "HPyGlobal_Store",
+  "HPyGlobal_Load",
   "HPy_Length",
   "HPyCallable_Check",
   "HPy_CallTupleDict",
@@ -109,6 +113,8 @@ list_new = "size 0 only; fixed-size construction uses HPyListBuilder"
 numeric_protocols = "scalar conversion accepts exact Tonic bool/int/float values; custom __index__ and __float__ reentry remains unavailable"
 exception_types = "SetObject and ExceptionMatches support built-in exception classes and nested tuples; custom exception classes require the H4 type surface"
 exception_fetch = "HPy 0.9 exposes no public fetch/restore API"
+fields = "precise fields are available for heap owners; embedding fields in extension native payloads requires the H4 type surface"
+module_state = "non-zero HPyModuleDef.size and HPyTracker remain unavailable"
 module_method_signatures = [
   "HPyFunc_NOARGS",
   "HPyFunc_O",
@@ -180,12 +186,12 @@ state = "available"
 [[capabilities]]
 id = "globals"
 planned_milestone = "H3"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "fields"
 planned_milestone = "H3"
-state = "unavailable"
+state = "available"
 
 [[capabilities]]
 id = "types"

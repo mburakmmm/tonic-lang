@@ -1,5 +1,5 @@
 /// Internal representation, deliberately not the public native ABI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub(crate) struct Value(u64);
 impl Value {

@@ -18,8 +18,11 @@ objects without exposing their layout. `HPyErr_SetObject`, built-in exception
 hierarchy/tuple matching and `HPyErr_NoMemory` are available; HPy 0.9 has no
 public exception fetch/restore API. Custom numeric conversion protocols and
 custom exception classes remain unavailable until their protocol/type surfaces.
-Globals, fields, types, buffers, Debug and Trace contexts remain tracked work in
-the capability manifest and roadmap.
+Per-runtime `HPyGlobal` roots and owner-traced `HPyField` edges are available;
+field stores use the generational write barrier and field-only cycles remain
+collectible. Native payload embedding, module C state/trackers, types, buffers,
+Debug and Trace contexts remain tracked work in the capability manifest and
+roadmap.
 
 The official HPy 0.9 header tree used by native integration tests is vendored
 under `vendor/hpy-0.9.0`; its source hash and license are recorded there. The

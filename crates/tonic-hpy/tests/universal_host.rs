@@ -154,6 +154,14 @@ fn official_hpy_headers_execute_constant_fibonacci_unicode_and_handles() {
             "set_object",
             "exception_matches",
             "no_memory",
+            "global_store",
+            "global_load",
+            "global_is_null",
+            "global_clear",
+            "field_store",
+            "field_load",
+            "field_is_null",
+            "field_clear",
         ]
     );
 
@@ -212,6 +220,81 @@ fn h2_scalar_and_exception_surface_handles_bigints_floats_and_forced_gc() {
             assert_eq!(vm.active_handles(), 0, "mode={mode:?}, gc={gc_interval:?}");
         }
     }
+}
+
+#[test]
+fn h3_globals_are_per_runtime_and_fields_trace_without_rooting_cycles() {
+    let fixture = Fixture::compile();
+    let module = module(&fixture);
+
+    let mut first = Vm::new().unwrap();
+    module.register(&mut first).unwrap();
+    let store = compile(
+        concat!(
+            "import h1demo\n",
+            "value=[]\n",
+            "value += [value]\n",
+            "h1demo.global_store(value)\n",
+        ),
+        "hpy-h3-global-store",
+    )
+    .unwrap();
+    first.run(&store, &mut Vec::new()).unwrap();
+    let rooted = first.collect_garbage().unwrap();
+    assert!(rooted.survivors > 0);
+    let load = compile(
+        "import h1demo\nprint(h1demo.global_load())",
+        "hpy-h3-global-load",
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    first.run(&load, &mut output).unwrap();
+    assert_eq!(String::from_utf8(output).unwrap(), "[[...]]\n");
+
+    let mut second = Vm::new().unwrap();
+    module.register(&mut second).unwrap();
+    let is_null = compile(
+        "import h1demo\nprint(h1demo.global_is_null())",
+        "hpy-h3-global-isolation",
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    second.run(&is_null, &mut output).unwrap();
+    assert_eq!(String::from_utf8(output).unwrap(), "True\n");
+
+    let clear = compile(
+        "import h1demo\nh1demo.global_clear()",
+        "hpy-h3-global-clear",
+    )
+    .unwrap();
+    first.run(&clear, &mut Vec::new()).unwrap();
+    assert!(first.collect_garbage().unwrap().reclaimed >= 1);
+
+    let field_source = concat!(
+        "import h1demo\n",
+        "def field_roundtrip():\n",
+        "    owner=[]\n",
+        "    value=[42]\n",
+        "    h1demo.field_store(owner,value)\n",
+        "    noise=[1,2,3]\n",
+        "    print(h1demo.field_load(owner))\n",
+        "    h1demo.field_clear(owner)\n",
+        "    print(h1demo.field_is_null(owner))\n",
+        "field_roundtrip()\n",
+        "def make_cycle():\n",
+        "    owner=[]\n",
+        "    value=[owner]\n",
+        "    h1demo.field_store(owner,value)\n",
+        "make_cycle()\n",
+    );
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let (mut vm, output) = run_with_gc(&module, field_source, mode, Some(1));
+        assert_eq!(output, "[42]\nTrue\n");
+        assert!(vm.collect_garbage().unwrap().reclaimed >= 2);
+        assert_eq!(vm.active_handles(), 0);
+    }
+    assert_eq!(first.active_handles(), 0);
+    assert_eq!(second.active_handles(), 0);
 }
 
 #[test]
@@ -430,6 +513,8 @@ static HPy recover_impl(HPyContext *ctx, HPy self, HPy arg) {
 }
 
 static HPy saved = {0};
+static HPyGlobal saved_global = {0};
+static HPyField saved_field = {0};
 
 HPyDef_METH(save, "save", HPyFunc_O)
 static HPy save_impl(HPyContext *ctx, HPy self, HPy arg) {
@@ -846,6 +931,71 @@ static HPy no_memory_impl(HPyContext *ctx, HPy self) {
     return HPyErr_NoMemory(ctx);
 }
 
+HPyDef_METH(global_store, "global_store", HPyFunc_O)
+static HPy global_store_impl(HPyContext *ctx, HPy self, HPy value) {
+    (void)self;
+    HPyGlobal_Store(ctx, &saved_global, value);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPy_Dup(ctx, ctx->h_None);
+}
+
+HPyDef_METH(global_load, "global_load", HPyFunc_NOARGS)
+static HPy global_load_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    return HPyGlobal_Load(ctx, saved_global);
+}
+
+HPyDef_METH(global_is_null, "global_is_null", HPyFunc_NOARGS)
+static HPy global_is_null_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPy value = HPyGlobal_Load(ctx, saved_global);
+    bool is_null = HPy_IsNull(value);
+    HPy_Close(ctx, value);
+    return HPyBool_FromBool(ctx, is_null);
+}
+
+HPyDef_METH(global_clear, "global_clear", HPyFunc_NOARGS)
+static HPy global_clear_impl(HPyContext *ctx, HPy self) {
+    (void)self;
+    HPyGlobal_Store(ctx, &saved_global, HPy_NULL);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPy_Dup(ctx, ctx->h_None);
+}
+
+HPyDef_METH(field_store, "field_store", HPyFunc_VARARGS)
+static HPy field_store_impl(
+    HPyContext *ctx, HPy self, const HPy *args, size_t nargs
+) {
+    (void)self;
+    if (nargs != 2) return HPyErr_SetString(ctx, ctx->h_TypeError, "expected owner and value");
+    HPyField_Store(ctx, args[0], &saved_field, args[1]);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPy_Dup(ctx, ctx->h_None);
+}
+
+HPyDef_METH(field_load, "field_load", HPyFunc_O)
+static HPy field_load_impl(HPyContext *ctx, HPy self, HPy owner) {
+    (void)self;
+    return HPyField_Load(ctx, owner, saved_field);
+}
+
+HPyDef_METH(field_is_null, "field_is_null", HPyFunc_O)
+static HPy field_is_null_impl(HPyContext *ctx, HPy self, HPy owner) {
+    (void)self;
+    HPy value = HPyField_Load(ctx, owner, saved_field);
+    bool is_null = HPy_IsNull(value);
+    HPy_Close(ctx, value);
+    return HPyBool_FromBool(ctx, is_null);
+}
+
+HPyDef_METH(field_clear, "field_clear", HPyFunc_O)
+static HPy field_clear_impl(HPyContext *ctx, HPy self, HPy owner) {
+    (void)self;
+    HPyField_Store(ctx, owner, &saved_field, HPy_NULL);
+    if (HPyErr_Occurred(ctx)) return HPy_NULL;
+    return HPy_Dup(ctx, ctx->h_None);
+}
+
 static HPyDef *module_defines[] = {
     &constant,
     &fib,
@@ -884,6 +1034,19 @@ static HPyDef *module_defines[] = {
     &set_object,
     &exception_matches,
     &no_memory,
+    &global_store,
+    &global_load,
+    &global_is_null,
+    &global_clear,
+    &field_store,
+    &field_load,
+    &field_is_null,
+    &field_clear,
+    NULL,
+};
+
+static HPyGlobal *module_globals[] = {
+    &saved_global,
     NULL,
 };
 
@@ -892,7 +1055,7 @@ static HPyModuleDef module_definition = {
     .size = 0,
     .legacy_methods = NULL,
     .defines = module_defines,
-    .globals = NULL,
+    .globals = module_globals,
 };
 
 HPy_MODINIT(h1demo, module_definition)

@@ -231,6 +231,19 @@ Bu aşamanın ana mimari kabul testi, extension içindeki `HPyField` bir Tonic
 nesnesini tutarken heap'in gerçekten compact edilmesi ve sonraki native çağrının
 aynı logical nesneyi okumasıdır.
 
+H3a global/field çekirdeği tamamlanmıştır. Module definition'daki null-terminated
+`HPyGlobal` listesi yüklemede doğrulanıp opaque slotlara çevrilir; değer tablosu
+extension statik storage'ında değil her VM'de ayrı tutulur ve explicit GC root
+olarak taranır. `HPyField` token'ı native adrese dönüşmez: runtime `(owner,
+field-token) -> Value` kenarını precise heap metadata'sında tutar, store sırasında
+old→young write barrier uygular ve owner öldüğünde metadata'yı süpürür. Bu yüzden
+field'in yaşattığı değer compaction'dan çıkar, field-only cycle ise dış root
+kalmadığında toplanır. Gerçek C fixture iki VM arasında global izolasyonunu,
+global cycle root/clear davranışını ve interpreter/JIT caller altında
+her-allocation GC ile field load/clear/cycle reclamation'ı doğrular. Karar
+[ADR 0102](adr/0102-hpy-globals-fields.md) içindedir. `HPyTracker`, non-zero
+module C state ve native payload içine field gömme H3/H4'ün kalan işidir.
+
 ### H4 — Pure types ve protokoller
 
 - `HPyType_Spec`, methods, members, get/set ve desteklenen slotlar;

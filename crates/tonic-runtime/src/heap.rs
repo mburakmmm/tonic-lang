@@ -4,7 +4,7 @@ use crate::{classes::ClassDictionaryKey, value::Value};
 pub use gc::CollectionStats;
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tonic_core::diagnostic::{Diagnostic, Result, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -615,6 +615,9 @@ pub(crate) struct Heap {
     slots: Vec<Slot>,
     free: Vec<u32>,
     remembered: HashSet<u32>,
+    /// Opaque native-extension fields are precise owner -> value edges. The
+    /// owner identity is a logical `Value`, so compaction never rewrites keys.
+    external_fields: HashMap<(Value, u64), Value>,
     pub allocations: u64,
     pub bytes: usize,
     pub peak_bytes: usize,
@@ -1050,14 +1053,57 @@ impl Heap {
         self.write_barrier(owner, first);
         self.write_barrier(owner, second);
     }
+
+    pub(crate) fn store_external_field(
+        &mut self,
+        owner: Value,
+        field: u64,
+        value: Option<Value>,
+    ) -> Result<()> {
+        if field == 0 {
+            return Err(Diagnostic::new(
+                "HandleError",
+                "native field token cannot be zero",
+            ));
+        }
+        self.get(owner)?;
+        if let Some(value) = value {
+            if value.heap_index().is_some() {
+                self.get(value)?;
+            }
+            self.write_barrier(owner, value);
+            self.external_fields.insert((owner, field), value);
+        } else {
+            self.external_fields.remove(&(owner, field));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn load_external_field(&self, owner: Value, field: u64) -> Result<Option<Value>> {
+        self.get(owner)?;
+        Ok(self.external_fields.get(&(owner, field)).copied())
+    }
+
+    pub(crate) fn trace_external_fields(&self, owner: Value, mut visit: impl FnMut(Value)) {
+        self.external_fields
+            .iter()
+            .filter(|((candidate, _), _)| *candidate == owner)
+            .for_each(|(_, value)| visit(*value));
+    }
     #[cfg(test)]
     pub(crate) fn assert_remembered_set_complete(&self) {
         for entry in &self.objects {
             if entry.young {
                 continue;
             }
+            let owner = Value::heap(entry.slot, self.slots[entry.slot as usize].generation);
             let mut has_young_child = false;
             entry.object.trace(|value| {
+                if let Some(location) = self.location(value) {
+                    has_young_child |= self.objects[location].young;
+                }
+            });
+            self.trace_external_fields(owner, |value| {
                 if let Some(location) = self.location(value) {
                     has_young_child |= self.objects[location].young;
                 }
@@ -1960,6 +2006,7 @@ impl Heap {
         for object in &self.objects {
             object.object.trace(&mut visit);
         }
+        self.external_fields.values().copied().for_each(&mut visit);
     }
 }
 

@@ -1721,6 +1721,8 @@ pub struct Vm {
     pub(crate) handles: HandleTable,
     natives: Vec<NativeDef>,
     modules: HashMap<String, Value>,
+    /// Per-runtime native-module global roots keyed by adapter/module identity.
+    pub(crate) native_globals: HashMap<(u64, u32), Value>,
     source_modules: Vec<SourceModuleRuntime>,
     source_module_names: HashMap<String, usize>,
     global_owners: Vec<Option<usize>>,
@@ -1899,6 +1901,7 @@ impl Vm {
             handles: HandleTable::default(),
             natives: Vec::new(),
             modules: HashMap::new(),
+            native_globals: HashMap::new(),
             source_modules: Vec::new(),
             source_module_names: HashMap::new(),
             global_owners: Vec::new(),
@@ -2856,6 +2859,7 @@ impl Vm {
         self.source_module_names.clear();
         self.global_owners.clear();
         self.global_defined.clear();
+        self.native_globals.clear();
         self.modules.clear();
         self.builtins.clear();
         self.natives.clear();
@@ -2918,6 +2922,7 @@ impl Vm {
             roots.extend_from_slice(constants);
         }
         roots.extend(self.modules.values().copied());
+        roots.extend(self.native_globals.values().copied());
         roots.extend(
             self.source_modules
                 .iter()
@@ -3249,6 +3254,7 @@ impl Vm {
             + self.globals.len()
             + self.constants.iter().map(Vec::len).sum::<usize>()
             + self.modules.len()
+            + self.native_globals.len()
             + self
                 .source_modules
                 .iter()

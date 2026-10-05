@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 23,
+Test dağılımı: CLI 9, compiler/parser 29, core verifier 20, Cranelift JIT 22, runtime unit 25,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 122, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 6; toplam 390 test.
+HPy loader 6 ve HPy Universal entegrasyonu 7; toplam 393 test.
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
@@ -281,6 +281,13 @@ default/her-allocation GC matrisinde çalıştırır. Overflow ve yanlış scala
 `HPyErr_SetObject`, built-in hierarchy/nested-tuple `ExceptionMatches` ve
 `HPyErr_NoMemory` failure yolları aynı matris içinde sıfır leaked handle ile
 doğrulanır. HPy 0.9 public yüzeyinde exception fetch/restore bulunmaz.
+H3 fixture module definition'daki `HPyGlobal` listesini gerçek header ile yükler;
+aynı Universal module iki VM'ye kaydedildiğinde global değerler birbirini görmez.
+Global self-cycle store boyunca root kalır, clear sonrasında toplanır. `HPyField`
+testi owner→value kenarını her-allocation moving GC altında load eder, clear eder
+ve yalnız field/value→owner tarafından tutulan cycle'ın major collection'da
+toplandığını doğrular. Heap unit testleri external field old→young write barrier'ı
+ile owner öldüğünde field metadata sweep'ini doğrudan denetler.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

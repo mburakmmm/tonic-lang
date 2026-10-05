@@ -229,6 +229,51 @@ impl<'a> Context<'a> {
         let value = self.vm.named_builtin(name)?;
         self.local(value)
     }
+    /// Store one adapter-owned global as an explicit per-runtime root.
+    pub fn native_global_store(
+        &mut self,
+        module: u64,
+        slot: u32,
+        value: Option<Handle>,
+    ) -> Result<()> {
+        let key = (module, slot);
+        if let Some(value) = value {
+            let value = self.resolve(value)?;
+            self.vm.native_globals.insert(key, value);
+        } else {
+            self.vm.native_globals.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Borrow one adapter-owned per-runtime global into this local scope.
+    pub fn native_global_load(&mut self, module: u64, slot: u32) -> Result<Option<Handle>> {
+        let Some(value) = self.vm.native_globals.get(&(module, slot)).copied() else {
+            return Ok(None);
+        };
+        self.local(value).map(Some)
+    }
+
+    /// Store a precise extension field edge and run the generational barrier.
+    pub fn native_field_store(
+        &mut self,
+        owner: Handle,
+        field: u64,
+        value: Option<Handle>,
+    ) -> Result<()> {
+        let owner = self.resolve(owner)?;
+        let value = value.map(|value| self.resolve(value)).transpose()?;
+        self.vm.heap.store_external_field(owner, field, value)
+    }
+
+    /// Borrow a precise extension field edge into this local scope.
+    pub fn native_field_load(&mut self, owner: Handle, field: u64) -> Result<Option<Handle>> {
+        let owner = self.resolve(owner)?;
+        let Some(value) = self.vm.heap.load_external_field(owner, field)? else {
+            return Ok(None);
+        };
+        self.local(value).map(Some)
+    }
     pub(crate) fn value_kind(&self, handle: Handle) -> Result<ValueKind> {
         let value = self.resolve(handle)?;
         if value == Value::NONE {

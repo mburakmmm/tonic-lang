@@ -10,7 +10,7 @@ use std::{
     path::Path,
     ptr::{self, NonNull},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -88,6 +88,10 @@ const SLOT_TUPLE_BUILDER_NEW: usize = 213;
 const SLOT_TUPLE_BUILDER_SET: usize = 214;
 const SLOT_TUPLE_BUILDER_BUILD: usize = 215;
 const SLOT_TUPLE_BUILDER_CANCEL: usize = 216;
+const SLOT_FIELD_STORE: usize = 221;
+const SLOT_FIELD_LOAD: usize = 222;
+const SLOT_GLOBAL_STORE: usize = 225;
+const SLOT_GLOBAL_LOAD: usize = 226;
 const SLOT_DEL_ITEM: usize = 235;
 const SLOT_DEL_ITEM_I: usize = 236;
 const SLOT_DEL_ITEM_S: usize = 237;
@@ -103,6 +107,8 @@ const LAST_LATE_HANDLE: usize = 243;
 
 static NEXT_LOCAL_HANDLE: AtomicUsize = AtomicUsize::new(1);
 static NEXT_BUILDER: AtomicUsize = AtomicUsize::new(1);
+static NEXT_FIELD: AtomicUsize = AtomicUsize::new(1);
+static NEXT_MODULE: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +119,18 @@ struct Hpy {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct HpyBuilder {
+    bits: isize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HpyField {
+    bits: isize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HpyGlobal {
     bits: isize,
 }
 
@@ -220,6 +238,10 @@ impl HpyContext {
         context.slots[SLOT_TUPLE_BUILDER_SET] = hpy_tuple_builder_set as usize;
         context.slots[SLOT_TUPLE_BUILDER_BUILD] = hpy_tuple_builder_build as usize;
         context.slots[SLOT_TUPLE_BUILDER_CANCEL] = hpy_tuple_builder_cancel as usize;
+        context.slots[SLOT_FIELD_STORE] = hpy_field_store as usize;
+        context.slots[SLOT_FIELD_LOAD] = hpy_field_load as usize;
+        context.slots[SLOT_GLOBAL_STORE] = hpy_global_store as usize;
+        context.slots[SLOT_GLOBAL_LOAD] = hpy_global_load as usize;
         context.slots[SLOT_DEL_ITEM] = hpy_del_item as usize;
         context.slots[SLOT_DEL_ITEM_I] = hpy_del_item_i as usize;
         context.slots[SLOT_DEL_ITEM_S] = hpy_del_item_s as usize;
@@ -283,6 +305,8 @@ impl MethodSignature {
 struct ModuleState {
     _library: PinnedUniversalModule,
     context: Box<HpyContext>,
+    module_id: u64,
+    global_count: u32,
     module_name: String,
     methods: Vec<Method>,
     call_lock: Mutex<()>,
@@ -325,11 +349,18 @@ impl UniversalModule {
         }
         // SAFETY: trusted HPy module definitions are process-static and follow
         // the exact 0.9 C layouts declared above.
-        let methods = unsafe { parse_module_definition(definition) }?;
+        let (methods, global_count) = unsafe { parse_module_definition(definition) }?;
+        let module_id = NEXT_MODULE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| HostError::Module("HPy module identity space exhausted".into()))?;
         Ok(Self {
             state: Arc::new(ModuleState {
                 _library: library,
                 context,
+                module_id,
+                global_count,
                 module_name: module_name.to_owned(),
                 methods,
                 call_lock: Mutex::new(()),
@@ -370,7 +401,9 @@ impl UniversalModule {
     }
 }
 
-unsafe fn parse_module_definition(definition: NonNull<c_void>) -> Result<Vec<Method>, HostError> {
+unsafe fn parse_module_definition(
+    definition: NonNull<c_void>,
+) -> Result<(Vec<Method>, u32), HostError> {
     // SAFETY: the caller guarantees the pointer names a process-static
     // `HPyModuleDef` from the validated HPy 0.9 library.
     let definition = unsafe { &*definition.cast::<HpyModuleDef>().as_ptr() };
@@ -384,61 +417,94 @@ unsafe fn parse_module_definition(definition: NonNull<c_void>) -> Result<Vec<Met
             "HPy Universal modules cannot contain CPython legacy methods".into(),
         ));
     }
-    if !definition.globals.is_null() {
-        return Err(HostError::Module(
-            "HPyGlobal definitions are unavailable until milestone H3".into(),
-        ));
-    }
-    if definition.defines.is_null() {
-        return Ok(Vec::new());
-    }
-
     let mut methods = Vec::new();
     let mut names = HashSet::new();
-    for index in 0..MAX_DEFINITIONS {
-        // SAFETY: HPy requires a null-terminated, process-static definition
-        // array. The trusted-extension precondition covers each readable slot.
-        let raw = unsafe { *definition.defines.add(index) };
-        if raw.is_null() {
-            return Ok(methods);
-        }
-        // SAFETY: only the common kind and method-union prefix are read.
-        let method_definition = unsafe { &*raw.cast::<HpyMethodDefinition>() };
-        if method_definition.kind != HPY_DEF_KIND_METHOD {
-            return Err(HostError::Module(format!(
-                "definition {index} has unsupported HPyDef kind {}",
-                method_definition.kind
-            )));
-        }
-        let method = method_definition.method;
-        let name = read_required_utf8(method.name, "method name")?;
-        if !names.insert(name.clone()) {
-            return Err(HostError::Module(format!("duplicate HPy method '{name}'")));
-        }
-        if method.implementation.is_null() {
-            return Err(HostError::Module(format!(
-                "HPy method '{name}' has a null implementation"
-            )));
-        }
-        let signature = match method.signature {
-            HPY_FUNC_NOARGS => MethodSignature::NoArgs,
-            HPY_FUNC_O => MethodSignature::OneArg,
-            HPY_FUNC_VARARGS => MethodSignature::VarArgs,
-            HPY_FUNC_KEYWORDS => MethodSignature::Keywords,
-            signature => {
+    if !definition.defines.is_null() {
+        let mut terminated = false;
+        for index in 0..MAX_DEFINITIONS {
+            // SAFETY: HPy requires a null-terminated, process-static definition
+            // array. The trusted-extension precondition covers each readable slot.
+            let raw = unsafe { *definition.defines.add(index) };
+            if raw.is_null() {
+                terminated = true;
+                break;
+            }
+            // SAFETY: only the common kind and method-union prefix are read.
+            let method_definition = unsafe { &*raw.cast::<HpyMethodDefinition>() };
+            if method_definition.kind != HPY_DEF_KIND_METHOD {
                 return Err(HostError::Module(format!(
-                    "HPy method '{name}' uses unsupported signature {signature}"
+                    "definition {index} has unsupported HPyDef kind {}",
+                    method_definition.kind
                 )));
             }
+            let method = method_definition.method;
+            let name = read_required_utf8(method.name, "method name")?;
+            if !names.insert(name.clone()) {
+                return Err(HostError::Module(format!("duplicate HPy method '{name}'")));
+            }
+            if method.implementation.is_null() {
+                return Err(HostError::Module(format!(
+                    "HPy method '{name}' has a null implementation"
+                )));
+            }
+            let signature = match method.signature {
+                HPY_FUNC_NOARGS => MethodSignature::NoArgs,
+                HPY_FUNC_O => MethodSignature::OneArg,
+                HPY_FUNC_VARARGS => MethodSignature::VarArgs,
+                HPY_FUNC_KEYWORDS => MethodSignature::Keywords,
+                signature => {
+                    return Err(HostError::Module(format!(
+                        "HPy method '{name}' uses unsupported signature {signature}"
+                    )));
+                }
+            };
+            methods.push(Method {
+                name,
+                implementation: method.implementation as usize,
+                signature,
+            });
+        }
+        if !terminated {
+            return Err(HostError::Module(format!(
+                "HPy definition list exceeds {MAX_DEFINITIONS} entries or is not null-terminated"
+            )));
+        }
+    }
+
+    // SAFETY: the trusted module contract requires a null-terminated list of
+    // writable, process-static HPyGlobal declarations.
+    let global_count = unsafe { initialize_globals(definition.globals) }?;
+    Ok((methods, global_count))
+}
+
+unsafe fn initialize_globals(globals: *mut *mut c_void) -> Result<u32, HostError> {
+    if globals.is_null() {
+        return Ok(0);
+    }
+    let mut declarations = HashSet::new();
+    for index in 0..MAX_DEFINITIONS {
+        // SAFETY: covered by the trusted module-definition precondition.
+        let declaration = unsafe { *globals.add(index) };
+        if declaration.is_null() {
+            return u32::try_from(index)
+                .map_err(|_| HostError::Module("HPyGlobal count exceeds u32".into()));
+        }
+        if !declarations.insert(declaration as usize) {
+            return Err(HostError::Module(format!(
+                "duplicate HPyGlobal declaration at index {index}"
+            )));
+        }
+        let token = isize::try_from(index + 1)
+            .map_err(|_| HostError::Module("HPyGlobal token space exhausted".into()))?;
+        // SAFETY: each declaration is writable process-static HPyGlobal storage.
+        unsafe {
+            declaration
+                .cast::<HpyGlobal>()
+                .write(HpyGlobal { bits: token })
         };
-        methods.push(Method {
-            name,
-            implementation: method.implementation as usize,
-            signature,
-        });
     }
     Err(HostError::Module(format!(
-        "HPy definition list exceeds {MAX_DEFINITIONS} entries or is not null-terminated"
+        "HPyGlobal list exceeds {MAX_DEFINITIONS} entries or is not null-terminated"
     )))
 }
 
@@ -480,7 +546,12 @@ fn invoke_method(
     }
 
     let module = context.native_module(&state.module_name)?;
-    let mut call = CallState::new(context, ptr::from_ref(state.context.as_ref()).cast_mut());
+    let mut call = CallState::new(
+        context,
+        ptr::from_ref(state.context.as_ref()).cast_mut(),
+        state.module_id,
+        state.global_count,
+    );
     let h_self = call.insert(module)?;
     let h_arguments = arguments
         .iter()
@@ -568,6 +639,8 @@ fn invoke_method(
 struct CallState {
     context: *mut Context<'static>,
     hpy_context: *mut HpyContext,
+    module_id: u64,
+    global_count: u32,
     handles: HashMap<isize, Handle>,
     utf8: HashMap<isize, Box<[u8]>>,
     builders: HashMap<isize, BuilderState>,
@@ -575,10 +648,17 @@ struct CallState {
 }
 
 impl CallState {
-    fn new(context: &mut Context<'_>, hpy_context: *mut HpyContext) -> Self {
+    fn new(
+        context: &mut Context<'_>,
+        hpy_context: *mut HpyContext,
+        module_id: u64,
+        global_count: u32,
+    ) -> Self {
         Self {
             context: ptr::from_mut(context).cast::<Context<'static>>(),
             hpy_context,
+            module_id,
+            global_count,
             handles: HashMap::new(),
             utf8: HashMap::new(),
             builders: HashMap::new(),
@@ -1981,6 +2061,145 @@ unsafe extern "C" fn hpy_tuple_builder_cancel(context: *mut HpyContext, builder:
         if call.builders.remove(&builder.bits).is_none() {
             call.fail(Diagnostic::new("HandleError", "stale HPy builder"), ());
         }
+    }
+}
+
+fn global_slot(call: &CallState, global: HpyGlobal) -> TonicResult<u32> {
+    let slot = u32::try_from(global.bits)
+        .map_err(|_| Diagnostic::new("HandleError", "invalid HPyGlobal token"))?;
+    if slot == 0 || slot > call.global_count {
+        return Err(Diagnostic::new(
+            "HandleError",
+            "undeclared or foreign HPyGlobal token",
+        ));
+    }
+    Ok(slot)
+}
+
+unsafe extern "C" fn hpy_global_store(
+    context: *mut HpyContext,
+    global: *mut HpyGlobal,
+    value: Hpy,
+) {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return;
+    };
+    if global.is_null() {
+        return call.fail(
+            Diagnostic::new("SystemError", "HPyGlobal_Store received a null declaration"),
+            (),
+        );
+    }
+    // SAFETY: HPy requires a writable HPyGlobal declaration pointer.
+    let global = unsafe { *global };
+    let result = global_slot(call, global).and_then(|slot| {
+        let value = if value == Hpy::NULL {
+            None
+        } else {
+            Some(call.resolve(value)?)
+        };
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }.native_global_store(call.module_id, slot, value)
+    });
+    if let Err(error) = result {
+        call.fail(error, ());
+    }
+}
+
+unsafe extern "C" fn hpy_global_load(context: *mut HpyContext, global: HpyGlobal) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    let result = global_slot(call, global).and_then(|slot| {
+        // SAFETY: active-call lifetime keeps the erased context valid.
+        unsafe { &mut *call.context }
+            .native_global_load(call.module_id, slot)
+            .and_then(|value| value.map_or(Ok(Hpy::NULL), |value| call.insert(value)))
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
+    }
+}
+
+unsafe extern "C" fn hpy_field_store(
+    context: *mut HpyContext,
+    owner: Hpy,
+    field: *mut HpyField,
+    value: Hpy,
+) {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return;
+    };
+    if field.is_null() {
+        return call.fail(
+            Diagnostic::new(
+                "SystemError",
+                "HPyField_Store received a null field pointer",
+            ),
+            (),
+        );
+    }
+    // SAFETY: HPy requires writable HPyField storage associated with `owner`.
+    let current = unsafe { (*field).bits };
+    let result = (|| {
+        let owner = call.resolve(owner)?;
+        let value = if value == Hpy::NULL {
+            None
+        } else {
+            Some(call.resolve(value)?)
+        };
+        let token = if current == 0 && value.is_some() {
+            NEXT_FIELD
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current
+                        .checked_add(1)
+                        .filter(|next| *next <= isize::MAX as usize)
+                })
+                .map_err(|_| Diagnostic::new("HandleError", "HPyField token space exhausted"))?
+                as u64
+        } else {
+            u64::try_from(current)
+                .map_err(|_| Diagnostic::new("HandleError", "invalid HPyField token"))?
+        };
+        if token != 0 {
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }.native_field_store(owner, token, value)?;
+        }
+        Ok(if value.is_some() { token as isize } else { 0 })
+    })();
+    match result {
+        Ok(bits) => {
+            // SAFETY: same writable field pointer validated above.
+            unsafe { (*field).bits = bits };
+        }
+        Err(error) => call.fail(error, ()),
+    }
+}
+
+unsafe extern "C" fn hpy_field_load(context: *mut HpyContext, owner: Hpy, field: HpyField) -> Hpy {
+    // SAFETY: the extension must pass the active context it received.
+    let Some(call) = (unsafe { active_call(context) }) else {
+        return Hpy::NULL;
+    };
+    if field.bits == 0 {
+        return Hpy::NULL;
+    }
+    let result = u64::try_from(field.bits)
+        .map_err(|_| Diagnostic::new("HandleError", "invalid HPyField token"))
+        .and_then(|field| {
+            let owner = call.resolve(owner)?;
+            // SAFETY: active-call lifetime keeps the erased context valid.
+            unsafe { &mut *call.context }
+                .native_field_load(owner, field)
+                .and_then(|value| value.map_or(Ok(Hpy::NULL), |value| call.insert(value)))
+        });
+    match result {
+        Ok(value) => value,
+        Err(error) => call.fail(error, Hpy::NULL),
     }
 }
 

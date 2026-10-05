@@ -390,8 +390,10 @@ sonra alınır.
   - [x] H2 tamamlayıcı scalar/exception kapısı: bool/bigint/float dönüşümleri,
     HPy 0.9 public raise/match/no-memory yüzeyi ve normal/stress-GC/fault/error
     testleri. Bu HPy sürümünde public fetch/restore API'si yoktur.
-  - [ ] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
+  - [x] Per-runtime `HPyGlobal`; precise traced `HPyField`, write barrier ve gerçek
     moving-GC altında field/global cycle testi.
+  - [ ] `HPyTracker`, non-zero module C state ve deterministic teardown; native
+    payload field yerleşimi H4 type yüzeyiyle birlikte tamamlanacak.
   - [ ] Pure `HPyType_Spec`, native payload, methods/slots/inheritance, trace,
     finalizer ve shutdown sözleşmeleri.
   - [ ] Public HPy buffer ve execution-state yüzeyi; owner/pin/thread/callback
@@ -413,8 +415,9 @@ sonra alınır.
 - [x] Ara CPython karşılaştırması: 13 ortak workload, beş süreç, warm/compile/cold ayrımı.
 - [ ] Tamamlanma sonrası nihai benchmark: tier ve backend matrisi, host allocation, macro workloads, tekrar üretilebilir ortam.
 
-Sıradaki çekirdek işler HPy H3 global/field yüzeyi, annotation destekli typed-JIT,
-REPL/bytecode cache/stdlib ve coverage-guided güvenlik testleridir.
+Sıradaki çekirdek işler HPy tracker/module-state ile H4 type/native-payload yüzeyi,
+annotation destekli typed-JIT, REPL/bytecode cache/stdlib ve coverage-guided
+güvenlik testleridir.
 JIT'in desteklenen tier'ı
 x86-64/AArch64 debug-release, normal/stress
 GC differential ve iki mimaride AddressSanitizer fuzz kapılarını geçmiştir;

@@ -35,6 +35,7 @@ impl Heap {
             self.objects[location]
                 .object
                 .trace(|value| work.push(value));
+            self.trace_external_fields(value, |value| work.push(value));
         }
         self.queue_unreachable_generators(&mut marked, false)?;
         self.queue_unreachable_object_finalizers(&mut marked, false)?;
@@ -60,6 +61,11 @@ impl Heap {
             self.objects[location]
                 .object
                 .trace(|value| work.push(value));
+            let owner = Value::heap(
+                self.objects[location].slot,
+                self.slots[self.objects[location].slot as usize].generation,
+            );
+            self.trace_external_fields(owner, |value| work.push(value));
         }
         // Validate every external root, but traverse only nursery objects. Any
         // old-to-young edge must arrive through the remembered owner set.
@@ -75,6 +81,7 @@ impl Heap {
             self.objects[location]
                 .object
                 .trace(|value| work.push(value));
+            self.trace_external_fields(value, |value| work.push(value));
         }
         self.queue_unreachable_generators(&mut marked, true)?;
         self.queue_unreachable_object_finalizers(&mut marked, true)?;
@@ -121,6 +128,7 @@ impl Heap {
                     }
                     marked[location] = true;
                     self.objects[location].object.trace(|edge| work.push(edge));
+                    self.trace_external_fields(value, |edge| work.push(edge));
                 }
             }
         }
@@ -163,6 +171,7 @@ impl Heap {
                 self.objects[location]
                     .object
                     .trace(|value| work.push(value));
+                self.trace_external_fields(value, |value| work.push(value));
             }
         }
         Ok(())
@@ -222,6 +231,14 @@ impl Heap {
         self.last_collection_allocations = self.allocations;
         self.remembered.clear();
         let slots = &self.slots;
+        self.external_fields.retain(|(owner, _), _| {
+            owner
+                .heap_index()
+                .and_then(|index| slots.get(index))
+                .is_some_and(|slot| {
+                    slot.generation == owner.generation() && slot.location.is_some()
+                })
+        });
         for entry in &mut self.objects {
             let super::Object::Class(class) = &mut entry.object else {
                 continue;
@@ -307,6 +324,40 @@ mod tests {
         heap.append_list(list, young).unwrap();
         heap.collect([list]).unwrap();
         assert!(heap.get(young).is_ok());
+    }
+
+    #[test]
+    fn external_fields_are_precise_edges_and_cycles_remain_collectible() {
+        let mut heap = Heap::default();
+        let owner = heap.alloc(Object::List(vec![])).unwrap();
+        let value = heap.alloc(Object::List(vec![])).unwrap();
+        heap.store_external_field(owner, 1, Some(value)).unwrap();
+        heap.append_list(value, owner).unwrap();
+
+        let live = heap.collect([owner]).unwrap();
+        assert_eq!(live.survivors, 2);
+        assert_eq!(heap.load_external_field(owner, 1).unwrap(), Some(value));
+
+        let dead = heap.collect([]).unwrap();
+        assert_eq!(dead.reclaimed, 2);
+        assert_eq!(heap.live_objects(), 0);
+    }
+
+    #[test]
+    fn external_field_store_records_old_to_young_write_barrier() {
+        let mut heap = Heap::default();
+        let owner = heap.alloc(Object::List(vec![])).unwrap();
+        heap.collect([owner]).unwrap();
+        let young = heap.alloc(Object::Str("young".into())).unwrap();
+        heap.store_external_field(owner, 7, Some(young)).unwrap();
+        heap.assert_remembered_set_complete();
+
+        let stats = heap.collect_young([owner]).unwrap();
+        assert_eq!(stats.young_reclaimed, 0);
+        assert_eq!(heap.load_external_field(owner, 7).unwrap(), Some(young));
+        heap.store_external_field(owner, 7, None).unwrap();
+        heap.collect([]).unwrap();
+        assert_eq!(heap.live_objects(), 0);
     }
     #[test]
     fn minor_collects_nursery_promotes_survivors_and_major_reclaims_old() {
