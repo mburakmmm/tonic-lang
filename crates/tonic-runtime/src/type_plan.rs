@@ -90,10 +90,22 @@ pub struct FunctionTypePlan {
     pub annotation_version: u64,
     pub canonical_hash: u64,
     pub annotations: Vec<AnnotationTypePlan>,
+    class_dependencies: Vec<ClassPlanDependency>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClassPlanDependency {
+    class: Value,
+    type_id: u32,
+    version: u64,
 }
 
 impl FunctionTypePlan {
-    fn new(annotation_version: u64, mut annotations: Vec<AnnotationTypePlan>) -> Self {
+    fn new(
+        annotation_version: u64,
+        mut annotations: Vec<AnnotationTypePlan>,
+        class_dependencies: Vec<ClassPlanDependency>,
+    ) -> Self {
         annotations.sort_by(|left, right| left.name.cmp(&right.name));
         let mut hash = CanonicalHash::new();
         hash.u16(TYPE_PLAN_SCHEMA_VERSION);
@@ -106,11 +118,21 @@ impl FunctionTypePlan {
             annotation_version,
             canonical_hash: hash.finish(),
             annotations,
+            class_dependencies,
         }
+    }
+
+    pub(crate) fn dependencies_current(&self, heap: &Heap) -> bool {
+        self.class_dependencies.iter().all(|dependency| {
+            heap.class(dependency.class).is_ok_and(|class| {
+                class.id.0 == dependency.type_id && class.version == dependency.version
+            })
+        })
     }
 
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.annotations.capacity() * std::mem::size_of::<AnnotationTypePlan>()
+            + self.class_dependencies.capacity() * std::mem::size_of::<ClassPlanDependency>()
             + self
                 .annotations
                 .iter()
@@ -147,6 +169,7 @@ pub(crate) fn resolve_function_type_plan(
         return None;
     };
     let mut plans = Vec::with_capacity(dictionary.entries.len());
+    let mut class_dependencies = Vec::new();
     for (key, annotation) in &dictionary.entries {
         let name = match heap.get(*key) {
             Ok(Object::Str(name)) => name.clone(),
@@ -161,10 +184,21 @@ pub(crate) fn resolve_function_type_plan(
         let mut visiting = HashSet::new();
         plans.push(AnnotationTypePlan {
             name,
-            plan: resolve_type_plan(heap, builtins, *annotation, 0, &mut visiting),
+            plan: resolve_type_plan(
+                heap,
+                builtins,
+                *annotation,
+                0,
+                &mut visiting,
+                &mut class_dependencies,
+            ),
         });
     }
-    Some(FunctionTypePlan::new(dictionary.mutation_version, plans))
+    Some(FunctionTypePlan::new(
+        dictionary.mutation_version,
+        plans,
+        class_dependencies,
+    ))
 }
 
 fn resolve_type_plan(
@@ -173,6 +207,7 @@ fn resolve_type_plan(
     annotation: Value,
     depth: usize,
     visiting: &mut HashSet<Value>,
+    class_dependencies: &mut Vec<ClassPlanDependency>,
 ) -> Result<TypePlan, TypePlanRejection> {
     if depth >= MAX_TYPE_PLAN_DEPTH {
         return Err(TypePlanRejection::RecursionLimit);
@@ -201,19 +236,42 @@ fn resolve_type_plan(
         return Err(TypePlanRejection::RecursiveAlias);
     }
     let result = match heap.get(annotation) {
-        Ok(Object::Class(class)) => Ok(TypePlan::Class {
-            type_id: class.id.0,
-            version: class.version,
-        }),
+        Ok(Object::Class(class)) => {
+            if !class_dependencies
+                .iter()
+                .any(|dependency| dependency.class == annotation)
+            {
+                class_dependencies.push(ClassPlanDependency {
+                    class: annotation,
+                    type_id: class.id.0,
+                    version: class.version,
+                });
+            }
+            Ok(TypePlan::Class {
+                type_id: class.id.0,
+                version: class.version,
+            })
+        }
         Ok(Object::TypeParam { .. }) | Ok(Object::TypeUnpack(_)) => {
             Err(TypePlanRejection::TypeParameter)
         }
-        Ok(Object::TypeAlias { value, .. }) => {
-            resolve_type_plan(heap, builtins, *value, depth + 1, visiting)
-        }
-        Ok(Object::GenericAlias { origin, args }) => {
-            resolve_generic_alias(heap, builtins, *origin, *args, depth + 1, visiting)
-        }
+        Ok(Object::TypeAlias { value, .. }) => resolve_type_plan(
+            heap,
+            builtins,
+            *value,
+            depth + 1,
+            visiting,
+            class_dependencies,
+        ),
+        Ok(Object::GenericAlias { origin, args }) => resolve_generic_alias(
+            heap,
+            builtins,
+            *origin,
+            *args,
+            depth + 1,
+            visiting,
+            class_dependencies,
+        ),
         _ => Err(TypePlanRejection::UnsupportedValue),
     };
     visiting.remove(&annotation);
@@ -227,6 +285,7 @@ fn resolve_generic_alias(
     args: Value,
     depth: usize,
     visiting: &mut HashSet<Value>,
+    class_dependencies: &mut Vec<ClassPlanDependency>,
 ) -> Result<TypePlan, TypePlanRejection> {
     let Ok(Object::Tuple(arguments)) = heap.get(args) else {
         return Err(TypePlanRejection::InvalidGenericArity);
@@ -235,7 +294,14 @@ fn resolve_generic_alias(
         if arguments.len() != 1 {
             return Err(TypePlanRejection::InvalidGenericArity);
         }
-        let item = resolve_type_plan(heap, builtins, arguments[0], depth, visiting)?;
+        let item = resolve_type_plan(
+            heap,
+            builtins,
+            arguments[0],
+            depth,
+            visiting,
+            class_dependencies,
+        )?;
         return if origin == builtins.list {
             Ok(TypePlan::List(Box::new(item)))
         } else {
@@ -246,14 +312,37 @@ fn resolve_generic_alias(
         if arguments.len() != 2 {
             return Err(TypePlanRejection::InvalidGenericArity);
         }
-        let key = resolve_type_plan(heap, builtins, arguments[0], depth, visiting)?;
-        let value = resolve_type_plan(heap, builtins, arguments[1], depth, visiting)?;
+        let key = resolve_type_plan(
+            heap,
+            builtins,
+            arguments[0],
+            depth,
+            visiting,
+            class_dependencies,
+        )?;
+        let value = resolve_type_plan(
+            heap,
+            builtins,
+            arguments[1],
+            depth,
+            visiting,
+            class_dependencies,
+        )?;
         return Ok(TypePlan::Dict(Box::new(key), Box::new(value)));
     }
     if origin == builtins.tuple {
         let items = arguments
             .iter()
-            .map(|argument| resolve_type_plan(heap, builtins, *argument, depth, visiting))
+            .map(|argument| {
+                resolve_type_plan(
+                    heap,
+                    builtins,
+                    *argument,
+                    depth,
+                    visiting,
+                    class_dependencies,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(TypePlan::FixedTuple(items));
     }

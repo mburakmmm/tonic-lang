@@ -2975,6 +2975,117 @@ fn tiny_leaf_function_stays_in_profitable_adaptive_tier() {
 }
 
 #[test]
+fn annotation_jit_compiles_numeric_leaf_on_first_call() {
+    let source = concat!(
+        "def add(left:int,right:int)->int:\n    return left+right\n",
+        "def scale(left:float,right:float)->float:\n",
+        "    combined=left+right\n    return combined*right\n",
+        "print(add(20,22),scale(1.5,2.0))",
+    );
+    let program = compile(source, "annotation-jit-first-call").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42 7.0\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 2);
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_compiled, 2);
+    assert_eq!(vm.stats.jit_calls, 2);
+    assert_eq!(vm.stats.jit_returns, 2);
+    assert_eq!(vm.stats.jit_deferred, 0);
+}
+
+#[test]
+fn annotation_jit_guards_arguments_mutation_replacement_and_deletion() {
+    let source = concat!(
+        "def identity(value:int)->int:\n    return value\n",
+        "print(identity('wrong'))\n",
+        "print(identity(7))\n",
+        "identity.__annotations__['value']=float\n",
+        "identity.__annotations__['return']=float\n",
+        "print(identity(1.5))\n",
+        "print(identity(2.5))\n",
+        "identity.__annotations__={'value':int,'return':int}\n",
+        "print(identity(8))\n",
+        "print(identity(9))\n",
+        "del identity.__annotations__\n",
+        "print(identity.__annotations__,identity(10))\n",
+        "try:\n    identity.__annotations__=1\n",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+    );
+    let program = compile(source, "annotation-jit-invalidation").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"wrong\n7\n1.5\n2.5\n8\n9\n{} 10\nTypeError\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 3);
+    assert_eq!(vm.stats.jit_annotation_invalidations, 3);
+    assert!(vm.stats.jit_annotation_guard_misses >= 4);
+}
+
+#[test]
+fn annotation_jit_return_mismatch_deopts_without_enforcing_the_hint() {
+    let source = "def lied(value:int)->int:\n    return 'dynamic'\nprint(lied(1))";
+    let program = compile(source, "annotation-jit-return-guard").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"dynamic\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_calls, 1);
+    assert_eq!(vm.stats.jit_returns, 0);
+    assert_eq!(vm.stats.jit_deopts, 1);
+    assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+}
+
+#[test]
+fn annotation_jit_uses_eager_alias_value_after_global_rebinding() {
+    let source = concat!(
+        "Alias=int\n",
+        "def identity(value:Alias)->Alias:\n    return value\n",
+        "Alias=float\n",
+        "print(identity(11))",
+    );
+    let program = compile(source, "annotation-jit-eager-alias").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"11\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_annotation_invalidations, 0);
+    assert_eq!(vm.stats.jit_returns, 1);
+}
+
+#[test]
+fn annotation_jit_invalidates_class_plan_dependencies() {
+    let source = concat!(
+        "class Marker:\n    pass\n",
+        "def identity(value:int)->int:\n    return value\n",
+        "identity.__annotations__['dependency']=Marker\n",
+        "print(identity(1))\n",
+        "Marker.changed=1\n",
+        "print(identity(2))\n",
+        "print(identity(3))",
+    );
+    let program = compile(source, "annotation-jit-class-dependency").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"1\n2\n3\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_annotation_invalidations, 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+}
+
+#[test]
 fn jit_code_budget_rejects_native_code_and_preserves_interpreter_execution() {
     let source = "def add(a,b):\n    x=a+b\n    return x\ni=0\ns=0\nwhile i<20:\n    s=add(s,1)\n    i+=1\nprint(s)";
     let program = compile(source, "jit-code-budget").unwrap();

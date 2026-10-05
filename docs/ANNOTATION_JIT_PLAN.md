@@ -135,9 +135,32 @@ arity, type parameter, recursive alias ve recursion limit ayrı reason code üre
 Fonksiyonun `__annotations__` dict'i için structural iterator epoch'undan ayrı
 bir content-mutation epoch vardır. Var olan anahtarın değerini değiştirmek de bu
 epoch'u artırır; function içindeki plan cache yalnız epoch eşleşiyorsa kullanılır.
-Bu temel henüz typed native entry seçmez. Union/Optional/Literal/Callable,
-variadic tuple, bytes, buffer/dtype ve full dependency guard'ları sonraki
-dilimlerdir. Karar ayrıntısı [ADR 0104](adr/0104-type-plan-v1.md) içindedir.
+TypePlan v1 temeli tek başına typed native entry seçmez. Union/Optional/Literal/
+Callable, variadic tuple, bytes ve buffer/dtype sonraki genişleme dilimleridir.
+Temel kararın ayrıntısı [ADR 0104](adr/0104-type-plan-v1.md) içindedir.
+
+İlk typed giriş dilimi de tamamlandı. Bütün parametreleri ve dönüşü exact
+`int`/`float` planına çözümlenen, mevcut Cranelift subset'ine uygun fonksiyonlar
+sıcaklık profili ve küçük-leaf kârlılık eşiğini beklemeden ilk çağrıda derlenir.
+Giriş seçimi exact function handle, code id, execution id, annotation dict
+identity/content epoch, canonical plan hash ve gerçek argüman türlerini guard
+eder. Dönüş annotation'ı da native dönüş kabul edilmeden kontrol edilir; uyuşmazlık
+`TypeError` üretmez, `RETURN` bytecode PC'sine deopt edip interpreter sonucunu
+korur.
+
+`function.__annotations__` dict veya `None` ile değiştirilebilir ve silinebilir.
+Content mutasyonu, replacement/delete ve annotation planındaki class version
+dependency değişimi cache'i yeniler; canlı compiled giriş eski planı görürse o
+çağrıyı generic çalıştırır ve sonraki uygun çağrıda yeniden derler. Yanlış tipte
+tek çağrı compiled girişi bozmaz. Eager annotation semantiğinde sonradan global
+alias ismini rebind etmek daha önce değerlendirilmiş annotation nesnesini
+değiştirmediği için invalidation sebebi değildir. Ayrıntı
+[ADR 0105](adr/0105-annotation-jit-entry-guards.md) içindedir.
+
+Bu dilim henüz genel typed SSA overlay, unboxed integer register/çağrı ABI'si,
+typed container, decorator/import-time warmup veya disk cache değildir. Float
+işlemleri mevcut F64 data-flow/stack-map yolunu kullanır; integer işlem guard'ları
+taşmada mevcut BigInt deopt yoluna döner.
 
 ## Kabul ölçütleri
 

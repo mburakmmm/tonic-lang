@@ -1850,6 +1850,30 @@ impl Heap {
         if matches!(self.get(owner), Ok(Object::Module(_))) {
             return self.add_module_member(owner, name, value);
         }
+        if name == "__annotations__" && matches!(self.get(owner), Ok(Object::Function { .. })) {
+            let annotations = if value == Value::NONE {
+                None
+            } else if matches!(self.get(value), Ok(Object::Dict(_))) {
+                self.write_barrier(owner, value);
+                Some(value)
+            } else {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "__annotations__ must be set to a dict object",
+                ));
+            };
+            let Object::Function {
+                annotations: slot,
+                annotation_plan,
+                ..
+            } = self.get_mut(owner)?
+            else {
+                unreachable!("checked function changed kind")
+            };
+            *slot = annotations;
+            *annotation_plan = None;
+            return Ok(());
+        }
         if name == "value"
             && matches!(
                 self.get(owner),
@@ -1944,6 +1968,19 @@ impl Heap {
     pub fn del_attr(&mut self, owner: Value, name: &str) -> Result<()> {
         if matches!(self.get(owner), Ok(Object::Module(_))) {
             return self.delete_module_member(owner, name);
+        }
+        if name == "__annotations__" && matches!(self.get(owner), Ok(Object::Function { .. })) {
+            let Object::Function {
+                annotations,
+                annotation_plan,
+                ..
+            } = self.get_mut(owner)?
+            else {
+                unreachable!("checked function changed kind")
+            };
+            *annotations = None;
+            *annotation_plan = None;
+            return Ok(());
         }
         if name == "value"
             && matches!(

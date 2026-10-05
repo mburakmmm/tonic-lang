@@ -321,15 +321,24 @@ sonra alınır.
     deterministic “optimize edilmedi” nedeni. V1 temeli tamamlandı; union,
     optional/literal/callable, variadic tuple, bytes ve buffer/dtype genişlemesi
     açık.
-  - [ ] Function identity + code/version + annotation-dict version guard'ı;
-    `__annotations__` mutation/replacement, global alias rebinding ve class/MRO
-    değişiminde cache invalidation veya atomik deopt.
+  - [x] Function identity + code/execution + annotation-dict content/version
+    guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
+    version değişiminde cache invalidation veya atomik generic fallback. Eager
+    annotation kararına göre sonradan global isim rebinding'i mevcut function'ın
+    değerlendirilmiş annotation nesnesini değiştirmez; yeni definition yeni plan
+    kurar.
   - [ ] Verified bytecode üzerinde typed data-flow/SSA overlay; parametre,
     local, branch merge, loop phi, dönüş ve çağrı sonucu propagation'ı. Dinamik
     bytecode ve object model tek doğruluk kaynağı olarak kalır.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.
+    - [x] Tam `int`/`float` parametre ve dönüş planlı uygun leaf için first-call
+      Cranelift seçimi; exact function/code/execution/plan/argument guard'ı,
+      return guard'lı exact-PC deopt, annotation invalidation sayaçları ve
+      normal/stress-GC testleri.
+    - [ ] `@tonic.compile`, modül warmup politikası, compile-rejection tanısı ve
+      import-time code-budget planlaması.
   - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için
     overflow'da bigint deopt'u, IEEE float sınırları, exact exception PC'si,
     safepoint stack-map ve interpreter state rekonstrüksiyonu.

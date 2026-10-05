@@ -12,7 +12,9 @@ use crate::{
     },
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
-    type_plan::{resolve_function_type_plan, FunctionTypePlan, TypePlanBuiltins},
+    type_plan::{
+        resolve_function_type_plan, ExactTypePlan, FunctionTypePlan, TypePlan, TypePlanBuiltins,
+    },
     value::Value,
 };
 use calls::{Arguments, ExpandedArgs};
@@ -102,6 +104,10 @@ pub struct Stats {
     pub jit_direct_method_sites: u64,
     pub jit_backedge_polls: u64,
     pub jit_osr_entries: u64,
+    pub jit_annotation_candidates: u64,
+    pub jit_annotation_compiled: u64,
+    pub jit_annotation_guard_misses: u64,
+    pub jit_annotation_invalidations: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -234,7 +240,26 @@ enum JitEntry {
     Compiled {
         function: Box<tonic_jit::CompiledFunction>,
         deopts: u8,
+        annotation: Option<AnnotationJitGuard>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnotationScalar {
+    Int,
+    Float,
+}
+
+#[derive(Clone, Debug)]
+struct AnnotationJitGuard {
+    function: Value,
+    code: u16,
+    execution: u64,
+    annotations: Value,
+    annotation_version: u64,
+    canonical_hash: u64,
+    parameters: Vec<AnnotationScalar>,
+    result: AnnotationScalar,
 }
 
 struct JitRuntime<'a> {
@@ -1791,10 +1816,9 @@ impl Vm {
             Object::Dict(dictionary) => dictionary.mutation_version,
             _ => return None,
         };
-        if cached
-            .as_ref()
-            .is_some_and(|plan| plan.annotation_version == version)
-        {
+        if cached.as_ref().is_some_and(|plan| {
+            plan.annotation_version == version && plan.dependencies_current(&self.heap)
+        }) {
             return cached;
         }
         let plan = resolve_function_type_plan(
@@ -1820,6 +1844,107 @@ impl Vm {
         };
         *annotation_plan = Some(plan.clone());
         Some(plan)
+    }
+
+    fn annotation_jit_guard(
+        &mut self,
+        program: &Program,
+        function: Value,
+        code_id: usize,
+    ) -> Option<AnnotationJitGuard> {
+        let (code, execution, annotations) = match self.heap.get(function).ok()? {
+            Object::Function {
+                code,
+                execution,
+                annotations: Some(annotations),
+                ..
+            } => (*code, *execution, *annotations),
+            _ => return None,
+        };
+        if usize::from(code) != code_id || execution != self.execution {
+            return None;
+        }
+        let metadata = &program.code[code_id];
+        if metadata.signature.vararg.is_some() || metadata.signature.kwarg.is_some() {
+            return None;
+        }
+        let plan = self.annotation_type_plan(function)?;
+        let scalar = |name: &str| {
+            let annotation = plan
+                .annotations
+                .iter()
+                .find(|annotation| annotation.name == name)?;
+            match annotation.plan.as_ref().ok()? {
+                TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
+                TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
+                _ => None,
+            }
+        };
+        let parameters = metadata
+            .locals
+            .iter()
+            .take(metadata.params as usize)
+            .map(|symbol| scalar(&program.symbols[symbol.0 as usize]))
+            .collect::<Option<Vec<_>>>()?;
+        if parameters.len() != metadata.params as usize {
+            return None;
+        }
+        Some(AnnotationJitGuard {
+            function,
+            code,
+            execution,
+            annotations,
+            annotation_version: plan.annotation_version,
+            canonical_hash: plan.canonical_hash,
+            parameters,
+            result: scalar("return")?,
+        })
+    }
+
+    fn annotation_guard_current(&mut self, guard: &AnnotationJitGuard, code_id: usize) -> bool {
+        let valid_function = matches!(
+            self.heap.get(guard.function),
+            Ok(Object::Function {
+                code,
+                execution,
+                annotations: Some(annotations),
+                ..
+            }) if *code == guard.code
+                && usize::from(*code) == code_id
+                && *execution == guard.execution
+                && *execution == self.execution
+                && *annotations == guard.annotations
+        );
+        if !valid_function {
+            return false;
+        }
+        self.annotation_type_plan(guard.function)
+            .is_some_and(|plan| {
+                plan.annotation_version == guard.annotation_version
+                    && plan.canonical_hash == guard.canonical_hash
+            })
+    }
+
+    fn annotation_arguments_match(&self, guard: &AnnotationJitGuard, base: usize) -> bool {
+        guard.parameters.iter().enumerate().all(|(index, kind)| {
+            self.annotation_parameter_matches(*kind, self.registers[base + index])
+        })
+    }
+
+    fn annotation_parameter_matches(&self, kind: AnnotationScalar, value: Value) -> bool {
+        match kind {
+            AnnotationScalar::Int => value.as_int().is_some(),
+            AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
+        }
+    }
+
+    fn annotation_result_matches(&self, kind: AnnotationScalar, value: Value) -> bool {
+        match kind {
+            AnnotationScalar::Int => {
+                value.as_int().is_some() || matches!(self.heap.get(value), Ok(Object::Int(_)))
+            }
+            AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
+        }
     }
 
     fn generic_alias_arguments(&mut self, owner: Value, key: Value) -> Result<Value> {
@@ -9001,6 +9126,7 @@ impl Vm {
         let code_id = frame.code;
         let base = frame.base;
         let start_pc = frame.ip;
+        let callable = frame.callable;
         let osr_entry = resuming && matches!(self.jit_cache[code_id], JitEntry::Untried);
         if resuming && !osr_entry {
             self.stats.jit_resumes += 1;
@@ -9010,7 +9136,46 @@ impl Vm {
             return Ok(false);
         }
         let register_count = program.code[code_id].registers as usize;
+        let compiled_annotation = match &self.jit_cache[code_id] {
+            JitEntry::Compiled {
+                annotation: Some(annotation),
+                ..
+            } => Some(annotation.clone()),
+            _ => None,
+        };
+        if let Some(annotation) = &compiled_annotation {
+            if callable != Some(annotation.function) {
+                self.stats.jit_annotation_guard_misses += 1;
+                self.stats.jit_fallbacks += 1;
+                return Ok(false);
+            }
+            if !self.annotation_guard_current(annotation, code_id) {
+                self.stats.jit_annotation_guard_misses += 1;
+                self.stats.jit_annotation_invalidations += 1;
+                self.stats.jit_fallbacks += 1;
+                self.jit_cache[code_id] = JitEntry::Untried;
+                return Ok(false);
+            }
+            if !self.annotation_arguments_match(annotation, base) {
+                self.stats.jit_annotation_guard_misses += 1;
+                self.stats.jit_fallbacks += 1;
+                return Ok(false);
+            }
+        }
         if matches!(self.jit_cache[code_id], JitEntry::Untried) {
+            let annotation = if resuming {
+                None
+            } else {
+                callable.and_then(|function| self.annotation_jit_guard(program, function, code_id))
+            };
+            if let Some(annotation) = &annotation {
+                self.stats.jit_annotation_candidates += 1;
+                if !self.annotation_arguments_match(annotation, base) {
+                    self.stats.jit_annotation_guard_misses += 1;
+                    self.stats.jit_fallbacks += 1;
+                    return Ok(false);
+                }
+            }
             let loop_candidate = has_backedge(&program.code[code_id]);
             let float_leaf = !loop_candidate
                 && program.code[code_id].params > 0
@@ -9018,7 +9183,7 @@ impl Vm {
                 && self.registers[base..base + program.code[code_id].params as usize]
                     .iter()
                     .all(|value| matches!(self.heap.get(*value), Ok(Object::Float(_))));
-            if float_leaf {
+            if annotation.is_none() && float_leaf {
                 self.stats.jit_unprofitable += 1;
                 self.jit_cache[code_id] = JitEntry::Unsupported;
                 return Ok(false);
@@ -9030,12 +9195,15 @@ impl Vm {
                 self.jit_min_instructions
                     .saturating_add(runtime_calls.saturating_mul(4))
             };
-            if !loop_candidate && program.code[code_id].instructions.len() < profitable_size {
+            if annotation.is_none()
+                && !loop_candidate
+                && program.code[code_id].instructions.len() < profitable_size
+            {
                 self.stats.jit_unprofitable += 1;
                 self.jit_cache[code_id] = JitEntry::Unsupported;
                 return Ok(false);
             }
-            if !osr_entry {
+            if annotation.is_none() && !osr_entry {
                 self.jit_hotness[code_id] = self.jit_hotness[code_id].saturating_add(1);
                 let threshold = if loop_candidate {
                     self.jit_osr_threshold.max(1)
@@ -9051,14 +9219,28 @@ impl Vm {
             }
             self.stats.jit_compile_attempts += 1;
             let direct_calls = self.jit_direct_calls(program, code_id);
-            let exact_float_parameters = (0..program.code[code_id].params)
-                .filter(|register| {
-                    matches!(
-                        self.heap.get(self.registers[base + *register as usize]),
-                        Ok(Object::Float(_))
-                    )
-                })
-                .collect::<Vec<_>>();
+            let exact_float_parameters = annotation.as_ref().map_or_else(
+                || {
+                    (0..program.code[code_id].params)
+                        .filter(|register| {
+                            matches!(
+                                self.heap.get(self.registers[base + *register as usize]),
+                                Ok(Object::Float(_))
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |annotation| {
+                    annotation
+                        .parameters
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(register, kind)| {
+                            (*kind == AnnotationScalar::Float).then_some(register as u16)
+                        })
+                        .collect()
+                },
+            );
             let materialized_constants = program.code[code_id]
                 .instructions
                 .iter()
@@ -9089,6 +9271,7 @@ impl Vm {
                     };
                     self.jit_code_budget_used = next_code_bytes;
                     self.stats.jit_compiled += 1;
+                    self.stats.jit_annotation_compiled += u64::from(annotation.is_some());
                     self.stats.jit_compile_ns += metadata.compile_time.as_nanos();
                     self.stats.jit_code_bytes += metadata.code_bytes;
                     self.stats.jit_direct_call_sites += metadata.direct_call_sites as u64;
@@ -9096,6 +9279,7 @@ impl Vm {
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,
+                        annotation,
                     };
                     if osr_entry {
                         self.stats.jit_osr_entries += 1;
@@ -9127,6 +9311,13 @@ impl Vm {
         let direct_call_sites = match &self.jit_cache[code_id] {
             JitEntry::Compiled { function, .. } => function.metadata().direct_call_sites,
             JitEntry::Untried | JitEntry::Unsupported => 0,
+        };
+        let annotation_result = match &self.jit_cache[code_id] {
+            JitEntry::Compiled {
+                annotation: Some(annotation),
+                ..
+            } => Some(annotation.result),
+            _ => None,
         };
         if direct_call_sites > 0 && self.frames.len() >= self.limits.frames {
             self.stats.jit_fallbacks += 1;
@@ -9165,7 +9356,7 @@ impl Vm {
         self.stats.calls = self.stats.calls.saturating_add(direct_calls);
         self.stats.jit_direct_calls = self.stats.jit_direct_calls.saturating_add(direct_calls);
         self.jit_roots = roots;
-        let outcome = match result {
+        let mut outcome = match result {
             Ok(outcome) => outcome,
             Err(tonic_jit::Error::Runtime { pc, failure }) => {
                 self.stats.jit_runtime_errors += 1;
@@ -9179,6 +9370,18 @@ impl Vm {
             .zip(self.jit_registers[..register_count].iter().copied())
         {
             *slot = Value::from_jit(raw);
+        }
+        let annotation_return_deopt = match (&outcome, annotation_result) {
+            (tonic_jit::Outcome::Returned { value, pc }, Some(expected))
+                if !self.annotation_result_matches(expected, Value::from_jit(*value)) =>
+            {
+                Some(*pc)
+            }
+            _ => None,
+        };
+        if let Some(pc) = annotation_return_deopt {
+            self.stats.jit_annotation_guard_misses += 1;
+            outcome = tonic_jit::Outcome::Deopt { pc };
         }
         match outcome {
             tonic_jit::Outcome::Returned { pc, .. } => {
@@ -9835,5 +10038,23 @@ mod annotation_type_plan_tests {
                 .plan,
             Ok(TypePlan::Exact(ExactTypePlan::Float))
         );
+
+        vm.heap
+            .set_attr(marker, "changed", Value::int(1).unwrap())
+            .unwrap();
+        let class_updated = vm.annotation_type_plan(function).unwrap();
+        assert_ne!(class_updated.canonical_hash, updated.canonical_hash);
+        let TypePlan::Class { version, .. } = class_updated
+            .annotations
+            .iter()
+            .find(|entry| entry.name == "m")
+            .unwrap()
+            .plan
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("expected class plan")
+        };
+        assert!(*version > marker_plan.1);
     }
 }

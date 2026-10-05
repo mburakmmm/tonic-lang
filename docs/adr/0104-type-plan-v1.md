@@ -34,6 +34,7 @@ devam eder.
 ## Sonuçlar
 
 Annotation metadata'sı Python semantiğini veya call ABI'sini değiştirmez. Plan
-oluşturma ya da reddetme yalnız gelecekteki tier seçimini etkiler. V1 henüz
-Union/Optional/Literal/Callable, variadic tuple, bytes, buffer/dtype, global alias
-dependency veya typed native entry içermez; bunlar genişleme kapılarıdır.
+oluşturma ya da reddetme yalnız tier seçimini etkiler. V1 hâlâ
+Union/Optional/Literal/Callable, variadic tuple, bytes ve buffer/dtype içermez.
+Exact `int`/`float` first-call native entry bu temelin üstüne
+[ADR 0105](0105-annotation-jit-entry-guards.md) ile eklenmiştir.
