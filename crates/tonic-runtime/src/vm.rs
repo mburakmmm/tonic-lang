@@ -110,6 +110,7 @@ pub struct Stats {
     pub jit_annotation_invalidations: u64,
     pub jit_typed_int_guard_elisions: u64,
     pub jit_typed_bool_guard_elisions: u64,
+    pub jit_typed_return_guards_elided: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -9298,6 +9299,8 @@ impl Vm {
                         metadata.typed_int_guard_elisions as u64;
                     self.stats.jit_typed_bool_guard_elisions +=
                         metadata.typed_bool_guard_elisions as u64;
+                    self.stats.jit_typed_return_guards_elided +=
+                        u64::from(annotation.is_some() && metadata.typed_return_proven);
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
                         deopts: 0,
@@ -9319,10 +9322,14 @@ impl Vm {
         self.jit_registers.clear();
         self.jit_registers
             .extend(self.registers[base..end].iter().map(|value| value.raw()));
-        let (root_count, safepoints) = match &self.jit_cache[code_id] {
+        let (root_count, safepoints, typed_return_proven) = match &self.jit_cache[code_id] {
             JitEntry::Compiled { function, .. } => {
                 let metadata = function.metadata();
-                (metadata.root_count, metadata.safepoints)
+                (
+                    metadata.root_count,
+                    metadata.safepoints,
+                    metadata.typed_return_proven,
+                )
             }
             JitEntry::Untried | JitEntry::Unsupported => {
                 self.stats.jit_fallbacks += 1;
@@ -9395,7 +9402,8 @@ impl Vm {
         }
         let annotation_return_deopt = match (&outcome, annotation_result) {
             (tonic_jit::Outcome::Returned { value, pc }, Some(expected))
-                if !self.annotation_result_matches(expected, Value::from_jit(*value)) =>
+                if !typed_return_proven
+                    && !self.annotation_result_matches(expected, Value::from_jit(*value)) =>
             {
                 Some(*pc)
             }

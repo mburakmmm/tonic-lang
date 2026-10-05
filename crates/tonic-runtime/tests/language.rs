@@ -2996,6 +2996,7 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
     assert_eq!(vm.stats.jit_returns, 2);
     assert_eq!(vm.stats.jit_deferred, 0);
     assert!(vm.stats.jit_typed_int_guard_elisions >= 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
 }
 
 #[test]
@@ -3018,6 +3019,7 @@ fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
     assert_eq!(vm.stats.jit_compiled, 2);
     assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
     assert!(vm.stats.jit_typed_bool_guard_elisions >= 2);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
 }
 
 #[test]
@@ -3064,6 +3066,7 @@ fn annotation_jit_return_mismatch_deopts_without_enforcing_the_hint() {
     assert_eq!(vm.stats.jit_returns, 0);
     assert_eq!(vm.stats.jit_deopts, 1);
     assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 0);
 }
 
 #[test]

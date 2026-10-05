@@ -183,8 +183,15 @@ sonucu tagged `int` olur. Bu genişletmenin kararı
 Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
 değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında
 decode/encode edilir. F64 lowering mevcut ayrı stack-slot/stack-map mekanizmasını
-kullanır. Annotated call-result propagation, direct-callee özeti ve kullanıcıya
-açık explain/rejection metadata'sı sonraki dilimdir.
+kullanır.
+
+Dönüş propagation'ı bütün erişilebilir `RETURN` noktalarını signature result
+planıyla karşılaştırır. Her yol kanıtlandığında bu gerçek public JIT metadata'sına
+yazılır ve VM, native dönüşte aynı type guard'ını ikinci kez çalıştırmaz. Tek bir
+unknown/uyuşmayan yol kanıtı düşürür; host return guard ve exact-PC advisory deopt
+korunur. Bu karar [ADR 0108](adr/0108-typed-return-proof.md) içindedir. Annotated
+call-result propagation, direct-callee özeti ve kullanıcıya açık explain/rejection
+metadata'sı sonraki dilimdir.
 
 ## Kabul ölçütleri
 

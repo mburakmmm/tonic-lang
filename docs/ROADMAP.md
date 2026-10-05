@@ -340,8 +340,11 @@ sonra alınır.
         sabit, `Move`, `not`, karşılaştırma ve branch propagation'ı; `bool`
         annotation'lı first-call JIT, arbitrary-PC exact-bool guard'ı ve Python
         `bool <: int` sayısal lowering'i.
-      - [ ] Annotated dönüş/call-result propagation, direct callee özeti ve
-        kullanıcıya açık explain/rejection metadata'sı.
+      - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
+        public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
+        type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.
+      - [ ] Annotated call-result propagation, direct callee özeti ve kullanıcıya
+        açık explain/rejection metadata'sı.
   - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.

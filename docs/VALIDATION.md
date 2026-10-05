@@ -70,6 +70,12 @@ argüman first-call tier'ını atlayıp advisory annotation semantiğiyle generi
 sonucu üretir. Ayrı public-JIT testi normal girişte yanlış bool tag'ını reddeder
 ve metadata'daki bool guard-elision sayacını doğrular.
 
+Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
+değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
+host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`
+annotation'lı string dönüş vakası kanıt üretmez; mevcut return guard `RETURN`
+PC'sinde deopt ederek advisory semantiği korur.
+
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.

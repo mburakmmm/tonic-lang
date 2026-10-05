@@ -263,6 +263,8 @@ pub struct Metadata {
     pub typed_int_guard_elisions: usize,
     /// Exact-bool guards proven redundant by the verified typed overlay.
     pub typed_bool_guard_elisions: usize,
+    /// Every reachable RETURN is proven to match the typed signature result.
+    pub typed_return_proven: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,12 +386,17 @@ impl ScalarFact {
     fn is_integer_like(self) -> bool {
         matches!(self, Self::Int | Self::Bool)
     }
+
+    fn matches_signature(self, kind: ScalarType) -> bool {
+        self == Self::from_signature(kind)
+    }
 }
 
 struct TypedScalarAnalysis {
     before: Vec<Option<Vec<ScalarFact>>>,
     int_guard_elisions: usize,
     bool_guard_elisions: usize,
+    return_proven: bool,
 }
 
 type RuntimeHelper = extern "C" fn(*mut c_void, *const u64, usize, u32, u64, u64, *mut u64) -> u32;
@@ -1842,6 +1849,9 @@ pub fn compile_with_execution_profile_and_types(
             typed_bool_guard_elisions: typed_scalar_analysis
                 .as_ref()
                 .map_or(0, |analysis| analysis.bool_guard_elisions),
+            typed_return_proven: typed_scalar_analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.return_proven),
         },
     })
 }
@@ -2722,10 +2732,16 @@ fn analyze_typed_scalar_execution(
     }
     let mut int_guard_elisions = 0;
     let mut bool_guard_elisions = 0;
+    let mut reachable_returns = 0usize;
+    let mut return_proven = true;
     for (pc, state) in before.iter().enumerate() {
         let Some(state) = state else { continue };
         let instruction = code.instructions[pc];
         let op = Op::try_from(instruction.opcode).expect("verified typed opcode");
+        if op == Op::Return {
+            reachable_returns += 1;
+            return_proven &= state[instruction.a as usize].matches_signature(signature.result);
+        }
         let operands = match op {
             Op::Add
             | Op::InplaceAdd
@@ -2768,6 +2784,7 @@ fn analyze_typed_scalar_execution(
         before,
         int_guard_elisions,
         bool_guard_elisions,
+        return_proven: reachable_returns > 0 && return_proven,
     })
 }
 
@@ -4180,6 +4197,7 @@ mod tests {
             compile_with_execution_profile_and_types(code, &[], &[], &[], Some(&signature))
                 .unwrap();
         assert!(compiled.metadata().typed_int_guard_elisions >= 3);
+        assert!(compiled.metadata().typed_return_proven);
 
         let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
         registers[0] = encode_i64(10);
@@ -4229,6 +4247,7 @@ mod tests {
                 .unwrap();
         assert!(compiled.metadata().typed_int_guard_elisions >= 2);
         assert!(compiled.metadata().typed_bool_guard_elisions >= 2);
+        assert!(compiled.metadata().typed_return_proven);
 
         for (flag, expected) in [
             (VALUE_FALSE as u64, VALUE_FALSE as u64),
