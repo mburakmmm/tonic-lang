@@ -3023,6 +3023,28 @@ fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
 }
 
 #[test]
+fn annotation_jit_compiles_none_and_none_type_on_first_call() {
+    let source = concat!(
+        "def identity(value:None)->None:\n    return value\n",
+        "def exact(value:type(None))->type(None):\n    return value\n",
+        "print(identity(None))\n",
+        "print(identity(7))\n",
+        "print(exact(None))",
+    );
+    let program = compile(source, "annotation-jit-none").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"None\n7\nNone\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_compiled, 2);
+    assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+}
+
+#[test]
 fn annotation_jit_propagates_guarded_direct_callee_results() {
     let source = concat!(
         "def twice(value:int)->int:\n    return value+value\n",

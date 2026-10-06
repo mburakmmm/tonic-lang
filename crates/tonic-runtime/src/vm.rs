@@ -284,6 +284,7 @@ enum AnnotationScalar {
     Int,
     Float,
     Bool,
+    None,
     Class {
         class: Value,
         type_id: u32,
@@ -1941,6 +1942,9 @@ impl Vm {
                 .iter()
                 .find(|annotation| annotation.name == name)?;
             match annotation.plan.as_ref().ok()? {
+                TypePlan::None | TypePlan::Exact(ExactTypePlan::NoneType) => {
+                    Some(AnnotationScalar::None)
+                }
                 TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
                 TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
                 TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
@@ -1953,6 +1957,9 @@ impl Vm {
                 .iter()
                 .find(|annotation| annotation.name == name)?;
             match annotation.plan.as_ref().ok()? {
+                TypePlan::None | TypePlan::Exact(ExactTypePlan::NoneType) => {
+                    Some(AnnotationScalar::None)
+                }
                 TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
                 TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
                 TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
@@ -2053,6 +2060,7 @@ impl Vm {
             AnnotationScalar::Int => value.as_int().is_some(),
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
             AnnotationScalar::Bool => value.as_bool().is_some(),
+            AnnotationScalar::None => value == Value::NONE,
             AnnotationScalar::Class {
                 class,
                 type_id,
@@ -2074,6 +2082,7 @@ impl Vm {
             }
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
             AnnotationScalar::Bool => value.as_bool().is_some(),
+            AnnotationScalar::None => value == Value::NONE,
             AnnotationScalar::Class { .. } => false,
         }
     }
@@ -9019,6 +9028,7 @@ impl Vm {
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                 AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
+                AnnotationScalar::None => tonic_jit::ScalarType::None,
             };
             let signature = tonic_jit::TypedSignature {
                 parameters: summary
@@ -9056,6 +9066,7 @@ impl Vm {
                 | AnnotationScalar::Int
                 | AnnotationScalar::Float
                 | AnnotationScalar::Bool
+                | AnnotationScalar::None
                 | AnnotationScalar::Class { .. } => {
                     continue;
                 }
@@ -9663,6 +9674,7 @@ impl Vm {
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                     AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
+                    AnnotationScalar::None => tonic_jit::ScalarType::None,
                 };
                 tonic_jit::TypedSignature {
                     parameters: annotation.parameters.iter().copied().map(scalar).collect(),

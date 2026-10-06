@@ -342,6 +342,9 @@ sonra alınır.
         sabit, `Move`, `not`, karşılaştırma ve branch propagation'ı; `bool`
         annotation'lı first-call JIT, arbitrary-PC exact-bool guard'ı ve Python
         `bool <: int` sayısal lowering'i.
+      - [x] Immediate `None` fact'i: `None` ve exact `NoneType` parametre/dönüş
+        annotation'ı, normal ve arbitrary-PC tek-word giriş guard'ı, `Const None`/
+        `Move` propagation'ı ve kanıtlı dönüşte host guard elimination.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.
@@ -373,6 +376,8 @@ sonra alınır.
       Cranelift seçimi; exact function/code/execution/plan/argument guard'ı,
       return guard'lı exact-PC deopt, annotation invalidation sayaçları ve
       normal/stress-GC testleri.
+    - [x] `None`/exact `NoneType` imzaları için first-call Cranelift seçimi;
+      yanlış argümanda advisory generic fallback ve kanıtlı `None` dönüşü.
     - [ ] `@tonic.compile`, modül warmup politikası ve import-time code-budget
       planlaması.
     - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code

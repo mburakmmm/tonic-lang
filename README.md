@@ -173,7 +173,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 414 Rust tests and a differential corpus of
+The repository currently contains 416 Rust tests and a differential corpus of
 332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets

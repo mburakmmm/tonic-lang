@@ -202,6 +202,14 @@ Arbitrary-PC giriş exact `bool` değerini guard eder. `bool` aritmetiği Python
 sonucu tagged `int` olur. Bu genişletmenin kararı
 [ADR 0107](adr/0107-typed-scalar-bool-lattice.md) içindedir.
 
+Immediate `None` fact'i de typed imzaya katılmıştır. Kaynak annotation'ındaki
+`None` ve exact `NoneType` aynı singleton fact'ine çözülür; normal girişte ve
+arbitrary-PC resume'da opaque value word doğrudan `VALUE_NONE` ile karşılaştırılır.
+`Const None` ve `Move` fact'i taşır, bütün erişilebilir dönüşler kanıtlandığında
+host return guard kaldırılır. Yanlış argüman annotation'ı zorunlu type check'e
+dönüştürmeden generic çalışır. Karar
+[ADR 0114](adr/0114-typed-none-fact.md) içindedir.
+
 Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
 değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında
 decode/encode edilir. F64 lowering mevcut ayrı stack-slot/stack-map mekanizmasını

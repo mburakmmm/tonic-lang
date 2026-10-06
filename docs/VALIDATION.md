@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 26, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 27, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 136, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 414 test.
+native handles 5, language/runtime 137, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 416 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -69,6 +69,13 @@ parametre, branch, `bool + int` ve karşılaştırma sonucunu izler. Native yol
 argüman first-call tier'ını atlayıp advisory annotation semantiğiyle generic
 sonucu üretir. Ayrı public-JIT testi normal girişte yanlış bool tag'ını reddeder
 ve metadata'daki bool guard-elision sayacını doğrular.
+
+Typed `None` testleri `None` ve `type(None)` annotation'larını aynı immediate
+fact'e çözer. Public JIT testi `Const None`/parameter propagation'ı, kanıtlı
+dönüşü, doğru singleton girişini ve integer ile PC 0 deopt'unu doğrular. Runtime
+testi iki imzanın first-call compilation'ını, yanlış argümanın advisory generic
+sonucunu, annotation guard miss sayacını ve iki return-guard elimination'ını
+allocation-stress GC altında kapsar.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
