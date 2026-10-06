@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 26, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 135, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 413 test.
+native handles 5, language/runtime 136, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 414 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -97,6 +97,14 @@ exact-int dönüşün kanıtlanabildiğini doğrular; `Dynamic` result public co
 API'sinde deterministik olarak reddedilir. Runtime vakaları exact global instance
 methodunda shadowing sonrası ATTR deopt'unu ve global class `classmethod` çağrısında
 annotation mutation invalidation'ını allocation-stress GC altında kapsar.
+
+Annotated class-parameter testi exact kullanıcı sınıfı annotation'lı caller
+parametresini saf `Move` zincirinden instance-method edge'ine bağlar. Doğru sınıf
+ilk çağrıda typed result/direct-method yoluna girer; yanlış sınıf advisory giriş
+guard'ından generic çalışır, instance method shadowing'i exact-ATTR deopt üretir
+ve class method rebinding'i annotation planını invalid ederek güncel generic
+sonucu korur. Test her-allocation GC altında bütün dört sonucu ve ilgili sayaçları
+doğrular.
 
 JIT rejection diagnostics CLI testi annotation first-call adayındaki destek dışı
 `Pow` opkodunu generic semantiği bozmadan çalıştırır ve `--stats` çıktısında exact

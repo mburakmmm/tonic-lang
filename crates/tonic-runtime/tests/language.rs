@@ -3162,6 +3162,39 @@ fn annotation_jit_propagates_classmethod_result_without_cls_annotation() {
 }
 
 #[test]
+fn annotation_jit_guards_annotated_instance_parameter_and_shape_changes() {
+    let source = concat!(
+        "class Counter:\n",
+        "    def add(self,value:int)->int:\n        return value+1\n",
+        "class Other:\n",
+        "    def add(self,value):\n        return value+10\n",
+        "def caller(owner:Counter,value:int)->int:\n    return owner.add(value)+1\n",
+        "counter=Counter()\n",
+        "print(caller(counter,20))\n",
+        "print(caller(Other(),20))\n",
+        "shadow=Counter()\n",
+        "shadow.add=lambda value:value+20\n",
+        "print(caller(shadow,20))\n",
+        "def replacement(self,value):\n    return value+30\n",
+        "Counter.add=replacement\n",
+        "print(caller(counter,20))",
+    );
+    let program = compile(source, "annotation-jit-instance-parameter").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"22\n31\n41\n51\n");
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_direct_method_sites, 1);
+    assert!(vm.stats.jit_direct_calls >= 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
 fn annotation_jit_rejects_unproven_direct_callee_result() {
     let source = concat!(
         "def lied(value:int)->int:\n    return True\n",

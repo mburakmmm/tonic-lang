@@ -130,6 +130,13 @@ impl FunctionTypePlan {
         })
     }
 
+    pub(crate) fn class_handle(&self, type_id: u32, version: u64) -> Option<Value> {
+        self.class_dependencies
+            .iter()
+            .find(|dependency| dependency.type_id == type_id && dependency.version == version)
+            .map(|dependency| dependency.class)
+    }
+
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.annotations.capacity() * std::mem::size_of::<AnnotationTypePlan>()
             + self.class_dependencies.capacity() * std::mem::size_of::<ClassPlanDependency>()

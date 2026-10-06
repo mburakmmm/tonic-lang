@@ -310,7 +310,9 @@ sonra alınır.
   libFuzzer koşusu. CI run 35772128579 ile doğrulandı.
 - [ ] Annotation destekli kısmi statik derleme ve doğrudan typed-JIT tier'ı.
   Standart Python annotation'ları dil semantiğini değiştirmeden optimizasyon
-  varsayımıdır; yanlış tipte çağrı generic Python yoluna deopt eder.
+  varsayımıdır; annotation yazmayan kod tamamen dinamik kalır. Desteklenen bir
+  annotation planı bulunan kod profil sıcaklığını beklemeden guarded typed-JIT
+  yoluna aday olur; yanlış tipte çağrı generic Python yoluna deopt eder.
   - [x] TypePlan v1 temeli: exact `None/bool/int/float/str`, plain container,
     nested homogeneous list/dict/set, fixed tuple, class identity/version,
     canonical hash, deterministic rejection code ve annotation-dict content
@@ -355,7 +357,12 @@ sonra alınır.
         - [x] Exact global instance owner ve exact global class `classmethod`
           leaf: annotation gerektirmeyen opaque `self/cls` parametresi, normal
           method/class binding guard'ı, instance shadow/class mutation deopt'u.
-        - [ ] Annotated parameter receiver/shape ve recursive/SCC özetleri.
+        - [x] Exact kullanıcı-sınıfı annotation'lı caller parametresinden method
+          edge'i: exact class identity/version giriş guard'ı, saf `Move` zinciri
+          owner çözümleme, opaque receiver, exact binding/function guard'ı,
+          yanlış sınıfta advisory fallback, instance shadow'da exact-ATTR deopt
+          ve class mutation'da caller invalidation.
+        - [ ] Recursive/SCC özetleri ve annotated field/shape propagation.
       - [x] Kullanıcıya açık deterministic rejection metadata'sı: function/code,
         kategori, bytecode PC/opcode ve sabit neden; public runtime accessor ve
         CLI `--stats` explain satırları.
@@ -388,11 +395,21 @@ sonra alınır.
     - [x] Exact global instance method ve global class `classmethod` edge'i:
       opaque receiver parametresi, instance/class binding guard'ı ve
       shadow/rebinding fallback'i.
-    - [ ] Recursion/SCC, annotated parameter/shape kenarları ve graph-wide
-      inline/code-size bütçesi.
+    - [x] Exact kullanıcı-sınıfı annotation'lı caller parametresi üzerinden
+      guarded instance-method edge'i; class identity/version, method binding ve
+      function identity guard'ları ile mutation/shadow fallback'i.
+    - [ ] Recursion/SCC, annotated field/shape kenarları ve graph-wide inline/
+      code-size bütçesi.
   - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
     constructor definite-assignment analizi, descriptor/metaclass mutation
     guard'ı ve dinamik attribute fallback'i.
+  - [ ] Kısmi statik program analizi: annotation sınırlarından local/return/
+    closure tür çıkarımı, union narrowing, effect/alias/escape bilgisi, bounded
+    monomorphization ve ayrı compilation unit'ler. Bilinmeyen veya megamorphic
+    akışlar doğruluk kaynağı olan dinamik bytecode'a döner.
+  - [ ] Annotation-JIT yönlendirme ve gözlemlenebilirlik: cost model, compile
+    queue/code budget, specialization cache sınırı, `inspect/explain` çıktısı ve
+    her karar için derlendi/reddedildi/deopt nedeni.
   - [ ] Python-compatible advisory kip ile açık strict kip ayrımı. Advisory kip
     annotation'ı runtime type check'e dönüştürmez; strict kip yalnız Tonic'e ait
     `i8..i64`, `u8..u64`, `f32/f64`, packed struct ve checked/wrapping politika

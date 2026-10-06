@@ -15,6 +15,28 @@ CPython `PyObject*` yerleşimine veya zorunlu ahead-of-time build adımına daya
 Tonic'in moving GC'si, opaque `Value`/handle ABI'si, Python protokolleri ve
 interpreter doğruluk yolu korunur.
 
+## Ürün sözleşmesi: annotation isteğe bağlıdır
+
+Tonic'te annotation kullanmak zorunlu değildir. Aynı dil üç yürütme derinliğini
+tek Python sözdizimi içinde sunar:
+
+1. Annotation'sız kod normal adaptive dinamik tier'larda çalışır.
+2. Standart Python annotation'ı bulunan ve kanıtlanabilen kod profil sıcaklığını
+   beklemeden guarded typed-JIT'e yönlendirilebilir. Annotation bir runtime type
+   check değildir; uyuşmayan değer generic Python semantiğine geri döner.
+3. Sabit genişlik, layout veya overflow garantisi isteyen kod yalnız açık Tonic
+   strict türlerini kullanır. Bu sözleşme standart `int`/`float` annotation'ına
+   sessizce yüklenmez.
+
+Bu nedenle hedef yalnız annotated leaf fonksiyonlarını hızlandırmak değildir.
+Annotation sınırından başlayan kısmi statik analiz local/closure akışına, çağrı
+grafiğine, sınıf shape/field bilgisine, homogeneous container ve buffer'lara
+yayılır. Kanıtın bittiği her noktada materialized `Value`, version guard ve exact
+bytecode-PC fallback korunur. Bounded specialization/code budget kod patlamasını;
+effect, alias ve escape bilgisi de yanlış unboxing veya scalar replacement'ı
+önler. Kullanıcı `inspect/explain` yüzeyinden bir fonksiyonun neden typed-JIT'e
+girdiğini, generic kaldığını veya deopt ettiğini görebilmelidir.
+
 ## İki davranış kipi
 
 ### Advisory Python kipi
@@ -225,8 +247,18 @@ attribute shadowing, class rebinding ve callee annotation mutasyonu sırasıyla
 exact-PC deopt veya caller invalidation üretir. Karar
 [ADR 0112](adr/0112-opaque-receiver-call-summary.md) içindedir.
 
-Annotation'lı caller parametresinden instance/shape özeti, recursive/SCC
-özetleri, ayrı compilation unit ve graph-wide code-size bütçesi hâlâ açıktır.
+Exact kullanıcı-sınıfı annotation'lı caller parametresi de instance-method
+kenarına kaynak olabilir. Native entry exact runtime class identity ve annotation
+planındaki class type/version değerini host tarafında guard eder; Cranelift bu
+register'ı scalar sanmadan materialized `Value` olarak taşır. `ATTR` owner'ı
+yalnız doğrulanabilir saf `Move` zincirinden parametreye bağlanır. Generated
+method helper binding türünü ve exact function'ı tekrar guard eder. Yanlış sınıf
+ilk çağrı derlemesini kullanmaz, instance shadow exact `ATTR` PC'sine deopt eder,
+class mutation annotation dependency üzerinden caller'ı invalid eder. Karar
+[ADR 0113](adr/0113-annotated-class-parameter-edge.md) içindedir.
+
+Annotated field/shape propagation, recursive/SCC özetleri, ayrı compilation
+unit ve graph-wide code-size bütçesi hâlâ açıktır.
 
 JIT reddi sessiz bir `Unsupported` biti değildir. Runtime her code object için
 son kalıcı ret kararını function/code kimliği, `unprofitable`/`code-budget`/

@@ -284,6 +284,11 @@ enum AnnotationScalar {
     Int,
     Float,
     Bool,
+    Class {
+        class: Value,
+        type_id: u32,
+        version: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1942,6 +1947,26 @@ impl Vm {
                 _ => None,
             }
         };
+        let parameter = |name: &str| {
+            let annotation = plan
+                .annotations
+                .iter()
+                .find(|annotation| annotation.name == name)?;
+            match annotation.plan.as_ref().ok()? {
+                TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
+                TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
+                TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
+                TypePlan::Class { type_id, version } => {
+                    plan.class_handle(*type_id, *version)
+                        .map(|class| AnnotationScalar::Class {
+                            class,
+                            type_id: *type_id,
+                            version: *version,
+                        })
+                }
+                _ => None,
+            }
+        };
         let parameters = metadata
             .locals
             .iter()
@@ -1950,7 +1975,7 @@ impl Vm {
             .map(|(index, symbol)| {
                 (index < dynamic_prefix)
                     .then_some(AnnotationScalar::Dynamic)
-                    .or_else(|| scalar(&program.symbols[symbol.0 as usize]))
+                    .or_else(|| parameter(&program.symbols[symbol.0 as usize]))
             })
             .collect::<Option<Vec<_>>>()?;
         if parameters.len() != metadata.params as usize {
@@ -2028,6 +2053,16 @@ impl Vm {
             AnnotationScalar::Int => value.as_int().is_some(),
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
             AnnotationScalar::Bool => value.as_bool().is_some(),
+            AnnotationScalar::Class {
+                class,
+                type_id,
+                version,
+            } => {
+                self.runtime_class(value).ok() == Some(class)
+                    && self.heap.class(class).is_ok_and(|metadata| {
+                        metadata.id.0 == type_id && metadata.version == version
+                    })
+            }
         }
     }
 
@@ -2039,6 +2074,7 @@ impl Vm {
             }
             AnnotationScalar::Float => matches!(self.heap.get(value), Ok(Object::Float(_))),
             AnnotationScalar::Bool => value.as_bool().is_some(),
+            AnnotationScalar::Class { .. } => false,
         }
     }
 
@@ -8843,6 +8879,8 @@ impl Vm {
         &mut self,
         program: &'a Program,
         code_id: usize,
+        base: usize,
+        caller: &AnnotationJitGuard,
     ) -> (Vec<tonic_jit::DirectCall<'a>>, Vec<AnnotationCalleeGuard>) {
         if !self.jit_direct_call_inlining {
             return (Vec::new(), Vec::new());
@@ -8883,26 +8921,49 @@ impl Vm {
                     (callee, target, arguments, None, None, 0)
                 }
                 Ok(Op::Attr) if method_call_pc(code, load_pc) == Some(pc) => {
-                    let Some(owner_load_pc) = code.instructions[..load_pc]
-                        .iter()
-                        .rposition(|candidate| candidate.a == load.b)
-                    else {
-                        continue;
+                    let mut owner_register = load.b;
+                    let mut before = load_pc;
+                    let owner = loop {
+                        let writer = code.instructions[..before]
+                            .iter()
+                            .rposition(|candidate| candidate.a == owner_register);
+                        let Some(writer_pc) = writer else {
+                            let register = usize::from(owner_register);
+                            let owner = caller
+                                .parameters
+                                .get(register)
+                                .copied()
+                                .filter(|kind| matches!(kind, AnnotationScalar::Class { .. }))
+                                .and_then(|kind| {
+                                    base.checked_add(register)
+                                        .and_then(|index| self.registers.get(index))
+                                        .copied()
+                                        .filter(|owner| {
+                                            self.annotation_parameter_matches(kind, *owner)
+                                        })
+                                });
+                            break owner;
+                        };
+                        let writer = code.instructions[writer_pc];
+                        match Op::try_from(writer.opcode) {
+                            Ok(Op::Move) => {
+                                owner_register = writer.b;
+                                before = writer_pc;
+                            }
+                            Ok(Op::LoadGlobal) => {
+                                let symbol = usize::from(writer.b);
+                                break self
+                                    .global_defined
+                                    .get(symbol)
+                                    .copied()
+                                    .filter(|defined| *defined)
+                                    .and_then(|_| self.globals.get(symbol))
+                                    .copied();
+                            }
+                            _ => break None,
+                        }
                     };
-                    let owner_load = code.instructions[owner_load_pc];
-                    if Op::try_from(owner_load.opcode) != Ok(Op::LoadGlobal) {
-                        continue;
-                    }
-                    let owner_symbol = usize::from(owner_load.b);
-                    if !self
-                        .global_defined
-                        .get(owner_symbol)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let Some(owner) = self.globals.get(owner_symbol).copied() else {
+                    let Some(owner) = owner else {
                         continue;
                     };
                     let Some(name) = program.symbols.get(usize::from(load.c)) else {
@@ -8952,7 +9013,9 @@ impl Vm {
                 continue;
             };
             let scalar_type = |kind| match kind {
-                AnnotationScalar::Dynamic => tonic_jit::ScalarType::Dynamic,
+                AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
+                    tonic_jit::ScalarType::Dynamic
+                }
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                 AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
@@ -8992,7 +9055,8 @@ impl Vm {
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Int
                 | AnnotationScalar::Float
-                | AnnotationScalar::Bool => {
+                | AnnotationScalar::Bool
+                | AnnotationScalar::Class { .. } => {
                     continue;
                 }
             };
@@ -9558,7 +9622,7 @@ impl Vm {
             let mut direct_calls = self.jit_direct_calls(program, code_id);
             if let Some(annotation) = &mut annotation {
                 let (annotation_calls, dependencies) =
-                    self.jit_annotation_direct_calls(program, code_id);
+                    self.jit_annotation_direct_calls(program, code_id, base, annotation);
                 for call in annotation_calls {
                     if let Some(existing) = direct_calls.iter_mut().find(|item| item.pc == call.pc)
                     {
@@ -9593,7 +9657,9 @@ impl Vm {
             );
             let typed_signature = annotation.as_ref().map(|annotation| {
                 let scalar = |kind| match kind {
-                    AnnotationScalar::Dynamic => tonic_jit::ScalarType::Dynamic,
+                    AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
+                        tonic_jit::ScalarType::Dynamic
+                    }
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                     AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
