@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-5 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+7 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 27, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 28, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 138, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 417 test.
+native handles 5, language/runtime 139, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 419 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -76,6 +76,14 @@ dönüşü, doğru singleton girişini ve integer ile PC 0 deopt'unu doğrular. 
 testi iki imzanın first-call compilation'ını, yanlış argümanın advisory generic
 sonucunu, annotation guard miss sayacını ve iki return-guard elimination'ını
 allocation-stress GC altında kapsar.
+
+Optional immediate-union testleri canonical `int | None` ve `bool | None`
+planlarını iki-tag giriş guard'ına dönüştürür. Public JIT testi doğru union
+üyelerini native çalıştırır, üye olmayan tag'i PC 0'da deopt eder, control-flow
+birleşimindeki `int`/`None` dönüşlerini tek optional fact altında kanıtlar.
+Runtime testi üç fonksiyonu ilk çağrıda derler; `None`, exact scalar ve yanlış
+string argümanıyla advisory fallback davranışını allocation-stress GC altında
+ve return-guard elimination sayaçlarıyla doğrular.
 
 PEP 604 union testi `int | str`, tekrar eleme, `T | None`, sıra-bağımsız equality/
 hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hatalı

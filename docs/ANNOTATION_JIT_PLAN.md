@@ -217,6 +217,16 @@ host return guard kaldırılır. Yanlış argüman annotation'ı zorunlu type ch
 dönüştürmeden generic çalışır. Karar
 [ADR 0114](adr/0114-typed-none-fact.md) içindedir.
 
+Canonical `int | None` ve `bool | None` planları da immediate tag-set typed
+imzalarına lower edilir. Native giriş hem değer tag'ini hem `None` singleton'ını
+kabul eder; başka bir tür annotation'ı zorunlu kontrole çevirmeden generic yola
+gider. Control-flow birleşimi `int`/`None` ile `bool`/`None` yollarını kaybetmeden
+optional fact'e yükseltir ve bütün erişilebilir dönüşlerin union üyesi olduğu
+kanıtlanırsa host return guard kaldırılır. Optional fact aritmetik için exact
+`int`/`bool` sayılmaz; `is None` sonrasında branch-local refinement henüz açık
+olduğu için yanlış unboxing yapılmaz. Karar
+[ADR 0116](adr/0116-optional-immediate-union-jit.md) içindedir.
+
 Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
 değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında
 decode/encode edilir. F64 lowering mevcut ayrı stack-slot/stack-map mekanizmasını

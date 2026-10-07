@@ -3045,6 +3045,31 @@ fn annotation_jit_compiles_none_and_none_type_on_first_call() {
 }
 
 #[test]
+fn annotation_jit_compiles_optional_immediate_unions_on_first_call() {
+    let source = concat!(
+        "def missing(value:int|None)->bool:\n    return value is None\n",
+        "def truth(value:bool|None)->bool:\n    return value is True\n",
+        "def choose(flag:bool,value:int)->int|None:\n",
+        "    if flag:\n        return value\n    return None\n",
+        "print(missing(None),missing(2))\n",
+        "print(missing('wrong'))\n",
+        "print(truth(None),truth(True))\n",
+        "print(choose(True,7),choose(False,7))",
+    );
+    let program = compile(source, "annotation-jit-optional-immediates").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"True False\nFalse\nFalse True\n7 None\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 3);
+    assert_eq!(vm.stats.jit_compiled, 3);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 3);
+}
+
+#[test]
 fn pep604_unions_are_canonical_and_preserve_metaclass_protocols() {
     let source = concat!(
         "import types\n",

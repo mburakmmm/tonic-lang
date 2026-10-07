@@ -43,7 +43,7 @@ never serializes Rust enum layout or native addresses.
 to annotation-JIT planning. Equivalent member order produces one canonical plan
 hash, enabling later specialization and cache reuse.
 
-This decision does not yet narrow unions across branches or lower a union
-signature to native code. Entry tag-set guards, `is None` refinement, phi joins,
-direct-call union summaries and deoptimization metadata remain typed-overlay
-roadmap work.
+ADR 0116 subsequently lowers the common `int | None` and `bool | None` signatures
+with entry tag-set guards and optional return joins. General union lowering,
+`is None` branch refinement, direct-call union summaries and richer
+deoptimization metadata remain typed-overlay roadmap work.

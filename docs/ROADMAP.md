@@ -327,7 +327,8 @@ sonra alınır.
       user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
       class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
       equality/hash, `isinstance`/`issubclass` ve metaclass `__or__/__ror__`
-      önceliği. Union narrowing ve native typed-JIT lowering ayrı açık iştir.
+      önceliği. Immediate optional giriş/return lowering'i tamamlandı; genel
+      union branch narrowing ayrı açık iştir.
   - [x] Function identity + code/execution + annotation-dict content/version
     guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
     version değişiminde cache invalidation veya atomik generic fallback. Eager
@@ -350,6 +351,10 @@ sonra alınır.
       - [x] Immediate `None` fact'i: `None` ve exact `NoneType` parametre/dönüş
         annotation'ı, normal ve arbitrary-PC tek-word giriş guard'ı, `Const None`/
         `Move` propagation'ı ve kanıtlı dönüşte host guard elimination.
+      - [x] Canonical `int | None` ve `bool | None` imzaları: normal/arbitrary-PC
+        tag-set guard'ı, control-flow birleşiminde optional fact, çoklu `RETURN`
+        kanıtı ve yanlış argümanda advisory generic fallback. `is None` sonrası
+        branch-local narrowing ile genel union üyeleri açık kalır.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.
@@ -383,6 +388,9 @@ sonra alınır.
       normal/stress-GC testleri.
     - [x] `None`/exact `NoneType` imzaları için first-call Cranelift seçimi;
       yanlış argümanda advisory generic fallback ve kanıtlı `None` dönüşü.
+    - [x] `int | None`/`bool | None` immediate union imzaları için first-call
+      Cranelift seçimi; iki tag'i kabul eden giriş guard'ı, optional dönüş kanıtı
+      ve annotation uyuşmazlığında generic Python yürütmesi.
     - [ ] `@tonic.compile`, modül warmup politikası ve import-time code-budget
       planlaması.
     - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code

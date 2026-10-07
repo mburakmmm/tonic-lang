@@ -68,7 +68,9 @@ The current implementation includes:
 - source modules and packages with versioned globals, circular-import state, and rollback;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
-- a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps;
+- a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps,
+  including first-call annotation-guided `int`, `float`, `bool`, `None`,
+  `int | None`, and `bool | None` entries with advisory generic fallback;
 - a versioned opaque C ABI, persistent handles, callbacks, typed zero-copy buffers and foreign-object tracing;
 - an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.

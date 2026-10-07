@@ -281,6 +281,12 @@ pub enum ScalarType {
     /// The immediate `None` singleton. This carries no heap address and can be
     /// guarded with one value-word comparison.
     None,
+    /// A canonical `int | None` annotation. Entry guards accept either
+    /// immediate tag without making either branch integer-like.
+    IntOrNone,
+    /// A canonical `bool | None` annotation. Entry guards accept either
+    /// immediate tag without making either branch boolean-like.
+    BoolOrNone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +391,8 @@ enum ScalarFact {
     Float,
     Bool,
     None,
+    IntOrNone,
+    BoolOrNone,
 }
 
 impl ScalarFact {
@@ -395,6 +403,8 @@ impl ScalarFact {
             ScalarType::Float => Self::Float,
             ScalarType::Bool => Self::Bool,
             ScalarType::None => Self::None,
+            ScalarType::IntOrNone => Self::IntOrNone,
+            ScalarType::BoolOrNone => Self::BoolOrNone,
         }
     }
 
@@ -403,7 +413,31 @@ impl ScalarFact {
     }
 
     fn matches_signature(self, kind: ScalarType) -> bool {
-        kind != ScalarType::Dynamic && self == Self::from_signature(kind)
+        match kind {
+            ScalarType::Dynamic => false,
+            ScalarType::IntOrNone => matches!(self, Self::Int | Self::None | Self::IntOrNone),
+            ScalarType::BoolOrNone => {
+                matches!(self, Self::Bool | Self::None | Self::BoolOrNone)
+            }
+            _ => self == Self::from_signature(kind),
+        }
+    }
+
+    fn merge(self, incoming: Self) -> Self {
+        if self == incoming {
+            return self;
+        }
+        if matches!(self, Self::Int | Self::None | Self::IntOrNone)
+            && matches!(incoming, Self::Int | Self::None | Self::IntOrNone)
+        {
+            return Self::IntOrNone;
+        }
+        if matches!(self, Self::Bool | Self::None | Self::BoolOrNone)
+            && matches!(incoming, Self::Bool | Self::None | Self::BoolOrNone)
+        {
+            return Self::BoolOrNone;
+        }
+        Self::Unknown
     }
 }
 
@@ -2709,7 +2743,10 @@ fn analyze_typed_scalar_execution(
                 after[instruction.a as usize] = match fact(instruction.b) {
                     ScalarFact::Int | ScalarFact::Bool => ScalarFact::Int,
                     ScalarFact::Float => ScalarFact::Float,
-                    ScalarFact::Unknown | ScalarFact::None => ScalarFact::Unknown,
+                    ScalarFact::Unknown
+                    | ScalarFact::None
+                    | ScalarFact::IntOrNone
+                    | ScalarFact::BoolOrNone => ScalarFact::Unknown,
                 };
             }
             Op::Not => after[instruction.a as usize] = ScalarFact::Bool,
@@ -2768,11 +2805,7 @@ fn analyze_typed_scalar_execution(
                 Some(existing) => {
                     let mut changed = false;
                     for (known, incoming) in existing.iter_mut().zip(&after) {
-                        let merged = if *known == *incoming {
-                            *known
-                        } else {
-                            ScalarFact::Unknown
-                        };
+                        let merged = known.merge(*incoming);
                         changed |= merged != *known;
                         *known = merged;
                     }
@@ -3074,7 +3107,11 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
             let truth = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
             builder.ins().uextend(types::I64, truth)
         }
-        ScalarFact::Unknown | ScalarFact::Float | ScalarFact::None => {
+        ScalarFact::Unknown
+        | ScalarFact::Float
+        | ScalarFact::None
+        | ScalarFact::IntOrNone
+        | ScalarFact::BoolOrNone => {
             unreachable!("non-integer scalar reached integer lowering")
         }
     }
@@ -3086,7 +3123,11 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
             builder.ins().icmp_imm(IntCC::NotEqual, decoded, 0)
         }
         ScalarFact::Bool => builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE),
-        ScalarFact::Unknown | ScalarFact::Float | ScalarFact::None => {
+        ScalarFact::Unknown
+        | ScalarFact::Float
+        | ScalarFact::None
+        | ScalarFact::IntOrNone
+        | ScalarFact::BoolOrNone => {
             unreachable!("non-integer scalar reached truth lowering")
         }
     }
@@ -3236,7 +3277,13 @@ fn emit_typed_scalar_entry_guards(
 ) -> Value {
     let register_count = analysis.before.iter().flatten().next().map_or(0, Vec::len);
     for register in 0..register_count {
-        for expected in [ScalarFact::Int, ScalarFact::Bool, ScalarFact::None] {
+        for expected in [
+            ScalarFact::Int,
+            ScalarFact::Bool,
+            ScalarFact::None,
+            ScalarFact::IntOrNone,
+            ScalarFact::BoolOrNone,
+        ] {
             let mut needed = None;
             for (pc, state) in analysis.before.iter().enumerate() {
                 if state
@@ -3268,6 +3315,16 @@ fn emit_typed_scalar_entry_guards(
                 ScalarFact::Int => exact_int(builder, raw),
                 ScalarFact::Bool => exact_bool(builder, raw),
                 ScalarFact::None => builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64),
+                ScalarFact::IntOrNone => {
+                    let integer = exact_int(builder, raw);
+                    let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
+                    builder.ins().bor(integer, none)
+                }
+                ScalarFact::BoolOrNone => {
+                    let boolean = exact_bool(builder, raw);
+                    let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
+                    builder.ins().bor(boolean, none)
+                }
                 ScalarFact::Unknown | ScalarFact::Float => unreachable!(),
             };
             let valid = builder.create_block();
@@ -4368,6 +4425,100 @@ mod tests {
             compiled.run(&mut registers).unwrap(),
             Outcome::Deopt { pc: 0 }
         );
+    }
+
+    #[test]
+    fn typed_scalar_overlay_guards_optional_immediates_and_proves_joined_return() {
+        let missing = function("def missing(value):\n    return value is None");
+        let missing_code = &missing.program().code[1];
+        let missing_signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrNone],
+            result: ScalarType::Bool,
+        };
+        let missing_compiled = compile_with_execution_profile_and_types(
+            missing_code,
+            &[],
+            &[],
+            &[],
+            Some(&missing_signature),
+        )
+        .unwrap();
+        assert!(missing_compiled.metadata().typed_return_proven);
+        for (argument, expected) in [
+            (VALUE_NONE, VALUE_TRUE as u64),
+            (encode_i64(7), VALUE_FALSE as u64),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; missing_compiled.metadata().root_count];
+            registers[0] = argument;
+            let Outcome::Returned { value, .. } = missing_compiled.run(&mut registers).unwrap()
+            else {
+                panic!("optional int function unexpectedly deoptimized");
+            };
+            assert_eq!(value, expected);
+        }
+        let mut registers = vec![VALUE_UNBOUND; missing_compiled.metadata().root_count];
+        registers[0] = VALUE_TRUE as u64;
+        assert_eq!(
+            missing_compiled.run(&mut registers).unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let identity = function("def identity(value):\n    return value");
+        let identity_code = &identity.program().code[1];
+        let identity_signature = TypedSignature {
+            parameters: vec![ScalarType::BoolOrNone],
+            result: ScalarType::BoolOrNone,
+        };
+        let identity_compiled = compile_with_execution_profile_and_types(
+            identity_code,
+            &[],
+            &[],
+            &[],
+            Some(&identity_signature),
+        )
+        .unwrap();
+        assert!(identity_compiled.metadata().typed_return_proven);
+        for argument in [VALUE_NONE, VALUE_TRUE as u64, VALUE_FALSE as u64] {
+            let mut registers = vec![VALUE_UNBOUND; identity_compiled.metadata().root_count];
+            registers[0] = argument;
+            let Outcome::Returned { value, .. } = identity_compiled.run(&mut registers).unwrap()
+            else {
+                panic!("optional bool function unexpectedly deoptimized");
+            };
+            assert_eq!(value, argument);
+        }
+
+        let choose = function(
+            "def choose(flag,value):\n    if flag:\n        return value\n    return None",
+        );
+        let choose_code = &choose.program().code[1];
+        let choose_signature = TypedSignature {
+            parameters: vec![ScalarType::Bool, ScalarType::Int],
+            result: ScalarType::IntOrNone,
+        };
+        assert!(typed_return_is_proven(choose_code, &choose_signature).unwrap());
+        let choose_compiled = compile_with_execution_profile_and_types(
+            choose_code,
+            &[],
+            &[],
+            &[],
+            Some(&choose_signature),
+        )
+        .unwrap();
+        assert!(choose_compiled.metadata().typed_return_proven);
+        for (flag, expected) in [
+            (VALUE_TRUE as u64, encode_i64(9)),
+            (VALUE_FALSE as u64, VALUE_NONE),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; choose_compiled.metadata().root_count];
+            registers[0] = flag;
+            registers[1] = encode_i64(9);
+            let Outcome::Returned { value, .. } = choose_compiled.run(&mut registers).unwrap()
+            else {
+                panic!("optional return function unexpectedly deoptimized");
+            };
+            assert_eq!(value, expected);
+        }
     }
 
     #[test]
