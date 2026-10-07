@@ -354,6 +354,9 @@ sonra alınır.
       - [x] Canonical `int | None` ve `bool | None` imzaları: normal/arbitrary-PC
         tag-set guard'ı, control-flow birleşiminde optional fact, çoklu `RETURN`
         kanıtı ve yanlış argümanda advisory generic fallback.
+      - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
+        control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
+        integer aritmetiği ve üye olmayan değerde advisory generic fallback.
       - [x] Optional identity branch refinement: `x is None`/`x is not None` ve
         ters operand biçimleri için true/false edge fact'leri, saf `Move` alias
         zinciri, non-None dalında exact scalar lowering ve stale-alias güvenlik

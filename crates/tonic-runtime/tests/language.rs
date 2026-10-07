@@ -3023,6 +3023,29 @@ fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
 }
 
 #[test]
+fn annotation_jit_compiles_int_bool_union_with_python_numeric_semantics() {
+    let source = concat!(
+        "def add(value:int|bool)->int:\n    return value+1\n",
+        "def identity(value:int|bool)->int|bool:\n    return value\n",
+        "print(add(True),add(False),add(4))\n",
+        "print(add(1.5))\n",
+        "print(identity(True),identity(7))",
+    );
+    let program = compile(source, "annotation-jit-int-bool-union").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"2 1 5\n2.5\nTrue 7\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_compiled, 2);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_typed_int_guard_elisions >= 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+}
+
+#[test]
 fn annotation_jit_compiles_none_and_none_type_on_first_call() {
     let source = concat!(
         "def identity(value:None)->None:\n    return value\n",

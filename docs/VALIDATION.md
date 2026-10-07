@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 29, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 30, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 141, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 422 test.
+native handles 5, language/runtime 142, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 424 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -92,6 +92,13 @@ typed guard-elision üretirken None dalı singleton fact'ini korur; iki dönüş
 register'a kopyalanıp kaynak register'ın yeniden yazıldığı durumda stale alias'ın
 daraltılmadığını; `None + 1` işleminin native yanlış sonuç yerine normal
 `TypeError` verdiğini allocation-stress GC altında doğrular.
+
+`int | bool` union testleri iki immediate tag'in aynı first-call girişinde kabul
+edildiğini, `False=0`/`True=1` decode'uyla native toplamanın Python sonucunu
+verdiğini ve int/bool CFG birleşiminin union return proof ürettiğini doğrular.
+Runtime vakası int, iki bool ve union identity sonuçlarını allocation-stress GC
+altında çalıştırır; float argüman annotation guard'ını kaçırıp generic `2.5`
+sonucunu verir.
 
 PEP 604 union testi `int | str`, tekrar eleme, `T | None`, sıra-bağımsız equality/
 hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hatalı

@@ -287,6 +287,9 @@ pub enum ScalarType {
     /// A canonical `bool | None` annotation. Entry guards accept either
     /// immediate tag without making either branch boolean-like.
     BoolOrNone,
+    /// A canonical `int | bool` annotation. Both members have immediate
+    /// representations and share Python's integer arithmetic semantics.
+    IntOrBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +396,7 @@ enum ScalarFact {
     None,
     IntOrNone,
     BoolOrNone,
+    IntOrBool,
 }
 
 impl ScalarFact {
@@ -405,11 +409,12 @@ impl ScalarFact {
             ScalarType::None => Self::None,
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
+            ScalarType::IntOrBool => Self::IntOrBool,
         }
     }
 
     fn is_integer_like(self) -> bool {
-        matches!(self, Self::Int | Self::Bool)
+        matches!(self, Self::Int | Self::Bool | Self::IntOrBool)
     }
 
     fn matches_signature(self, kind: ScalarType) -> bool {
@@ -419,6 +424,7 @@ impl ScalarFact {
             ScalarType::BoolOrNone => {
                 matches!(self, Self::Bool | Self::None | Self::BoolOrNone)
             }
+            ScalarType::IntOrBool => matches!(self, Self::Int | Self::Bool | Self::IntOrBool),
             _ => self == Self::from_signature(kind),
         }
     }
@@ -436,6 +442,11 @@ impl ScalarFact {
             && matches!(incoming, Self::Bool | Self::None | Self::BoolOrNone)
         {
             return Self::BoolOrNone;
+        }
+        if matches!(self, Self::Int | Self::Bool | Self::IntOrBool)
+            && matches!(incoming, Self::Int | Self::Bool | Self::IntOrBool)
+        {
+            return Self::IntOrBool;
         }
         Self::Unknown
     }
@@ -1699,7 +1710,7 @@ pub fn compile_with_execution_profile_and_types(
                     let raw = load(&mut builder, registers, instruction.b);
                     let typed_operand = typed_scalar_state
                         .map(|state| state[instruction.b as usize])
-                        .filter(|fact| matches!(fact, ScalarFact::Int | ScalarFact::Bool));
+                        .filter(|fact| fact.is_integer_like());
                     let (registers, truth) = if let Some(fact) = typed_operand {
                         (registers, known_integer_truth(&mut builder, raw, fact))
                     } else {
@@ -1740,7 +1751,7 @@ pub fn compile_with_execution_profile_and_types(
                     let raw = load(&mut builder, registers, instruction.a);
                     let typed_operand = typed_scalar_state
                         .map(|state| state[instruction.a as usize])
-                        .filter(|fact| matches!(fact, ScalarFact::Int | ScalarFact::Bool));
+                        .filter(|fact| fact.is_integer_like());
                     let (registers, truth) = if let Some(fact) = typed_operand {
                         (registers, known_integer_truth(&mut builder, raw, fact))
                     } else {
@@ -2841,8 +2852,14 @@ fn analyze_typed_scalar_execution(
                 after[instruction.a as usize] = if matches!(
                     (left, right),
                     (
-                        ScalarFact::Int | ScalarFact::Bool | ScalarFact::Float,
-                        ScalarFact::Int | ScalarFact::Bool | ScalarFact::Float
+                        ScalarFact::Int
+                            | ScalarFact::Bool
+                            | ScalarFact::IntOrBool
+                            | ScalarFact::Float,
+                        ScalarFact::Int
+                            | ScalarFact::Bool
+                            | ScalarFact::IntOrBool
+                            | ScalarFact::Float
                     )
                 ) {
                     ScalarFact::Float
@@ -2852,7 +2869,7 @@ fn analyze_typed_scalar_execution(
             }
             Op::Neg | Op::Pos => {
                 after[instruction.a as usize] = match fact(instruction.b) {
-                    ScalarFact::Int | ScalarFact::Bool => ScalarFact::Int,
+                    ScalarFact::Int | ScalarFact::Bool | ScalarFact::IntOrBool => ScalarFact::Int,
                     ScalarFact::Float => ScalarFact::Float,
                     ScalarFact::Unknown
                     | ScalarFact::None
@@ -3228,6 +3245,14 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
             let truth = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
             builder.ins().uextend(types::I64, truth)
         }
+        ScalarFact::IntOrBool => {
+            let integer = decode_int(builder, raw);
+            let true_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
+            let false_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_FALSE);
+            let boolean = builder.ins().bor(true_bool, false_bool);
+            let decoded_bool = builder.ins().uextend(types::I64, true_bool);
+            builder.ins().select(boolean, decoded_bool, integer)
+        }
         ScalarFact::Unknown
         | ScalarFact::Float
         | ScalarFact::None
@@ -3244,6 +3269,14 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
             builder.ins().icmp_imm(IntCC::NotEqual, decoded, 0)
         }
         ScalarFact::Bool => builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE),
+        ScalarFact::IntOrBool => {
+            let integer = decode_int(builder, raw);
+            let integer_truth = builder.ins().icmp_imm(IntCC::NotEqual, integer, 0);
+            let true_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_TRUE);
+            let false_bool = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_FALSE);
+            let boolean = builder.ins().bor(true_bool, false_bool);
+            builder.ins().select(boolean, true_bool, integer_truth)
+        }
         ScalarFact::Unknown
         | ScalarFact::Float
         | ScalarFact::None
@@ -3404,6 +3437,7 @@ fn emit_typed_scalar_entry_guards(
             ScalarFact::None,
             ScalarFact::IntOrNone,
             ScalarFact::BoolOrNone,
+            ScalarFact::IntOrBool,
         ] {
             let mut needed = None;
             for (pc, state) in analysis.before.iter().enumerate() {
@@ -3445,6 +3479,11 @@ fn emit_typed_scalar_entry_guards(
                     let boolean = exact_bool(builder, raw);
                     let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
                     builder.ins().bor(boolean, none)
+                }
+                ScalarFact::IntOrBool => {
+                    let integer = exact_int(builder, raw);
+                    let boolean = exact_bool(builder, raw);
+                    builder.ins().bor(integer, boolean)
                 }
                 ScalarFact::Unknown | ScalarFact::Float => unreachable!(),
             };
@@ -4517,6 +4556,55 @@ mod tests {
                 .unwrap(),
             Outcome::Deopt { pc: branch_pc }
         );
+    }
+
+    #[test]
+    fn typed_scalar_overlay_executes_int_bool_union_as_python_integers() {
+        let add = function("def add(value):\n    return value+1");
+        let add_code = &add.program().code[1];
+        let add_signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrBool],
+            result: ScalarType::Int,
+        };
+        let add_compiled =
+            compile_with_execution_profile_and_types(add_code, &[], &[], &[], Some(&add_signature))
+                .unwrap();
+        assert!(add_compiled.metadata().typed_return_proven);
+        assert!(add_compiled.metadata().typed_int_guard_elisions >= 1);
+        for (argument, expected) in [
+            (encode_i64(4), encode_i64(5)),
+            (VALUE_TRUE as u64, encode_i64(2)),
+            (VALUE_FALSE as u64, encode_i64(1)),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; add_compiled.metadata().root_count];
+            registers[0] = argument;
+            let Outcome::Returned { value, .. } = add_compiled.run(&mut registers).unwrap() else {
+                panic!("int-bool union function unexpectedly deoptimized");
+            };
+            assert_eq!(value, expected);
+        }
+        let mut registers = vec![VALUE_UNBOUND; add_compiled.metadata().root_count];
+        registers[0] = VALUE_NONE;
+        assert_eq!(
+            add_compiled.run(&mut registers).unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let identity = function("def identity(value):\n    return value");
+        let identity_signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrBool],
+            result: ScalarType::IntOrBool,
+        };
+        assert!(typed_return_is_proven(&identity.program().code[1], &identity_signature).unwrap());
+
+        let joined = function(
+            "def choose(flag):\n    if flag:\n        value=1\n    else:\n        value=True\n    return value",
+        );
+        let joined_signature = TypedSignature {
+            parameters: vec![ScalarType::Bool],
+            result: ScalarType::IntOrBool,
+        };
+        assert!(typed_return_is_proven(&joined.program().code[1], &joined_signature).unwrap());
     }
 
     #[test]

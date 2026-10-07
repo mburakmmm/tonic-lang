@@ -231,6 +231,14 @@ Genel union üye/test narrowing'i açık kalır. Immediate union kararı
 [ADR 0116](adr/0116-optional-immediate-union-jit.md), identity refinement ayrıntısı
 [ADR 0117](adr/0117-optional-none-branch-refinement.md) içindedir.
 
+None-dışı ilk union genişlemesi `int | bool` imzasıdır. Native giriş exact int
+ve exact bool tag'lerini kabul eder; bool üye Cranelift'te Python'ın `bool <: int`
+davranışına uygun olarak `False=0`, `True=1` decode edilir. Bu nedenle iki üye
+aynı integer arithmetic lowering'ini kullanabilir. Branch join'inde ayrı `int`
+ve `bool` fact'leri canonical `IntOrBool` fact'ine yükselir; result planı her iki
+üyeyi de kabul eder. Üye olmayan değer yine generic Python yolunda çalışır.
+Karar [ADR 0118](adr/0118-int-bool-union-jit.md) içindedir.
+
 Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
 değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında
 decode/encode edilir. F64 lowering mevcut ayrı stack-slot/stack-map mekanizmasını
