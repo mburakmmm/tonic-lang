@@ -367,7 +367,8 @@ sonra alınır.
       - [x] Exact global function için guarded annotated leaf özeti ve call-result
         propagation: callee return bytecode proof'u, function/code/execution/
         annotation dependency invalidation'ı, first-call direct inline ve caller
-        return proof zinciri; yalan callee annotation'ında özet reddi.
+        return proof zinciri; exact `bool`/`None` ile immediate union result
+        propagation'ı; yalan callee annotation'ında özet reddi.
       - [ ] Recursive/method call-result özetleri.
         - [x] Exact global class owner üzerinden plain function/`staticmethod`
           leaf: profil beklemeden `ATTR`+`CALL` fusion, callee annotation/return
@@ -413,6 +414,9 @@ sonra alınır.
     - [x] Exact global int/float leaf için ilk guarded kenar: profil beklemeden
       callee identity ve annotation-plan dependency guard'ı, kanıtlı result
       propagation ve mutation/rebinding fallback'i.
+    - [x] Side-effect-free exact global leaf için `bool`/`None` ve immediate
+      union result özeti; caller'da optional narrowing/int-bool arithmetic,
+      callee annotation mutation invalidation'ı ve first-call direct inline.
     - [x] Exact global class owner'lı plain function/`staticmethod` için ilk
       annotated class edge: allocation-free method load, static binding guard'ı,
       callee plan invalidation'ı ve class mutation fallback'i.

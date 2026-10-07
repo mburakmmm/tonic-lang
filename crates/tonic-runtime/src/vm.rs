@@ -9160,12 +9160,26 @@ impl Vm {
             {
                 continue;
             }
+            let immediate_parameters =
+                summary.parameters.iter().enumerate().all(|(index, kind)| {
+                    index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
+                        || matches!(
+                            kind,
+                            AnnotationScalar::Int
+                                | AnnotationScalar::Bool
+                                | AnnotationScalar::None
+                                | AnnotationScalar::IntOrNone
+                                | AnnotationScalar::BoolOrNone
+                                | AnnotationScalar::IntOrBool
+                        )
+                });
+            let inlineable = tonic_jit::is_direct_call_inlineable(&program.code[target]);
             let scalar = match summary.result {
                 AnnotationScalar::Int
                     if summary.parameters.iter().enumerate().all(|(index, kind)| {
                         *kind == AnnotationScalar::Int
                             || index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
-                    }) && tonic_jit::is_direct_call_inlineable(&program.code[target]) =>
+                    }) && inlineable =>
                 {
                     tonic_jit::ScalarType::Int
                 }
@@ -9177,6 +9191,21 @@ impl Vm {
                         && tonic_jit::is_direct_float_leaf_inlineable(&program.code[target]) =>
                 {
                     tonic_jit::ScalarType::Float
+                }
+                AnnotationScalar::Bool if immediate_parameters && inlineable => {
+                    tonic_jit::ScalarType::Bool
+                }
+                AnnotationScalar::None if immediate_parameters && inlineable => {
+                    tonic_jit::ScalarType::None
+                }
+                AnnotationScalar::IntOrNone if immediate_parameters && inlineable => {
+                    tonic_jit::ScalarType::IntOrNone
+                }
+                AnnotationScalar::BoolOrNone if immediate_parameters && inlineable => {
+                    tonic_jit::ScalarType::BoolOrNone
+                }
+                AnnotationScalar::IntOrBool if immediate_parameters && inlineable => {
+                    tonic_jit::ScalarType::IntOrBool
                 }
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Int

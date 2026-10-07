@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 30, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 31, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 142, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 424 test.
+native handles 5, language/runtime 143, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 426 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -120,6 +120,15 @@ ilerletir ve direct-call/typed-result sayaçlarını doğrular. Callee annotatio
 mutation'ı caller plan dependency'sini invalid ederken sonuç değişmez. Ayrı yalan
 `-> int`/`return True` vakası public callee-return proof kapısında özeti reddeder;
 caller generic kalır ve Python `True + 1 == 2` davranışı korunur.
+
+Immediate-union call-result testleri side-effect-free identity leaf'lerinden
+`int | None` ve `int | bool` özetlerini caller'a taşır. İlk caller optional sonucu
+`is None` ile ayırıp non-None dalında native toplar; ikincisi bool/int sonucu
+doğrudan Python 0/1 numeric semantiğiyle toplar. Public JIT testi union result
+fact'inin inlined CALL sonrasında caller aritmetiğine aktarıldığını doğrular.
+Runtime testi iki direct site/dört direct yürütmeyi, stress-GC çıktılarını ve
+callee return annotation mutasyonundan sonra caller invalidation + özetsiz
+recompile davranışını sayaçlarla kapsar.
 
 Annotated class-edge testleri exact global class üzerinden plain function ve
 `staticmethod` çağrılarını profil beklemeden fused `ATTR`+`CALL` planına alır.

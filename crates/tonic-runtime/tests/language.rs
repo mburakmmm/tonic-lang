@@ -3333,6 +3333,35 @@ fn annotation_jit_guards_annotated_instance_parameter_and_shape_changes() {
 }
 
 #[test]
+fn annotation_jit_propagates_guarded_immediate_union_results() {
+    let source = concat!(
+        "def preserve(value:int|None)->int|None:\n    return value\n",
+        "def normalize(value:int|None)->int:\n",
+        "    selected=preserve(value)\n",
+        "    if selected is None:\n        return 0\n    return selected+1\n",
+        "def preserve_flag(value:int|bool)->int|bool:\n    return value\n",
+        "def increment(value:int|bool)->int:\n    return preserve_flag(value)+1\n",
+        "print(normalize(None),normalize(4))\n",
+        "print(increment(True),increment(4))\n",
+        "preserve.__annotations__['return']=int\n",
+        "print(normalize(None))",
+    );
+    let program = compile(source, "annotation-jit-direct-union-results").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"0 5\n2 5\n0\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 3);
+    assert_eq!(vm.stats.jit_compiled, 3);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 2);
+    assert!(vm.stats.jit_direct_calls >= 4);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+}
+
+#[test]
 fn annotation_jit_rejects_unproven_direct_callee_result() {
     let source = concat!(
         "def lied(value:int)->int:\n    return True\n",

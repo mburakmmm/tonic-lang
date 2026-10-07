@@ -71,7 +71,8 @@ The current implementation includes:
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps,
   including first-call annotation-guided `int`, `float`, `bool`, `None`,
   `int | None`, `bool | None`, and `int | bool` entries, plus None-identity
-  branch refinement with advisory generic fallback;
+  branch refinement and guarded immediate-union call summaries with advisory
+  generic fallback;
 - a versioned opaque C ABI, persistent handles, callbacks, typed zero-copy buffers and foreign-object tracing;
 - an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.

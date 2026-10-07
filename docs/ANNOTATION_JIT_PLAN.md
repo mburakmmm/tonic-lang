@@ -262,6 +262,15 @@ caller'ı invalid eder, global rebinding ise generated exact-callee guard'ında
 deopt eder. Yalan annotation veya kanıtlanamayan gövde özet üretmez. Ayrıntı
 [ADR 0109](adr/0109-guarded-annotated-call-result.md) içindedir.
 
+Bu exact-global leaf yolu artık exact `bool`/`None` ile `int | None`,
+`bool | None` ve `int | bool` sonuçlarını da caller overlay'ine aktarır. Callee
+yalnız atomik deopt halinde yeniden yürütülebilen side-effect-free direct-inline
+subset'indeyse özet kabul edilir. Optional sonuç caller'ın `is None` kenarında
+daralabilir; int-bool sonuç aynı çağrıda integer arithmetic'e girebilir. Callee
+annotation planı değişirse dependency guard caller entry'yi invalid eder ve yeni
+plan body proof vermiyorsa union kenarı yeniden kurulmaz. Karar
+[ADR 0119](adr/0119-guarded-immediate-union-call-results.md) içindedir.
+
 İkinci kenar `Math.leaf(...)` biçiminde, `Math` exact global class olduğunda ve
 attribute plain class-level function ya da `staticmethod` olarak çözüldüğünde
 çalışır. Mevcut allocation-free `ATTR`+`CALL` fusion kullanılır fakat method

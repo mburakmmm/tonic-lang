@@ -4760,6 +4760,59 @@ mod tests {
     }
 
     #[test]
+    fn guarded_direct_union_result_flows_into_caller_arithmetic() {
+        let program = function(
+            "def identity(value):\n    return value\ndef caller(f,value):\n    return f(value)+1",
+        );
+        let program = program.program();
+        let target = &program.code[1];
+        let caller = &program.code[2];
+        let pc = caller
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("union-result call");
+        let callee = 0x1234_5678_u64;
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Dynamic, ScalarType::IntOrBool],
+            result: ScalarType::Int,
+        };
+        let compiled = compile_with_execution_profile_and_types(
+            caller,
+            &[DirectCall {
+                pc,
+                callee,
+                target,
+                arguments: vec![DirectArgument::Caller(0)],
+                method_attr_pc: None,
+                method_binding: None,
+                expanded_begin_pc: None,
+                float: false,
+                result: Some(ScalarType::IntOrBool),
+            }],
+            &[],
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert!(compiled.metadata().typed_return_proven);
+
+        for (argument, expected) in [
+            (VALUE_TRUE as u64, encode_i64(2)),
+            (encode_i64(4), encode_i64(5)),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+            registers[0] = callee;
+            registers[1] = argument;
+            let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+                panic!("direct union-result caller unexpectedly deoptimized");
+            };
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
     fn typed_return_proof_rejects_a_lying_callee_summary() {
         let valid = function("def twice(value):\n    return value+value");
         let lied = function("def lied(value):\n    return True");
