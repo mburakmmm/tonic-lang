@@ -3045,6 +3045,28 @@ fn annotation_jit_compiles_none_and_none_type_on_first_call() {
 }
 
 #[test]
+fn pep604_unions_are_canonical_and_preserve_metaclass_protocols() {
+    let source = concat!(
+        "import types\n",
+        "class Meta(type):\n",
+        "    def __or__(cls,other):\n        return 'custom'\n",
+        "class Custom(metaclass=Meta):\n    pass\n",
+        "left=int|str\n",
+        "right=str|int\n",
+        "print(left,left|int,int|None)\n",
+        "print(left.__args__,left.__origin__ is types.UnionType)\n",
+        "print(left==right,hash(left)==hash(right))\n",
+        "print(isinstance(1,left),isinstance('x',left),issubclass(bool,left))\n",
+        "print(type(left) is types.UnionType,Custom|int)",
+    );
+    assert_output_under_stress_gc_and_jit(
+        source,
+        b"int | str int | str int | None\n(<class 'int'>, <class 'str'>) True\nTrue True\nTrue True True\nTrue custom\n",
+    );
+    assert_eq!(error("print(int|42)").kind, "TypeError");
+}
+
+#[test]
 fn annotation_jit_propagates_guarded_direct_callee_results() {
     let source = concat!(
         "def twice(value:int)->int:\n    return value+value\n",

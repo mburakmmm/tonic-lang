@@ -13,7 +13,7 @@ use num_traits::{FromPrimitive, ToPrimitive};
 use std::collections::HashMap;
 use tonic_core::diagnostic::{Diagnostic, Result};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     None,
     NotImplemented,
@@ -31,6 +31,8 @@ enum Key {
     },
     Identity(u64),
     Method(Box<Key>, Box<Key>),
+    GenericAlias(Box<Key>, Box<Key>),
+    Union(Vec<Key>),
 }
 #[derive(Debug, Default)]
 pub(crate) struct Dict {
@@ -80,6 +82,18 @@ fn key_hash(key: &Key) -> u64 {
             let accumulator = sequence_step(sequence_start(), key_hash(function) as i64);
             sequence_finish(sequence_step(accumulator, key_hash(receiver) as i64), 2)
         }
+        Key::GenericAlias(origin, arguments) => {
+            let accumulator = sequence_step(sequence_start(), key_hash(origin) as i64);
+            sequence_finish(sequence_step(accumulator, key_hash(arguments) as i64), 2)
+        }
+        Key::Union(members) => {
+            let accumulator = members
+                .iter()
+                .fold(sequence_start(), |accumulator, member| {
+                    sequence_step(accumulator, key_hash(member) as i64)
+                });
+            sequence_finish(accumulator, members.len())
+        }
     };
     hash as u64
 }
@@ -91,6 +105,10 @@ fn find_material(dict: &Dict, material: &Key) -> Option<usize> {
         .find(|index| dict.materials[*index] == *material)
 }
 impl Heap {
+    pub(crate) fn structural_hash(&self, value: Value) -> Result<u64> {
+        Ok(key_hash(&self.dict_key(value, 0)?))
+    }
+
     pub(crate) fn dict_get_str(&self, owner: Value, name: &str) -> Result<Option<Value>> {
         let owner = self.native_value(owner);
         let Object::Dict(dict) = self.get(owner)? else {
@@ -173,6 +191,18 @@ impl Heap {
                     start: (length != 0).then_some(*start),
                     step: (length > 1).then_some(*step),
                 }
+            }
+            Object::GenericAlias { origin, args, .. } => Key::GenericAlias(
+                Box::new(self.dict_key(*origin, depth + 1)?),
+                Box::new(self.dict_key(*args, depth + 1)?),
+            ),
+            Object::UnionType { members, .. } => {
+                let mut members = members
+                    .iter()
+                    .map(|member| self.dict_key(*member, depth + 1))
+                    .collect::<Result<Vec<_>>>()?;
+                members.sort_unstable();
+                Key::Union(members)
             }
             Object::Function { .. }
             | Object::Builtin(_)

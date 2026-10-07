@@ -509,6 +509,45 @@ impl Heap {
                 }
             }
             (
+                Ok(Object::GenericAlias {
+                    origin: left_origin,
+                    args: left_args,
+                    ..
+                }),
+                Ok(Object::GenericAlias {
+                    origin: right_origin,
+                    args: right_args,
+                    ..
+                }),
+            ) => {
+                self.equal(*left_origin, *right_origin, depth + 1)?
+                    && self.equal(*left_args, *right_args, depth + 1)?
+            }
+            (
+                Ok(Object::UnionType { members: left, .. }),
+                Ok(Object::UnionType { members: right, .. }),
+            ) => {
+                if left.len() != right.len() {
+                    false
+                } else {
+                    let mut equal = true;
+                    for member in left {
+                        let mut found = false;
+                        for candidate in right {
+                            if member == candidate || self.equal(*member, *candidate, depth + 1)? {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            equal = false;
+                            break;
+                        }
+                    }
+                    equal
+                }
+            }
+            (
                 Ok(Object::Range {
                     start: a,
                     stop: b,

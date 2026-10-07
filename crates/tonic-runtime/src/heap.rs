@@ -217,6 +217,8 @@ pub(crate) enum Builtin {
     TypeGetAttribute,
     TypeSetAttr,
     TypeDelAttr,
+    TypeOr,
+    TypeRor,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TypeParameterKind {
@@ -304,8 +306,13 @@ pub(crate) enum Object {
         value: Value,
     },
     GenericAlias {
+        class: Value,
         origin: Value,
         args: Value,
+    },
+    UnionType {
+        class: Value,
+        members: Vec<Value>,
     },
     Generator(GeneratorFrame),
     CoroutineIterator {
@@ -382,7 +389,9 @@ impl Object {
             | Self::AsyncFutureIterator { class, .. }
             | Self::AsyncEventLoop { class, .. }
             | Self::CallIterator { class, .. }
-            | Self::SequenceIterator { class, .. } => Some(*class),
+            | Self::SequenceIterator { class, .. }
+            | Self::GenericAlias { class, .. }
+            | Self::UnionType { class, .. } => Some(*class),
             _ => None,
         }
     }
@@ -512,9 +521,18 @@ impl Object {
                 visit(*type_params);
                 visit(*value);
             }
-            Self::GenericAlias { origin, args } => {
+            Self::GenericAlias {
+                class,
+                origin,
+                args,
+            } => {
+                visit(*class);
                 visit(*origin);
                 visit(*args);
+            }
+            Self::UnionType { class, members } => {
+                visit(*class);
+                members.iter().copied().for_each(visit);
             }
             Self::Generator(frame) => {
                 visit(frame.class);
@@ -1899,7 +1917,7 @@ impl Heap {
             Object::TypeUnpack(value) => {
                 format!("*{}", self.format_depth(*value, true, path)?)
             }
-            Object::GenericAlias { origin, args } => {
+            Object::GenericAlias { origin, args, .. } => {
                 let origin = match self.get(*origin)? {
                     Object::Class(class) => class.name.clone(),
                     Object::TypeAlias { name, .. } => name.clone(),
@@ -1922,6 +1940,23 @@ impl Heap {
                     }
                 }
                 text.push(']');
+                text
+            }
+            Object::UnionType { members, .. } => {
+                let mut text = String::new();
+                for (index, member) in members.iter().enumerate() {
+                    if index != 0 {
+                        text.push_str(" | ");
+                    }
+                    if *member == Value::NONE {
+                        text.push_str("None");
+                    } else {
+                        match self.get(*member) {
+                            Ok(Object::Class(class)) => text.push_str(&class.name),
+                            _ => text.push_str(&self.format_depth(*member, true, path)?),
+                        }
+                    }
+                }
                 text
             }
             Object::Generator(frame) => match frame.kind {
@@ -2470,6 +2505,7 @@ impl Object {
                             .sum::<usize>()
                 }
                 Self::Tuple(v) | Self::List(v) => v.capacity() * 8,
+                Self::UnionType { members, .. } => members.capacity() * 8,
                 Self::Buffer(buffer) => buffer.estimated_bytes(),
                 Self::Foreign(foreign) => foreign.estimated_bytes(),
                 Self::Int(n) => n.bits().div_ceil(8) as usize,

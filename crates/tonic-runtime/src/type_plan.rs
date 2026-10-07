@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 1;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 2;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +21,7 @@ pub(crate) struct TypePlanBuiltins {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum ExactTypePlan {
     NoneType,
     Bool,
@@ -34,7 +34,7 @@ pub enum ExactTypePlan {
     Set,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum TypePlan {
     None,
     Exact(ExactTypePlan),
@@ -42,6 +42,7 @@ pub enum TypePlan {
     Dict(Box<TypePlan>, Box<TypePlan>),
     Set(Box<TypePlan>),
     FixedTuple(Vec<TypePlan>),
+    Union(Vec<TypePlan>),
     Class { type_id: u32, version: u64 },
 }
 
@@ -157,7 +158,7 @@ fn plan_bytes(plan: &Result<TypePlan, TypePlanRejection>) -> usize {
             TypePlan::Dict(key, value) => {
                 2 * std::mem::size_of::<TypePlan>() + nested(key) + nested(value)
             }
-            TypePlan::FixedTuple(items) => {
+            TypePlan::FixedTuple(items) | TypePlan::Union(items) => {
                 items.capacity() * std::mem::size_of::<TypePlan>()
                     + items.iter().map(nested).sum::<usize>()
             }
@@ -270,7 +271,7 @@ fn resolve_type_plan(
             visiting,
             class_dependencies,
         ),
-        Ok(Object::GenericAlias { origin, args }) => resolve_generic_alias(
+        Ok(Object::GenericAlias { origin, args, .. }) => resolve_generic_alias(
             heap,
             builtins,
             *origin,
@@ -279,6 +280,31 @@ fn resolve_type_plan(
             visiting,
             class_dependencies,
         ),
+        Ok(Object::UnionType { members, .. }) => {
+            let mut plans = Vec::with_capacity(members.len());
+            for member in members {
+                let plan = resolve_type_plan(
+                    heap,
+                    builtins,
+                    *member,
+                    depth + 1,
+                    visiting,
+                    class_dependencies,
+                )?;
+                match plan {
+                    TypePlan::Union(nested) => plans.extend(nested),
+                    TypePlan::Exact(ExactTypePlan::NoneType) => plans.push(TypePlan::None),
+                    plan => plans.push(plan),
+                }
+            }
+            plans.sort_unstable();
+            plans.dedup();
+            match plans.len() {
+                0 => Err(TypePlanRejection::InvalidGenericArity),
+                1 => Ok(plans.pop().expect("single union plan")),
+                _ => Ok(TypePlan::Union(plans)),
+            }
+        }
         _ => Err(TypePlanRejection::UnsupportedValue),
     };
     visiting.remove(&annotation);
@@ -433,6 +459,11 @@ impl CanonicalHash {
                 self.u8(6);
                 self.u32(*type_id);
                 self.u64(*version);
+            }
+            TypePlan::Union(items) => {
+                self.u8(7);
+                self.u64(items.len() as u64);
+                items.iter().for_each(|item| self.plan(item));
             }
         }
     }

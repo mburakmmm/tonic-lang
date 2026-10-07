@@ -1256,6 +1256,8 @@ struct RuntimeTypes {
     set: Value,
     range: Value,
     function: Value,
+    generic_alias: Value,
+    union_type: Value,
     call_iterator: Value,
     sequence_iterator: Value,
     generator: Value,
@@ -1309,6 +1311,8 @@ impl RuntimeTypes {
             set: Value::UNBOUND,
             range: Value::UNBOUND,
             function: Value::UNBOUND,
+            generic_alias: Value::UNBOUND,
+            union_type: Value::UNBOUND,
             call_iterator: Value::UNBOUND,
             sequence_iterator: Value::UNBOUND,
             generator: Value::UNBOUND,
@@ -1350,6 +1354,8 @@ impl RuntimeTypes {
             self.set,
             self.range,
             self.function,
+            self.generic_alias,
+            self.union_type,
             self.call_iterator,
             self.sequence_iterator,
             self.generator,
@@ -2087,6 +2093,51 @@ impl Vm {
         }
     }
 
+    pub(super) fn make_type_union(&mut self, left: Value, right: Value) -> Result<Value> {
+        fn append(vm: &Vm, value: Value, members: &mut Vec<Value>) -> Result<bool> {
+            if value == Value::NONE {
+                members.push(value);
+                return Ok(true);
+            }
+            match vm.heap.get(value)? {
+                Object::Class(_)
+                | Object::GenericAlias { .. }
+                | Object::TypeAlias { .. }
+                | Object::TypeParam { .. } => members.push(value),
+                Object::UnionType {
+                    members: nested, ..
+                } => members.extend(nested.iter().copied()),
+                _ => return Ok(false),
+            }
+            Ok(true)
+        }
+
+        let mut members = Vec::new();
+        if !append(self, left, &mut members)? || !append(self, right, &mut members)? {
+            return Ok(Value::NOT_IMPLEMENTED);
+        }
+        let mut unique = Vec::with_capacity(members.len());
+        for member in members {
+            let mut present = false;
+            for existing in &unique {
+                if member == *existing || self.heap.equal(member, *existing, 0)? {
+                    present = true;
+                    break;
+                }
+            }
+            if !present {
+                unique.push(member);
+            }
+        }
+        if unique.len() == 1 {
+            return Ok(unique[0]);
+        }
+        self.heap.alloc(Object::UnionType {
+            class: self.runtime_types.union_type,
+            members: unique,
+        })
+    }
+
     fn generic_alias_arguments(&mut self, owner: Value, key: Value) -> Result<Value> {
         let mut arguments = match self.heap.get(key)? {
             Object::Tuple(values) => values.clone(),
@@ -2480,6 +2531,14 @@ impl Vm {
             function: vm
                 .heap
                 .builtin_class("function", vec![vm.object_class], vm.type_class)?,
+            generic_alias: vm.heap.builtin_class(
+                "GenericAlias",
+                vec![vm.object_class],
+                vm.type_class,
+            )?,
+            union_type: vm
+                .heap
+                .builtin_class("UnionType", vec![vm.object_class], vm.type_class)?,
             call_iterator: vm.heap.builtin_class(
                 "callable_iterator",
                 vec![vm.object_class],
@@ -2534,6 +2593,12 @@ impl Vm {
             other_exceptions,
         };
         for (class, name, builtin) in [
+            (vm.type_class, "__or__", Builtin::TypeOr),
+            (vm.type_class, "__ror__", Builtin::TypeRor),
+            (vm.runtime_types.generic_alias, "__or__", Builtin::TypeOr),
+            (vm.runtime_types.generic_alias, "__ror__", Builtin::TypeRor),
+            (vm.runtime_types.union_type, "__or__", Builtin::TypeOr),
+            (vm.runtime_types.union_type, "__ror__", Builtin::TypeRor),
             (vm.runtime_types.int, "__new__", Builtin::IntNew),
             (vm.runtime_types.bool_, "__new__", Builtin::BoolNew),
             (vm.runtime_types.float, "__new__", Builtin::FloatNew),
@@ -2821,6 +2886,12 @@ impl Vm {
             vm.runtime_types.unraisable_hook_args,
         )?;
         vm.modules.insert("sys".into(), sys);
+        let types = vm.heap.alloc(Object::Module(Vec::new()))?;
+        vm.heap
+            .add_module_member(types, "GenericAlias", vm.runtime_types.generic_alias)?;
+        vm.heap
+            .add_module_member(types, "UnionType", vm.runtime_types.union_type)?;
+        vm.modules.insert("types".into(), types);
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
             (vm.runtime_types.bool_, Builtin::IntHash),
@@ -4306,6 +4377,8 @@ impl Vm {
             Object::Set(_) => self.runtime_types.set,
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
+            Object::GenericAlias { class, .. } => *class,
+            Object::UnionType { class, .. } => *class,
             Object::Generator(frame) => frame.class,
             Object::CoroutineIterator { class, .. } => *class,
             Object::AsyncGeneratorAwaitable { class, .. } => *class,
@@ -5636,6 +5709,14 @@ impl Vm {
         }
         if let Ok(Object::Tuple(types)) = self.heap.get(target) {
             for target in types {
+                if self.instance_check(value, *target, subclass, depth + 1)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        if let Ok(Object::UnionType { members, .. }) = self.heap.get(target) {
+            for target in members {
                 if self.instance_check(value, *target, subclass, depth + 1)? {
                     return Ok(true);
                 }
@@ -7648,6 +7729,7 @@ impl Vm {
                         if generic {
                             let args = self.generic_alias_arguments(owner, key)?;
                             self.registers[a] = self.heap.alloc(Object::GenericAlias {
+                                class: self.runtime_types.generic_alias,
                                 origin: owner,
                                 args,
                             })?;
@@ -10440,8 +10522,11 @@ mod annotation_type_plan_tests {
         let source = concat!(
             "class Marker:\n    pass\n",
             "def typed(x:int,y:list[float],z:dict[str,int],",
-            "t:tuple[int,str],s:type({1}),m:Marker,bad:42)->float:\n",
+            "t:tuple[int,str],s:type({1}),m:Marker,u:int|None,",
+            "v:str|int|str,g:list[int]|None,bad:42)->float:\n",
             "    return 1.0\n",
+            "def reordered(v:str|int)->float:\n    return 1.0\n",
+            "def canonical(v:int|str)->float:\n    return 1.0\n",
         );
         let program = compile(source, "annotation-type-plan").unwrap();
         let mut vm = Vm::new().unwrap();
@@ -10485,6 +10570,27 @@ mod annotation_type_plan_tests {
         );
         assert_eq!(entry("s"), Ok(TypePlan::Exact(ExactTypePlan::Set)));
         assert_eq!(
+            entry("u"),
+            Ok(TypePlan::Union(vec![
+                TypePlan::None,
+                TypePlan::Exact(ExactTypePlan::Int),
+            ]))
+        );
+        assert_eq!(
+            entry("v"),
+            Ok(TypePlan::Union(vec![
+                TypePlan::Exact(ExactTypePlan::Int),
+                TypePlan::Exact(ExactTypePlan::Str),
+            ]))
+        );
+        assert_eq!(
+            entry("g"),
+            Ok(TypePlan::Union(vec![
+                TypePlan::None,
+                TypePlan::List(Box::new(TypePlan::Exact(ExactTypePlan::Int))),
+            ]))
+        );
+        assert_eq!(
             entry("m"),
             Ok(TypePlan::Class {
                 type_id: marker_plan.0,
@@ -10493,6 +10599,14 @@ mod annotation_type_plan_tests {
         );
         assert_eq!(entry("bad"), Err(TypePlanRejection::UnsupportedValue));
         assert_eq!(entry("return"), Ok(TypePlan::Exact(ExactTypePlan::Float)));
+
+        let reordered = vm
+            .annotation_type_plan(global(program.program(), &vm, "reordered"))
+            .unwrap();
+        let canonical = vm
+            .annotation_type_plan(global(program.program(), &vm, "canonical"))
+            .unwrap();
+        assert_eq!(reordered.canonical_hash, canonical.canonical_hash);
 
         let annotations = match vm.heap.get(function).unwrap() {
             Object::Function {

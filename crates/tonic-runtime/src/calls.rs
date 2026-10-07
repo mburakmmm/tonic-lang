@@ -5877,6 +5877,10 @@ impl Vm {
                     .expect("range comparison returns bool");
                 EqualityFallback::Ready(equal)
             }
+            (Ok(Object::GenericAlias { .. }), Ok(Object::GenericAlias { .. }))
+            | (Ok(Object::UnionType { .. }), Ok(Object::UnionType { .. })) => {
+                EqualityFallback::Ready(self.heap.equal(native_left, native_right, nested_depth)?)
+            }
             (Ok(Object::Tuple(left)), Ok(Object::Tuple(right)))
             | (Ok(Object::List(left)), Ok(Object::List(right))) => {
                 EqualityFallback::Sequence(left.clone(), right.clone())
@@ -6551,6 +6555,13 @@ impl Vm {
                 "RecursionError",
                 "hash nesting limit exceeded",
             ));
+        }
+        if matches!(
+            self.heap.get(value),
+            Ok(Object::GenericAlias { .. } | Object::UnionType { .. })
+        ) {
+            let hash = self.heap.structural_hash(value)?;
+            return self.complete_hash(p, destination, hash as i64, action, output);
         }
         if let Some(call) = self.operator_method_call(value, "__hash__")? {
             if call.callable == Value::NONE {
@@ -8104,6 +8115,21 @@ impl Vm {
                     0,
                 )?;
                 Ok(Value::bool(result))
+            }
+            Builtin::TypeOr | Builtin::TypeRor => {
+                if count != 2 {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "type union operator expects two arguments",
+                    ));
+                }
+                let receiver = args.positional(&self.registers, 0);
+                let other = args.positional(&self.registers, 1);
+                if matches!(builtin, Builtin::TypeOr) {
+                    self.make_type_union(receiver, other)
+                } else {
+                    self.make_type_union(other, receiver)
+                }
             }
             Builtin::GetAttr
             | Builtin::SetAttr

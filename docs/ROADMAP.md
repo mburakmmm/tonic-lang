@@ -313,16 +313,21 @@ sonra alınır.
   varsayımıdır; annotation yazmayan kod tamamen dinamik kalır. Desteklenen bir
   annotation planı bulunan kod profil sıcaklığını beklemeden guarded typed-JIT
   yoluna aday olur; yanlış tipte çağrı generic Python yoluna deopt eder.
-  - [x] TypePlan v1 temeli: exact `None/bool/int/float/str`, plain container,
+  - [x] TypePlan v2 temeli: exact `None/bool/int/float/str`, plain container,
     nested homogeneous list/dict/set, fixed tuple, class identity/version,
-    canonical hash, deterministic rejection code ve annotation-dict content
-    mutation epoch'uyla lazy cache yenileme.
+    canonical PEP 604 union/optional, canonical hash, deterministic rejection
+    code ve annotation-dict content mutation epoch'uyla lazy cache yenileme.
   - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
     union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
     callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
-    deterministic “optimize edilmedi” nedeni. V1 temeli tamamlandı; union,
-    optional/literal/callable, variadic tuple, bytes ve buffer/dtype genişlemesi
-    açık.
+    deterministic “optimize edilmedi” nedeni. V2 exact/container/class ve PEP
+    604 union/optional temeli tamamlandı; `typing.Literal`/`Callable`, variadic
+    tuple, bytes ve buffer/dtype genişlemesi açık.
+    - [x] PEP 604 runtime/type-plan yolu: `A | B`/`T | None`, GenericAlias ve
+      user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
+      class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
+      equality/hash, `isinstance`/`issubclass` ve metaclass `__or__/__ror__`
+      önceliği. Union narrowing ve native typed-JIT lowering ayrı açık iştir.
   - [x] Function identity + code/execution + annotation-dict content/version
     guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
     version değişiminde cache invalidation veya atomik generic fallback. Eager

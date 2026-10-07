@@ -1303,6 +1303,8 @@ impl Heap {
                 | Builtin::TypeGetAttribute
                 | Builtin::TypeSetAttr
                 | Builtin::TypeDelAttr
+                | Builtin::TypeOr
+                | Builtin::TypeRor
                 | Builtin::ObjectInit
                 | Builtin::ObjectHash
                 | Builtin::IntHash
@@ -1577,7 +1579,7 @@ impl Heap {
                 _ => Err(missing(name)),
             };
         }
-        if let Ok(Object::GenericAlias { origin, args }) = self.get(owner) {
+        if let Ok(Object::GenericAlias { origin, args, .. }) = self.get(owner) {
             return match name {
                 "__origin__" => Ok(*origin),
                 "__args__" => Ok(*args),
@@ -1586,6 +1588,15 @@ impl Heap {
                 {
                     self.attr(*origin, name)
                 }
+                _ => Err(missing(name)),
+            };
+        }
+        if let Ok(Object::UnionType { class, members }) = self.get(owner) {
+            let class = *class;
+            let members = members.clone();
+            return match name {
+                "__args__" => self.alloc(Object::Tuple(members)),
+                "__origin__" => Ok(class),
                 _ => Err(missing(name)),
             };
         }

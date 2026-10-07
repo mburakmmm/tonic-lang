@@ -34,7 +34,8 @@ The current implementation includes:
   plus GC-traced function, module, class and variable annotations;
 - Python 3.12 generic functions/classes and `type` aliases with managed type
   parameters, lexical capture, introspection, class subscription protocols and
-  builtin/class generic aliases;
+  builtin/class generic aliases, plus canonical PEP 604 union objects and
+  annotation plans;
 - native set literals and sync/async set comprehensions with hash-aware
   membership, equality, iteration and collision handling;
 - structural `match`/`case` with guarded value, OR, sequence, mapping and class
@@ -173,7 +174,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 416 Rust tests and a differential corpus of
+The repository currently contains 417 Rust tests and a differential corpus of
 332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
