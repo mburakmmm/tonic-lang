@@ -9003,13 +9003,18 @@ impl Vm {
         code_id: usize,
         base: usize,
         caller: &AnnotationJitGuard,
-    ) -> (Vec<tonic_jit::DirectCall<'a>>, Vec<AnnotationCalleeGuard>) {
+    ) -> (
+        Vec<tonic_jit::DirectCall<'a>>,
+        Vec<AnnotationCalleeGuard>,
+        Vec<tonic_jit::GuardedCallResult>,
+    ) {
         if !self.jit_direct_call_inlining {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
         let code = &program.code[code_id];
         let mut calls = Vec::new();
         let mut dependencies = Vec::new();
+        let mut guarded_results = Vec::new();
         for (pc, instruction) in code.instructions.iter().copied().enumerate() {
             if Op::try_from(instruction.opcode) != Ok(Op::Call) {
                 continue;
@@ -9155,14 +9160,9 @@ impl Vm {
                     .collect(),
                 result: scalar_type(summary.result),
             };
-            if !tonic_jit::typed_return_is_proven(&program.code[target], &signature)
-                .unwrap_or(false)
-            {
-                continue;
-            }
             let immediate_parameters =
                 summary.parameters.iter().enumerate().all(|(index, kind)| {
-                    index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
+                    (index < dynamic_prefix && *kind == AnnotationScalar::Dynamic)
                         || matches!(
                             kind,
                             AnnotationScalar::Int
@@ -9173,6 +9173,33 @@ impl Vm {
                                 | AnnotationScalar::IntOrBool
                         )
                 });
+            let recursive_result = match summary.result {
+                AnnotationScalar::Int => Some(tonic_jit::ScalarType::Int),
+                AnnotationScalar::Bool => Some(tonic_jit::ScalarType::Bool),
+                AnnotationScalar::None => Some(tonic_jit::ScalarType::None),
+                AnnotationScalar::IntOrNone => Some(tonic_jit::ScalarType::IntOrNone),
+                AnnotationScalar::BoolOrNone => Some(tonic_jit::ScalarType::BoolOrNone),
+                AnnotationScalar::IntOrBool => Some(tonic_jit::ScalarType::IntOrBool),
+                AnnotationScalar::Dynamic
+                | AnnotationScalar::Float
+                | AnnotationScalar::Class { .. } => None,
+            };
+            if callee == caller.function
+                && target == code_id
+                && method_attr_pc.is_none()
+                && dynamic_prefix == 0
+                && immediate_parameters
+            {
+                if let Some(result) = recursive_result {
+                    guarded_results.push(tonic_jit::GuardedCallResult { pc, result });
+                    continue;
+                }
+            }
+            if !tonic_jit::typed_return_is_proven(&program.code[target], &signature)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let inlineable = tonic_jit::is_direct_call_inlineable(&program.code[target]);
             let scalar = match summary.result {
                 AnnotationScalar::Int
@@ -9252,7 +9279,7 @@ impl Vm {
                 });
             }
         }
-        (calls, dependencies)
+        (calls, dependencies, guarded_results)
     }
 
     fn jit_direct_call_profile_pending(&self, program: &Program, code_id: usize) -> bool {
@@ -9779,8 +9806,9 @@ impl Vm {
             }
             self.stats.jit_compile_attempts += 1;
             let mut direct_calls = self.jit_direct_calls(program, code_id);
+            let mut guarded_call_results = Vec::new();
             if let Some(annotation) = &mut annotation {
-                let (annotation_calls, dependencies) =
+                let (annotation_calls, dependencies, annotation_results) =
                     self.jit_annotation_direct_calls(program, code_id, base, annotation);
                 for call in annotation_calls {
                     if let Some(existing) = direct_calls.iter_mut().find(|item| item.pc == call.pc)
@@ -9791,6 +9819,7 @@ impl Vm {
                     }
                 }
                 annotation.callees = dependencies;
+                guarded_call_results = annotation_results;
             }
             let exact_float_parameters = annotation.as_ref().map_or_else(
                 || {
@@ -9842,12 +9871,13 @@ impl Vm {
                     value: self.constants[code_id][instruction.b as usize].raw(),
                 })
                 .collect::<Vec<_>>();
-            match tonic_jit::compile_with_execution_profile_and_types(
+            match tonic_jit::compile_with_execution_profile_types_and_call_results(
                 &program.code[code_id],
                 &direct_calls,
                 &materialized_constants,
                 &exact_float_parameters,
                 typed_signature.as_ref(),
+                &guarded_call_results,
             ) {
                 Ok(compiled) => {
                     let metadata = compiled.metadata();

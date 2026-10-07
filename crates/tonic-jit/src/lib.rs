@@ -362,6 +362,16 @@ pub struct DirectCall<'a> {
     pub result: Option<ScalarType>,
 }
 
+/// A call result supplied by an embedding runtime after the call itself takes
+/// the ordinary side-exit path. Generated code guards this fact when execution
+/// resumes at the following bytecode PC, so an advisory annotation can never
+/// turn into an unchecked runtime type assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardedCallResult {
+    pub pc: usize,
+    pub result: ScalarType,
+}
+
 /// Runtime-materialized value for a non-immediate CONST instruction. The word
 /// is an opaque logical handle rooted by the owning VM program, never a heap
 /// address.
@@ -983,6 +993,17 @@ pub fn typed_return_is_proven(
     code: &CodeObject,
     signature: &TypedSignature,
 ) -> Result<bool, Error> {
+    typed_return_is_proven_with_call_results(code, signature, &[])
+}
+
+/// Proves typed returns while importing results from calls that always execute
+/// through the generic VM boundary. Each imported result is guarded on native
+/// re-entry at the exact successor PC.
+pub fn typed_return_is_proven_with_call_results(
+    code: &CodeObject,
+    signature: &TypedSignature,
+    call_results: &[GuardedCallResult],
+) -> Result<bool, Error> {
     validate_structural_safety(code)?;
     if signature.parameters.len() != code.params as usize {
         return Err(Error::InvalidBytecode {
@@ -993,7 +1014,8 @@ pub fn typed_return_is_proven(
     if signature.result == ScalarType::Dynamic {
         return Ok(false);
     }
-    Ok(analyze_typed_scalar_execution(code, signature, &[])?.return_proven)
+    validate_guarded_call_results(code, &[], call_results)?;
+    Ok(analyze_typed_scalar_execution(code, signature, &[], call_results)?.return_proven)
 }
 
 pub fn compile_with_execution_profile_and_types(
@@ -1003,7 +1025,30 @@ pub fn compile_with_execution_profile_and_types(
     exact_float_parameters: &[u16],
     typed_signature: Option<&TypedSignature>,
 ) -> Result<CompiledFunction, Error> {
+    compile_with_execution_profile_types_and_call_results(
+        code,
+        direct_calls,
+        materialized_constants,
+        exact_float_parameters,
+        typed_signature,
+        &[],
+    )
+}
+
+pub fn compile_with_execution_profile_types_and_call_results(
+    code: &CodeObject,
+    direct_calls: &[DirectCall<'_>],
+    materialized_constants: &[MaterializedConstant],
+    exact_float_parameters: &[u16],
+    typed_signature: Option<&TypedSignature>,
+    call_results: &[GuardedCallResult],
+) -> Result<CompiledFunction, Error> {
     validate_structural_safety(code)?;
+    if typed_signature.is_none() && !call_results.is_empty() {
+        return Err(Error::Backend(
+            "guarded call results require a typed signature".into(),
+        ));
+    }
     for direct in direct_calls {
         validate_structural_safety(direct.target)?;
     }
@@ -1046,11 +1091,14 @@ pub fn compile_with_execution_profile_and_types(
         }
     }
     validate_direct_calls(code, direct_calls)?;
+    validate_guarded_call_results(code, direct_calls, call_results)?;
     validate_materialized_constants(code, materialized_constants)?;
     validate_supported(code, direct_calls, materialized_constants)?;
     let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
     let typed_scalar_analysis = typed_signature
-        .map(|signature| analyze_typed_scalar_execution(code, signature, direct_calls))
+        .map(|signature| {
+            analyze_typed_scalar_execution(code, signature, direct_calls, call_results)
+        })
         .transpose()?;
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
@@ -2051,7 +2099,8 @@ pub fn compile_with_execution_profile_and_types(
             typed_call_result_sites: direct_calls
                 .iter()
                 .filter(|call| call.result.is_some())
-                .count(),
+                .count()
+                + call_results.len(),
         },
     })
 }
@@ -2533,6 +2582,49 @@ fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> 
     Ok(())
 }
 
+fn validate_guarded_call_results(
+    code: &CodeObject,
+    direct_calls: &[DirectCall<'_>],
+    call_results: &[GuardedCallResult],
+) -> Result<(), Error> {
+    for (index, summary) in call_results.iter().enumerate() {
+        if matches!(summary.result, ScalarType::Dynamic | ScalarType::Float) {
+            return Err(Error::Backend(format!(
+                "guarded call result at bytecode PC {} must use an immediate scalar type",
+                summary.pc
+            )));
+        }
+        if call_results[..index]
+            .iter()
+            .any(|previous| previous.pc == summary.pc)
+        {
+            return Err(Error::Backend(format!(
+                "duplicate guarded call result at bytecode PC {}",
+                summary.pc
+            )));
+        }
+        let Some(instruction) = code.instructions.get(summary.pc) else {
+            return Err(Error::Backend(format!(
+                "guarded call result PC {} is outside the caller",
+                summary.pc
+            )));
+        };
+        if Op::try_from(instruction.opcode) != Ok(Op::Call) {
+            return Err(Error::Backend(format!(
+                "guarded call result PC {} is not an ordinary CALL",
+                summary.pc
+            )));
+        }
+        if direct_calls.iter().any(|direct| direct.pc == summary.pc) {
+            return Err(Error::Backend(format!(
+                "guarded and direct call results overlap at bytecode PC {}",
+                summary.pc
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A deliberately small, side-effect-free subset can be re-executed from the
 /// caller's CALL PC if a guard fails, which makes deoptimization atomic.
 pub fn is_direct_call_inlineable(code: &CodeObject) -> bool {
@@ -2798,6 +2890,7 @@ fn analyze_typed_scalar_execution(
     code: &CodeObject,
     signature: &TypedSignature,
     direct_calls: &[DirectCall<'_>],
+    call_results: &[GuardedCallResult],
 ) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
     let block_starts = typed_block_starts(code);
@@ -2890,10 +2983,16 @@ fn analyze_typed_scalar_execution(
             }
             Op::Is | Op::IsNot => after[instruction.a as usize] = ScalarFact::Bool,
             Op::Call => {
-                after[instruction.a as usize] = direct_calls
+                after[instruction.a as usize] = call_results
                     .iter()
-                    .find(|call| call.pc == pc)
-                    .and_then(|call| call.result)
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| summary.result)
+                    .or_else(|| {
+                        direct_calls
+                            .iter()
+                            .find(|call| call.pc == pc)
+                            .and_then(|call| call.result)
+                    })
                     .map_or(ScalarFact::Unknown, ScalarFact::from_signature);
             }
             Op::LoadGlobal | Op::Attr | Op::CallExpanded => {
@@ -4810,6 +4909,104 @@ mod tests {
             };
             assert_eq!(value, expected);
         }
+    }
+
+    #[test]
+    fn guarded_recursive_result_resumes_at_exact_pc() {
+        let program = function(
+            "def recurse(n):\n    if n <= 0:\n        return 0\n    return recurse(n-1)+1",
+        );
+        let program = program.program();
+        let code = &program.code[1];
+        let call_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("recursive call");
+        let call = code.instructions[call_pc];
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        let call_results = [GuardedCallResult {
+            pc: call_pc,
+            result: ScalarType::Int,
+        }];
+        assert!(compile_with_execution_profile_types_and_call_results(
+            code,
+            &[],
+            &[],
+            &[],
+            Some(&signature),
+            &[GuardedCallResult {
+                pc: call_pc,
+                result: ScalarType::Float,
+            }],
+        )
+        .is_err());
+        assert!(typed_return_is_proven_with_call_results(code, &signature, &call_results).unwrap());
+        let compiled = compile_with_execution_profile_types_and_call_results(
+            code,
+            &[],
+            &[],
+            &[],
+            Some(&signature),
+            &call_results,
+        )
+        .unwrap();
+        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert!(compiled.metadata().typed_return_proven);
+
+        let recursive_value = 0x1234_5678_u64;
+        let mut globals = vec![VALUE_UNBOUND; program.symbols.len()];
+        let recursive_symbol = program
+            .symbols
+            .iter()
+            .position(|symbol| symbol == "recurse")
+            .expect("recursive global");
+        globals[recursive_symbol] = recursive_value;
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = encode_i64(2);
+        let outcome = compiled
+            .run_from_with_globals(&mut registers, &globals, 0, &mut UnavailableRuntime)
+            .unwrap();
+        assert_eq!(outcome, Outcome::SideExit { pc: call_pc });
+
+        let mut valid_resume = registers.clone();
+        valid_resume[call.a as usize] = encode_i64(1);
+        let return_pc = code.instructions[call_pc + 1..]
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Return))
+            .map(|offset| call_pc + 1 + offset)
+            .expect("recursive return");
+        assert_eq!(
+            compiled
+                .run_from_with_globals(
+                    &mut valid_resume,
+                    &globals,
+                    call_pc + 1,
+                    &mut UnavailableRuntime,
+                )
+                .unwrap(),
+            Outcome::Returned {
+                value: encode_i64(2),
+                pc: return_pc,
+            }
+        );
+
+        let mut invalid_resume = registers;
+        invalid_resume[call.a as usize] = VALUE_TRUE as u64;
+        assert_eq!(
+            compiled
+                .run_from_with_globals(
+                    &mut invalid_resume,
+                    &globals,
+                    call_pc + 1,
+                    &mut UnavailableRuntime,
+                )
+                .unwrap(),
+            Outcome::Deopt { pc: call_pc + 1 }
+        );
     }
 
     #[test]

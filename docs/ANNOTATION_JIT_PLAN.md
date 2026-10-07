@@ -271,6 +271,15 @@ annotation planı değişirse dependency guard caller entry'yi invalid eder ve y
 plan body proof vermiyorsa union kenarı yeniden kurulmaz. Karar
 [ADR 0119](adr/0119-guarded-immediate-union-call-results.md) içindedir.
 
+Exact global self-recursion için sonuç özeti leaf inlining gerektirmez. Recursive
+`CALL` normal VM side-exit yolunda çalışır; child döndüğünde caller JIT tam
+successor PC'den yeniden girer ve annotated immediate scalar sonucu orada guard
+eder. Guard geçen sonuç native local/return akışına katılır. Yanlış return
+annotation'ı veya global rebinding, denetlenmemiş bir varsayım oluşturmaz: re-entry
+guard'ı exact PC'de generic yürütmeye döner. Bu ilk recursive kenar yalnız
+self-recursion içindir; karşılıklı recursion/SCC compilation unit'i açık iştir.
+Karar [ADR 0120](adr/0120-guarded-self-recursive-call-results.md) içindedir.
+
 İkinci kenar `Math.leaf(...)` biçiminde, `Math` exact global class olduğunda ve
 attribute plain class-level function ya da `staticmethod` olarak çözüldüğünde
 çalışır. Mevcut allocation-free `ATTR`+`CALL` fusion kullanılır fakat method

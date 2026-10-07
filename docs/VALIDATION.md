@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 31, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 32, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 143, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 426 test.
+native handles 5, language/runtime 144, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 428 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -129,6 +129,15 @@ fact'inin inlined CALL sonrasında caller aritmetiğine aktarıldığını doğr
 Runtime testi iki direct site/dört direct yürütmeyi, stress-GC çıktılarını ve
 callee return annotation mutasyonundan sonra caller invalidation + özetsiz
 recompile davranışını sayaçlarla kapsar.
+
+Self-recursive annotation testi `int -> int` üçgensel toplamı ilk çağrıda
+derler; her recursive `CALL` VM side-exit'ından döndüğünde sonuç successor PC'de
+guard edilir ve kalan toplama native devam eder. Public JIT testi doğru sonuçla
+resume edip native `RETURN` üretildiğini, `bool` enjekte edilen aynı resume
+noktasının exact-PC deopt ettiğini doğrular. Ayrı yalan `-> int`/`return True`
+recursive vaka Python sonucunu korur; parametre annotation mutasyonu compiled
+entry'yi invalid eder. Stress-GC koşusunda iki recursive summary, side-exit,
+return-proof ve guard-miss sayaçları birlikte doğrulanır.
 
 Annotated class-edge testleri exact global class üzerinden plain function ve
 `staticmethod` çağrılarını profil beklemeden fused `ATTR`+`CALL` planına alır.

@@ -3362,6 +3362,35 @@ fn annotation_jit_propagates_guarded_immediate_union_results() {
 }
 
 #[test]
+fn annotation_jit_guards_self_recursive_call_results() {
+    let source = concat!(
+        "def triangular(n:int)->int:\n",
+        "    if n <= 0:\n        return 0\n",
+        "    return triangular(n-1)+n\n",
+        "def lying(n:int)->int:\n",
+        "    if n <= 0:\n        return True\n",
+        "    return lying(n-1)\n",
+        "print(triangular(6))\n",
+        "print(lying(2))\n",
+        "triangular.__annotations__['n']=float\n",
+        "print(triangular(3))",
+    );
+    let program = compile(source, "annotation-jit-self-recursive-results").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"21\nTrue\n6\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 2);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+    assert!(vm.stats.jit_side_exits >= 8);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+}
+
+#[test]
 fn annotation_jit_rejects_unproven_direct_callee_result() {
     let source = concat!(
         "def lied(value:int)->int:\n    return True\n",
