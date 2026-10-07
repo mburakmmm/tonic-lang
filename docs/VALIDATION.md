@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 28, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 29, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 139, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 419 test.
+native handles 5, language/runtime 141, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 422 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -84,6 +84,14 @@ birleşimindeki `int`/`None` dönüşlerini tek optional fact altında kanıtlar
 Runtime testi üç fonksiyonu ilk çağrıda derler; `None`, exact scalar ve yanlış
 string argümanıyla advisory fallback davranışını allocation-stress GC altında
 ve return-guard elimination sayaçlarıyla doğrular.
+
+Optional branch-refinement testleri `x is None`, `None is x` ve `is not`
+biçimlerinin true/false CFG kenarlarını ayırır. Non-None dalında `int` aritmetiği
+typed guard-elision üretirken None dalı singleton fact'ini korur; iki dönüş de
+`int | None` olarak kanıtlanır. Ayrı safety vakası, optional değerin önce başka
+register'a kopyalanıp kaynak register'ın yeniden yazıldığı durumda stale alias'ın
+daraltılmadığını; `None + 1` işleminin native yanlış sonuç yerine normal
+`TypeError` verdiğini allocation-stress GC altında doğrular.
 
 PEP 604 union testi `int | str`, tekrar eleme, `T | None`, sıra-bağımsız equality/
 hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hatalı

@@ -37,6 +37,6 @@ Functions using `int | None` and `bool | None` parameters or returns can compile
 on the first matching call. Multi-path optional returns can eliminate the
 duplicate host return guard while preserving exact-PC deoptimization.
 
-This decision does not yet refine the original operand after `is None` or
+ADR 0117 subsequently refines the original optional operand after `is None` and
 `is not None`. General unions, float/object optionals, recursive union call
-summaries, and branch-local narrowing remain roadmap work.
+summaries, and non-identity narrowing remain roadmap work.

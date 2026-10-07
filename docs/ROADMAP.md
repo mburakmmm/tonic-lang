@@ -327,8 +327,8 @@ sonra alınır.
       user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
       class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
       equality/hash, `isinstance`/`issubclass` ve metaclass `__or__/__ror__`
-      önceliği. Immediate optional giriş/return lowering'i tamamlandı; genel
-      union branch narrowing ayrı açık iştir.
+      önceliği. Immediate optional giriş/return lowering'i ve None-identity
+      branch refinement tamamlandı; genel union branch narrowing açık iştir.
   - [x] Function identity + code/execution + annotation-dict content/version
     guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
     version değişiminde cache invalidation veya atomik generic fallback. Eager
@@ -353,8 +353,11 @@ sonra alınır.
         `Move` propagation'ı ve kanıtlı dönüşte host guard elimination.
       - [x] Canonical `int | None` ve `bool | None` imzaları: normal/arbitrary-PC
         tag-set guard'ı, control-flow birleşiminde optional fact, çoklu `RETURN`
-        kanıtı ve yanlış argümanda advisory generic fallback. `is None` sonrası
-        branch-local narrowing ile genel union üyeleri açık kalır.
+        kanıtı ve yanlış argümanda advisory generic fallback.
+      - [x] Optional identity branch refinement: `x is None`/`x is not None` ve
+        ters operand biçimleri için true/false edge fact'leri, saf `Move` alias
+        zinciri, non-None dalında exact scalar lowering ve stale-alias güvenlik
+        kapısı. Genel union üye/test narrowing'i açık kalır.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.

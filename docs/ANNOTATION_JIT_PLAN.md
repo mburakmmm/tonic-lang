@@ -223,9 +223,13 @@ kabul eder; başka bir tür annotation'ı zorunlu kontrole çevirmeden generic y
 gider. Control-flow birleşimi `int`/`None` ile `bool`/`None` yollarını kaybetmeden
 optional fact'e yükseltir ve bütün erişilebilir dönüşlerin union üyesi olduğu
 kanıtlanırsa host return guard kaldırılır. Optional fact aritmetik için exact
-`int`/`bool` sayılmaz; `is None` sonrasında branch-local refinement henüz açık
-olduğu için yanlış unboxing yapılmaz. Karar
-[ADR 0116](adr/0116-optional-immediate-union-jit.md) içindedir.
+`int`/`bool` sayılmaz. `x is None`, `x is not None` ve operandları ters yazılmış
+biçimler branch'in true/false kenarlarında optional fact'i singleton `None` ile
+exact scalar'a ayırır. Derleyicinin ürettiği saf `Move` zinciri kaynağa kadar
+izlenir; kopyadan sonra yeniden yazılmış bir kaynak stale alias olarak daraltılmaz.
+Genel union üye/test narrowing'i açık kalır. Immediate union kararı
+[ADR 0116](adr/0116-optional-immediate-union-jit.md), identity refinement ayrıntısı
+[ADR 0117](adr/0117-optional-none-branch-refinement.md) içindedir.
 
 Overlay henüz raw `i64` register/çağrı ABI'si değildir: integer ve boolean
 değerler precise root buffer'da tagged `Value` olarak kalır ve işlem sınırında

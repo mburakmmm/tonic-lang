@@ -3070,6 +3070,52 @@ fn annotation_jit_compiles_optional_immediate_unions_on_first_call() {
 }
 
 #[test]
+fn annotation_jit_refines_optional_int_after_none_identity_test() {
+    let source = concat!(
+        "def inc(value:int|None)->int|None:\n",
+        "    if value is None:\n        return None\n    return value+1\n",
+        "def bump(value:int|None)->int|None:\n",
+        "    if None is not value:\n        return value+1\n    return None\n",
+        "print(inc(True))\n",
+        "print(inc(None),inc(2))\n",
+        "print(bump(None),bump(4))",
+    );
+    let program = compile(source, "annotation-jit-optional-refinement").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"2\nNone 3\nNone 5\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_compiled, 2);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_typed_int_guard_elisions >= 4);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+}
+
+#[test]
+fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
+    let source = concat!(
+        "def unsafe(value:int|None,other:int|None)->int:\n",
+        "    saved=value\n    value=other\n",
+        "    if saved is None:\n        return 0\n    return value+1\n",
+        "try:\n    print(unsafe(1,None))\n",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+        "print(unsafe(None,None))",
+    );
+    let program = compile(source, "annotation-jit-optional-stale-alias").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"TypeError\n0\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 0);
+}
+
+#[test]
 fn pep604_unions_are_canonical_and_preserve_metaclass_protocols() {
     let source = concat!(
         "import types\n",

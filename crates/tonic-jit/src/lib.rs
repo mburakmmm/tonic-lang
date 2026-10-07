@@ -441,6 +441,116 @@ impl ScalarFact {
     }
 }
 
+fn typed_block_starts(code: &CodeObject) -> Vec<bool> {
+    let mut starts = vec![false; code.instructions.len()];
+    if let Some(first) = starts.first_mut() {
+        *first = true;
+    }
+    for (pc, instruction) in code.instructions.iter().copied().enumerate() {
+        let Ok(op) = Op::try_from(instruction.opcode) else {
+            continue;
+        };
+        match op {
+            Op::Jump => starts[instruction.a as usize] = true,
+            Op::JumpFalse | Op::JumpTrue => {
+                starts[instruction.b as usize] = true;
+                if let Some(fallthrough) = starts.get_mut(pc + 1) {
+                    *fallthrough = true;
+                }
+            }
+            Op::Return => {
+                if let Some(fallthrough) = starts.get_mut(pc + 1) {
+                    *fallthrough = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    starts
+}
+
+fn refine_optional_identity_branch(
+    code: &CodeObject,
+    block_starts: &[bool],
+    branch_pc: usize,
+    condition: u16,
+    state: &[ScalarFact],
+) -> Option<(Vec<ScalarFact>, Vec<ScalarFact>)> {
+    let block_start = block_starts[..=branch_pc]
+        .iter()
+        .rposition(|start| *start)?;
+    let (comparison_pc, comparison, comparison_op) = code.instructions[block_start..branch_pc]
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find_map(|(offset, instruction)| {
+            (instruction.a == condition).then(|| {
+                let op = Op::try_from(instruction.opcode).ok()?;
+                Some((block_start + offset, instruction, op))
+            })?
+        })?;
+    if !matches!(comparison_op, Op::Is | Op::IsNot) {
+        return None;
+    }
+    let left = state[comparison.b as usize];
+    let right = state[comparison.c as usize];
+    let (optional_register, optional_fact) = match (left, right) {
+        (ScalarFact::None, fact @ (ScalarFact::IntOrNone | ScalarFact::BoolOrNone)) => {
+            (comparison.c, fact)
+        }
+        (fact @ (ScalarFact::IntOrNone | ScalarFact::BoolOrNone), ScalarFact::None) => {
+            (comparison.b, fact)
+        }
+        _ => return None,
+    };
+    let non_none = match optional_fact {
+        ScalarFact::IntOrNone => ScalarFact::Int,
+        ScalarFact::BoolOrNone => ScalarFact::Bool,
+        _ => unreachable!(),
+    };
+    let mut aliases = vec![optional_register];
+    let mut register = optional_register;
+    let mut before_pc = comparison_pc;
+    while aliases.len() <= state.len() {
+        let writer = code.instructions[block_start..before_pc]
+            .iter()
+            .copied()
+            .enumerate()
+            .rev()
+            .find(|(_, instruction)| instruction.a == register);
+        let Some((offset, writer)) = writer else {
+            break;
+        };
+        if Op::try_from(writer.opcode) != Ok(Op::Move) || aliases.contains(&writer.b) {
+            break;
+        }
+        let writer_pc = block_start + offset;
+        if code.instructions[writer_pc + 1..comparison_pc]
+            .iter()
+            .any(|instruction| instruction.a == writer.b)
+        {
+            break;
+        }
+        register = writer.b;
+        aliases.push(register);
+        before_pc = writer_pc;
+    }
+    let mut is_true = state.to_vec();
+    let mut is_false = state.to_vec();
+    for register in aliases {
+        let slot = register as usize;
+        if state[slot] == optional_fact {
+            is_true[slot] = ScalarFact::None;
+            is_false[slot] = non_none;
+        }
+    }
+    if comparison_op == Op::IsNot {
+        std::mem::swap(&mut is_true, &mut is_false);
+    }
+    Some((is_true, is_false))
+}
+
 struct TypedScalarAnalysis {
     before: Vec<Option<Vec<ScalarFact>>>,
     int_guard_elisions: usize,
@@ -2679,6 +2789,7 @@ fn analyze_typed_scalar_execution(
     direct_calls: &[DirectCall<'_>],
 ) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
+    let block_starts = typed_block_starts(code);
     let mut initial = vec![ScalarFact::Unknown; code.registers as usize];
     for (register, kind) in signature.parameters.iter().enumerate() {
         initial[register] = ScalarFact::from_signature(*kind);
@@ -2789,22 +2900,32 @@ fn analyze_typed_scalar_execution(
         let mut successors = [None, None];
         match op {
             Op::Return => {}
-            Op::Jump => successors[0] = Some(instruction.a as usize),
+            Op::Jump => successors[0] = Some((instruction.a as usize, after)),
             Op::JumpFalse | Op::JumpTrue => {
-                successors[0] = Some(instruction.b as usize);
-                successors[1] = (pc + 1 < code.instructions.len()).then_some(pc + 1);
+                let (is_true, is_false) =
+                    refine_optional_identity_branch(code, &block_starts, pc, instruction.a, &after)
+                        .unwrap_or_else(|| (after.clone(), after));
+                let (target, fallthrough) = if op == Op::JumpTrue {
+                    (is_true, is_false)
+                } else {
+                    (is_false, is_true)
+                };
+                successors[0] = Some((instruction.b as usize, target));
+                successors[1] = (pc + 1 < code.instructions.len()).then_some((pc + 1, fallthrough));
             }
-            _ => successors[0] = (pc + 1 < code.instructions.len()).then_some(pc + 1),
+            _ => {
+                successors[0] = (pc + 1 < code.instructions.len()).then_some((pc + 1, after));
+            }
         }
-        for successor in successors.into_iter().flatten() {
+        for (successor, incoming_state) in successors.into_iter().flatten() {
             let changed = match &mut before[successor] {
                 None => {
-                    before[successor] = Some(after.clone());
+                    before[successor] = Some(incoming_state);
                     true
                 }
                 Some(existing) => {
                     let mut changed = false;
-                    for (known, incoming) in existing.iter_mut().zip(&after) {
+                    for (known, incoming) in existing.iter_mut().zip(&incoming_state) {
                         let merged = known.merge(*incoming);
                         changed |= merged != *known;
                         *known = merged;
@@ -4518,6 +4639,35 @@ mod tests {
                 panic!("optional return function unexpectedly deoptimized");
             };
             assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
+    fn typed_optional_identity_test_refines_non_none_branch() {
+        for source in [
+            "def inc(value):\n    if value is None:\n        return None\n    return value+1",
+            "def inc(value):\n    if None is not value:\n        return value+1\n    return None",
+        ] {
+            let program = function(source);
+            let code = &program.program().code[1];
+            let signature = TypedSignature {
+                parameters: vec![ScalarType::IntOrNone],
+                result: ScalarType::IntOrNone,
+            };
+            let compiled =
+                compile_with_execution_profile_and_types(code, &[], &[], &[], Some(&signature))
+                    .unwrap();
+            assert!(compiled.metadata().typed_return_proven);
+            assert!(compiled.metadata().typed_int_guard_elisions >= 2);
+
+            for (argument, expected) in [(VALUE_NONE, VALUE_NONE), (encode_i64(2), encode_i64(3))] {
+                let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+                registers[0] = argument;
+                let Outcome::Returned { value, .. } = compiled.run(&mut registers).unwrap() else {
+                    panic!("refined optional function unexpectedly deoptimized");
+                };
+                assert_eq!(value, expected);
+            }
         }
     }
 
