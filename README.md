@@ -72,7 +72,7 @@ The current implementation includes:
   including first-call annotation-guided `int`, `float`, `bool`, `None`,
   `int | None`, `bool | None`, and `int | bool` entries, plus None-identity
   branch refinement, guarded immediate-union call summaries, and exact-PC
-  guarded self-recursive results with advisory generic fallback;
+  guarded recursive/SCC and non-inline method results with advisory fallback;
 - a versioned opaque C ABI, persistent handles, callbacks, typed zero-copy buffers and foreign-object tracing;
 - an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.

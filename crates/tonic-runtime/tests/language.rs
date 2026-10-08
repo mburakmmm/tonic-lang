@@ -3231,20 +3231,20 @@ fn annotation_jit_class_function_guard_observes_rebinding() {
 }
 
 #[test]
-fn annotation_jit_rejects_unproven_class_function_result() {
+fn annotation_jit_guards_unproven_class_function_result() {
     let source = concat!(
         "class Bad:\n",
         "    def lied(value:int)->int:\n        return True\n",
         "def caller(value:int)->int:\n    return Bad.lied(value)+1\n",
         "print(caller(20))",
     );
-    let program = compile(source, "annotation-jit-class-result-rejection").unwrap();
+    let program = compile(source, "annotation-jit-class-result-guard").unwrap();
     let mut vm = Vm::new().unwrap();
     vm.execution_mode = ExecutionMode::Jit;
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"2\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 0);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 0);
     assert_eq!(vm.stats.jit_direct_calls, 0);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -3391,19 +3391,77 @@ fn annotation_jit_guards_self_recursive_call_results() {
 }
 
 #[test]
-fn annotation_jit_rejects_unproven_direct_callee_result() {
+fn annotation_jit_guards_mutual_recursive_call_results() {
+    let source = concat!(
+        "def even(n:int)->bool:\n",
+        "    if n <= 0:\n        return True\n",
+        "    return odd(n-1)\n",
+        "def odd(n:int)->bool:\n",
+        "    if n <= 0:\n        return False\n",
+        "    return even(n-1)\n",
+        "print(even(10),odd(10))\n",
+        "odd.__annotations__['return']=int\n",
+        "print(even(3))",
+    );
+    let program = compile(source, "annotation-jit-mutual-recursive-results").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"True False\nFalse\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 4);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 4);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+    assert!(vm.stats.jit_side_exits >= 20);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+}
+
+#[test]
+fn annotation_jit_guards_non_inline_method_results() {
+    let source = concat!(
+        "class Calculator:\n",
+        "    def adjust(self,value:int)->int:\n",
+        "        if value < 0:\n            return -value\n",
+        "        return value+2\n",
+        "def use(owner:Calculator,value:int)->int:\n",
+        "    return owner.adjust(value)+1\n",
+        "calculator=Calculator()\n",
+        "print(use(calculator,4),use(calculator,-3))\n",
+        "Calculator.adjust.__annotations__['return']=bool\n",
+        "print(use(calculator,4))",
+    );
+    let program = compile(source, "annotation-jit-non-inline-method-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"7 4\n7\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+    assert_eq!(vm.stats.jit_direct_method_sites, 0);
+    assert!(vm.stats.jit_side_exits >= 4);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_annotation_invalidations >= 1);
+}
+
+#[test]
+fn annotation_jit_guards_unproven_direct_callee_result() {
     let source = concat!(
         "def lied(value:int)->int:\n    return True\n",
         "def caller(value:int)->int:\n    return lied(value)+1\n",
         "print(caller(20))",
     );
-    let program = compile(source, "annotation-jit-direct-result-rejection").unwrap();
+    let program = compile(source, "annotation-jit-direct-result-guard").unwrap();
     let mut vm = Vm::new().unwrap();
     vm.execution_mode = ExecutionMode::Jit;
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"2\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 0);
+    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_calls, 0);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
 }

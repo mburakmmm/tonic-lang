@@ -276,9 +276,17 @@ Exact global self-recursion için sonuç özeti leaf inlining gerektirmez. Recur
 successor PC'den yeniden girer ve annotated immediate scalar sonucu orada guard
 eder. Guard geçen sonuç native local/return akışına katılır. Yanlış return
 annotation'ı veya global rebinding, denetlenmemiş bir varsayım oluşturmaz: re-entry
-guard'ı exact PC'de generic yürütmeye döner. Bu ilk recursive kenar yalnız
-self-recursion içindir; karşılıklı recursion/SCC compilation unit'i açık iştir.
-Karar [ADR 0120](adr/0120-guarded-self-recursive-call-results.md) içindedir.
+guard'ı exact PC'de generic yürütmeye döner. Karar
+[ADR 0120](adr/0120-guarded-self-recursive-call-results.md) içindedir.
+
+Aynı guard-backed özet mutual-recursive/SCC kenarlarına ve direct leaf subset'ine
+girmeyen method gövdelerine genişletilmiştir. Generic `ATTR` ve `CALL` ayrı exact-PC
+side-exit'larda çalışır; dönüşten sonraki typed continuation yalnız callee'nin
+gerçek sonucu guard'ı geçerse yürür. Callee annotation planı caller dependency'si
+olur; mutation iki yönlü recursive caller'ları invalid eder. Bu, native recursive
+çağrı ABI'si veya SCC-wide codegen değildir; o compilation-unit optimizasyonu açık
+iş olarak kalır. Karar
+[ADR 0121](adr/0121-guarded-scc-and-method-results.md) içindedir.
 
 İkinci kenar `Math.leaf(...)` biçiminde, `Math` exact global class olduğunda ve
 attribute plain class-level function ya da `staticmethod` olarak çözüldüğünde

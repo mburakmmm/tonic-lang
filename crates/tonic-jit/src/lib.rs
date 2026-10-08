@@ -1093,7 +1093,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
     validate_direct_calls(code, direct_calls)?;
     validate_guarded_call_results(code, direct_calls, call_results)?;
     validate_materialized_constants(code, materialized_constants)?;
-    validate_supported(code, direct_calls, materialized_constants)?;
+    validate_supported(code, direct_calls, materialized_constants, call_results)?;
     let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
@@ -3146,6 +3146,7 @@ fn validate_supported(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
+    call_results: &[GuardedCallResult],
 ) -> Result<(), Error> {
     if code.class_body
         || code.generator
@@ -3227,6 +3228,14 @@ fn validate_supported(
                             matches!(Op::try_from(between.opcode), Ok(Op::Const | Op::Move))
                                 && between.a != instruction.a
                         }))
+            })
+            && !call_results.iter().any(|summary| {
+                summary.pc > pc
+                    && code.instructions[summary.pc].b == instruction.a
+                    && code.instructions[pc + 1..summary.pc].iter().all(|between| {
+                        matches!(Op::try_from(between.opcode), Ok(Op::Const | Op::Move))
+                            && between.a != instruction.a
+                    })
             })
         {
             return Err(unsupported(
@@ -5582,6 +5591,74 @@ mod tests {
             Outcome::SideExit { pc: attr_pc }
         );
         assert!(compiled.metadata().resumable);
+    }
+
+    #[test]
+    fn guarded_method_result_resumes_after_generic_attr_and_call() {
+        let program = function("def caller(owner,value):\n    return owner.adjust(value)+1");
+        let code = &program.program().code[1];
+        let attr_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Attr))
+            .expect("method attribute");
+        let call_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("method call");
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Dynamic, ScalarType::Int],
+            result: ScalarType::Int,
+        };
+        let compiled = compile_with_execution_profile_types_and_call_results(
+            code,
+            &[],
+            &[],
+            &[],
+            Some(&signature),
+            &[GuardedCallResult {
+                pc: call_pc,
+                result: ScalarType::Int,
+            }],
+        )
+        .unwrap();
+        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert!(compiled.metadata().typed_return_proven);
+
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = 0x2222_2220;
+        registers[1] = encode_i64(4);
+        assert_eq!(
+            compiled.run(&mut registers).unwrap(),
+            Outcome::SideExit { pc: attr_pc }
+        );
+
+        let attr = code.instructions[attr_pc];
+        registers[attr.a as usize] = 0x3333_3330;
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, attr_pc + 1, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::SideExit { pc: call_pc }
+        );
+
+        let call = code.instructions[call_pc];
+        registers[call.a as usize] = encode_i64(5);
+        let return_pc = code.instructions[call_pc + 1..]
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Return))
+            .map(|offset| call_pc + 1 + offset)
+            .expect("caller return");
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, call_pc + 1, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::Returned {
+                value: encode_i64(6),
+                pc: return_pc,
+            }
+        );
     }
 
     #[test]

@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 32, runtime unit 26,
+Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 33, runtime unit 26,
 direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 144, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 428 test.
+native handles 5, language/runtime 146, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 431 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -138,6 +138,16 @@ noktasının exact-PC deopt ettiğini doğrular. Ayrı yalan `-> int`/`return Tr
 recursive vaka Python sonucunu korur; parametre annotation mutasyonu compiled
 entry'yi invalid eder. Stress-GC koşusunda iki recursive summary, side-exit,
 return-proof ve guard-miss sayaçları birlikte doğrulanır.
+
+Mutual-recursion testi `even`/`odd` SCC'sinin iki yönündeki `bool` sonuçlarını
+generic call side-exit sonrasında guard edip native return akışına taşır. Bir
+callee return annotation mutasyonu iki compiled planı invalid eder; yeniden
+derlenen advisory planlar ve exact-PC deopt Python çıktısını korur. Non-inline
+method testi branch içeren annotated method gövdesini inline etmeden generic
+`ATTR` ve `CALL` ile yürütür, sonucu caller aritmetiğine guarded olarak aktarır
+ve method annotation mutasyonunda caller'ı invalid eder. Public JIT testi aynı
+generic attribute/call zincirinin iki ayrı side-exit'tan sonra typed successor'a
+dönebildiğini doğrular.
 
 Annotated class-edge testleri exact global class üzerinden plain function ve
 `staticmethod` çağrılarını profil beklemeden fused `ATTR`+`CALL` planına alır.

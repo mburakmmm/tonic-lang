@@ -9173,7 +9173,7 @@ impl Vm {
                                 | AnnotationScalar::IntOrBool
                         )
                 });
-            let recursive_result = match summary.result {
+            let guarded_result = match summary.result {
                 AnnotationScalar::Int => Some(tonic_jit::ScalarType::Int),
                 AnnotationScalar::Bool => Some(tonic_jit::ScalarType::Bool),
                 AnnotationScalar::None => Some(tonic_jit::ScalarType::None),
@@ -9184,55 +9184,51 @@ impl Vm {
                 | AnnotationScalar::Float
                 | AnnotationScalar::Class { .. } => None,
             };
-            if callee == caller.function
-                && target == code_id
-                && method_attr_pc.is_none()
-                && dynamic_prefix == 0
-                && immediate_parameters
-            {
-                if let Some(result) = recursive_result {
-                    guarded_results.push(tonic_jit::GuardedCallResult { pc, result });
-                    continue;
-                }
-            }
-            if !tonic_jit::typed_return_is_proven(&program.code[target], &signature)
-                .unwrap_or(false)
-            {
-                continue;
-            }
+            let return_proven =
+                tonic_jit::typed_return_is_proven(&program.code[target], &signature)
+                    .unwrap_or(false);
             let inlineable = tonic_jit::is_direct_call_inlineable(&program.code[target]);
             let scalar = match summary.result {
                 AnnotationScalar::Int
-                    if summary.parameters.iter().enumerate().all(|(index, kind)| {
-                        *kind == AnnotationScalar::Int
-                            || index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
-                    }) && inlineable =>
+                    if return_proven
+                        && summary.parameters.iter().enumerate().all(|(index, kind)| {
+                            *kind == AnnotationScalar::Int
+                                || index < dynamic_prefix && *kind == AnnotationScalar::Dynamic
+                        })
+                        && inlineable =>
                 {
-                    tonic_jit::ScalarType::Int
+                    Some(tonic_jit::ScalarType::Int)
                 }
                 AnnotationScalar::Float
-                    if summary
-                        .parameters
-                        .iter()
-                        .all(|kind| *kind == AnnotationScalar::Float)
+                    if return_proven
+                        && summary
+                            .parameters
+                            .iter()
+                            .all(|kind| *kind == AnnotationScalar::Float)
                         && tonic_jit::is_direct_float_leaf_inlineable(&program.code[target]) =>
                 {
-                    tonic_jit::ScalarType::Float
+                    Some(tonic_jit::ScalarType::Float)
                 }
-                AnnotationScalar::Bool if immediate_parameters && inlineable => {
-                    tonic_jit::ScalarType::Bool
+                AnnotationScalar::Bool if return_proven && immediate_parameters && inlineable => {
+                    Some(tonic_jit::ScalarType::Bool)
                 }
-                AnnotationScalar::None if immediate_parameters && inlineable => {
-                    tonic_jit::ScalarType::None
+                AnnotationScalar::None if return_proven && immediate_parameters && inlineable => {
+                    Some(tonic_jit::ScalarType::None)
                 }
-                AnnotationScalar::IntOrNone if immediate_parameters && inlineable => {
-                    tonic_jit::ScalarType::IntOrNone
+                AnnotationScalar::IntOrNone
+                    if return_proven && immediate_parameters && inlineable =>
+                {
+                    Some(tonic_jit::ScalarType::IntOrNone)
                 }
-                AnnotationScalar::BoolOrNone if immediate_parameters && inlineable => {
-                    tonic_jit::ScalarType::BoolOrNone
+                AnnotationScalar::BoolOrNone
+                    if return_proven && immediate_parameters && inlineable =>
+                {
+                    Some(tonic_jit::ScalarType::BoolOrNone)
                 }
-                AnnotationScalar::IntOrBool if immediate_parameters && inlineable => {
-                    tonic_jit::ScalarType::IntOrBool
+                AnnotationScalar::IntOrBool
+                    if return_proven && immediate_parameters && inlineable =>
+                {
+                    Some(tonic_jit::ScalarType::IntOrBool)
                 }
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Int
@@ -9242,9 +9238,31 @@ impl Vm {
                 | AnnotationScalar::IntOrNone
                 | AnnotationScalar::BoolOrNone
                 | AnnotationScalar::IntOrBool
-                | AnnotationScalar::Class { .. } => {
-                    continue;
+                | AnnotationScalar::Class { .. } => None,
+            };
+            let Some(scalar) = scalar else {
+                if immediate_parameters {
+                    if let Some(result) = guarded_result {
+                        guarded_results.push(tonic_jit::GuardedCallResult { pc, result });
+                        if callee != caller.function
+                            && !dependencies
+                                .iter()
+                                .any(|dependency: &AnnotationCalleeGuard| {
+                                    dependency.function == callee
+                                })
+                        {
+                            dependencies.push(AnnotationCalleeGuard {
+                                function: summary.function,
+                                code: summary.code,
+                                execution: summary.execution,
+                                annotations: summary.annotations,
+                                annotation_version: summary.annotation_version,
+                                canonical_hash: summary.canonical_hash,
+                            });
+                        }
+                    }
                 }
+                continue;
             };
             let float = scalar == tonic_jit::ScalarType::Float
                 && method_attr_pc.is_none()
@@ -9810,6 +9828,8 @@ impl Vm {
             if let Some(annotation) = &mut annotation {
                 let (annotation_calls, dependencies, annotation_results) =
                     self.jit_annotation_direct_calls(program, code_id, base, annotation);
+                direct_calls
+                    .retain(|call| !annotation_results.iter().any(|result| result.pc == call.pc));
                 for call in annotation_calls {
                     if let Some(existing) = direct_calls.iter_mut().find(|item| item.pc == call.pc)
                     {

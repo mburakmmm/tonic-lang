@@ -368,11 +368,15 @@ sonra alınır.
         propagation: callee return bytecode proof'u, function/code/execution/
         annotation dependency invalidation'ı, first-call direct inline ve caller
         return proof zinciri; exact `bool`/`None` ile immediate union result
-        propagation'ı; yalan callee annotation'ında özet reddi.
-      - [ ] Recursive/method call-result özetleri.
+        propagation'ı; kanıtlanamayan/yalan callee dönüşünde generic çağrı ve
+        successor-PC sonuç guard'ı.
+      - [x] Recursive/method call-result özetleri.
         - [x] Exact global self-recursion için side-exit sonrası guarded result
           propagation: generic VM çağrısı, successor-PC native re-entry guard'ı,
           recursive return proof ve yalan annotation'da exact-PC fallback.
+        - [x] Mutual-recursive/SCC kenarları ve non-inline method gövdeleri:
+          generic `ATTR`/`CALL` side-exit, guarded successor resume, callee plan
+          dependency invalidation'ı ve yanlış result'ta advisory fallback.
         - [x] Exact global class owner üzerinden plain function/`staticmethod`
           leaf: profil beklemeden `ATTR`+`CALL` fusion, callee annotation/return
           proof dependency'si, binding-kind/exact-function guard'ı ve class
@@ -432,8 +436,11 @@ sonra alınır.
     - [x] Immediate scalar sonuçlu exact self-recursive edge: generic call
       side-exit, guarded arbitrary-PC resume, native caller continuation'ı ve
       annotation mutation/yanlış-result fallback'i.
-    - [ ] Recursion/SCC, annotated field/shape kenarları ve graph-wide inline/
-      code-size bütçesi.
+    - [x] Mutual-recursive/SCC ve non-inline method result kenarları: gerçek VM
+      çağrı semantiği, successor-PC result guard'ı ve iki yönlü annotation-plan
+      invalidation'ı.
+    - [ ] Native recursive/SCC compilation unit'i, annotated field/shape
+      kenarları ve graph-wide inline/code-size bütçesi.
   - [ ] Kısmi statik sınıf yolu: annotated fields için shape slot planı,
     constructor definite-assignment analizi, descriptor/metaclass mutation
     guard'ı ve dinamik attribute fallback'i.
