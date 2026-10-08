@@ -1722,6 +1722,46 @@ fn function_annotations_evaluate_and_survive_jit_and_stress_gc() {
 }
 
 #[test]
+fn typing_literal_preserves_runtime_identity_and_routes_numeric_jit_guards() {
+    let source = concat!(
+        "import typing\n",
+        "from typing import Literal\n",
+        "A=Literal[1,True,None,'x',...,1]\n",
+        "B=Literal[True,...,'x',1,None]\n",
+        "Nested=Literal[Literal[1],True]\n",
+        "print(Literal,type(Literal).__name__)\n",
+        "print(A,A.__origin__ is Literal,A.__args__)\n",
+        "print(A==B,Literal[1]==Literal[True],hash(A)==hash(B),{A:'ok'}[B])\n",
+        "print(Nested,Nested.__args__)\n",
+        "def add(value:Literal[1])->Literal[2]:\n    return value+1\n",
+        "print(add(1),add(4))",
+    );
+    let program = compile(source, "typing-literal").unwrap();
+    let expected = concat!(
+        "typing.Literal _TypedCacheSpecialForm\n",
+        "typing.Literal[1, True, None, 'x', ...] True (1, True, None, 'x', Ellipsis)\n",
+        "True False True ok\n",
+        "typing.Literal[1, True] (1, True)\n",
+        "2 5\n",
+    )
+    .as_bytes();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, expected);
+        if mode == ExecutionMode::Jit {
+            assert_eq!(vm.stats.jit_annotation_compiled, 1);
+            assert_eq!(vm.stats.jit_compiled, 1);
+            assert_eq!(vm.stats.jit_calls, 2);
+            assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+        }
+    }
+}
+
+#[test]
 fn variable_annotations_obey_scope_order_and_survive_jit_and_stress_gc() {
     let source = "def annotation():\n    print('annotation')\n    return int\nvalue: annotation() = 1\nmissing: str\nif False:\n    dead: float\ndef owner():\n    print('owner')\n    return {}\ndef key():\n    print('key')\n    return 0\nowner()[key()]: print('ignored')\nbox={}\nbox['item']: print('ignored') = 3\ndef build():\n    class Marker:\n        pass\n    class Holder:\n        item: Marker\n        absent: str\n    return Holder\nHolder=build()\ndef local_ok():\n    hidden: missing_name\n    return 7\ndef local_missing():\n    hidden: int\n    return hidden\nprint(value,__annotations__)\nprint(box)\nprint(Holder.__annotations__['item'].__name__,Holder.__annotations__['absent'].__name__)\nprint(local_ok())\ntry:\n    local_missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
     let program = compile(source, "variable-annotations").unwrap();

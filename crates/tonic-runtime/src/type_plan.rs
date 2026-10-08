@@ -1,10 +1,10 @@
 use crate::{
-    heap::{Heap, Object},
+    heap::{Heap, Object, TypingFormKind},
     value::Value,
 };
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 3;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 4;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +18,7 @@ pub(crate) struct TypePlanBuiltins {
     pub tuple: Value,
     pub dict: Value,
     pub set: Value,
+    pub literal: Value,
 }
 
 #[repr(u8)]
@@ -35,6 +36,15 @@ pub enum ExactTypePlan {
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum LiteralTypePlan {
+    None,
+    Bool(bool),
+    Int(String),
+    Str(String),
+    Ellipsis,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum TypePlan {
     None,
     Exact(ExactTypePlan),
@@ -43,6 +53,7 @@ pub enum TypePlan {
     Set(Box<TypePlan>),
     FixedTuple(Vec<TypePlan>),
     VariadicTuple(Box<TypePlan>),
+    Literal(Vec<LiteralTypePlan>),
     Union(Vec<TypePlan>),
     Class { type_id: u32, version: u64 },
 }
@@ -162,6 +173,18 @@ fn plan_bytes(plan: &Result<TypePlan, TypePlanRejection>) -> usize {
             TypePlan::FixedTuple(items) | TypePlan::Union(items) => {
                 items.capacity() * std::mem::size_of::<TypePlan>()
                     + items.iter().map(nested).sum::<usize>()
+            }
+            TypePlan::Literal(items) => {
+                items.capacity() * std::mem::size_of::<LiteralTypePlan>()
+                    + items
+                        .iter()
+                        .map(|item| match item {
+                            LiteralTypePlan::Int(value) | LiteralTypePlan::Str(value) => {
+                                value.capacity()
+                            }
+                            _ => 0,
+                        })
+                        .sum::<usize>()
             }
             _ => 0,
         }
@@ -324,6 +347,9 @@ fn resolve_generic_alias(
     let Ok(Object::Tuple(arguments)) = heap.get(args) else {
         return Err(TypePlanRejection::InvalidGenericArity);
     };
+    if origin == builtins.literal {
+        return canonical_literal_arguments(heap, args).map(TypePlan::Literal);
+    }
     if origin == builtins.list || origin == builtins.set {
         if arguments.len() != 1 {
             return Err(TypePlanRejection::InvalidGenericArity);
@@ -484,10 +510,105 @@ impl CanonicalHash {
                 self.u8(8);
                 self.plan(item);
             }
+            TypePlan::Literal(items) => {
+                self.u8(9);
+                self.u64(items.len() as u64);
+                for item in items {
+                    match item {
+                        LiteralTypePlan::None => self.u8(0),
+                        LiteralTypePlan::Bool(value) => {
+                            self.u8(1);
+                            self.u8(u8::from(*value));
+                        }
+                        LiteralTypePlan::Int(value) => {
+                            self.u8(2);
+                            self.string(value);
+                        }
+                        LiteralTypePlan::Str(value) => {
+                            self.u8(3);
+                            self.string(value);
+                        }
+                        LiteralTypePlan::Ellipsis => self.u8(4),
+                    }
+                }
+            }
         }
     }
 
     const fn finish(self) -> u64 {
         self.0
     }
+}
+
+pub(crate) fn literal_type_plan(
+    heap: &Heap,
+    value: Value,
+) -> Result<LiteralTypePlan, TypePlanRejection> {
+    if value == Value::NONE {
+        return Ok(LiteralTypePlan::None);
+    }
+    if let Some(value) = value.as_bool() {
+        return Ok(LiteralTypePlan::Bool(value));
+    }
+    if let Some(value) = value.as_int() {
+        return Ok(LiteralTypePlan::Int(value.to_string()));
+    }
+    if value == Value::ELLIPSIS {
+        return Ok(LiteralTypePlan::Ellipsis);
+    }
+    match heap.get(value) {
+        Ok(Object::Int(value)) => Ok(LiteralTypePlan::Int(value.to_string())),
+        Ok(Object::Str(value)) => Ok(LiteralTypePlan::Str(value.clone())),
+        _ => Err(TypePlanRejection::UnsupportedValue),
+    }
+}
+
+pub(crate) fn canonical_literal_arguments(
+    heap: &Heap,
+    args: Value,
+) -> Result<Vec<LiteralTypePlan>, TypePlanRejection> {
+    fn append(
+        heap: &Heap,
+        args: Value,
+        depth: usize,
+        items: &mut Vec<LiteralTypePlan>,
+    ) -> Result<(), TypePlanRejection> {
+        if depth >= MAX_TYPE_PLAN_DEPTH {
+            return Err(TypePlanRejection::RecursionLimit);
+        }
+        let Ok(Object::Tuple(arguments)) = heap.get(args) else {
+            return Err(TypePlanRejection::InvalidGenericArity);
+        };
+        if arguments.is_empty() {
+            return Err(TypePlanRejection::InvalidGenericArity);
+        }
+        for argument in arguments {
+            let nested_args = match heap.get(*argument) {
+                Ok(Object::GenericAlias { origin, args, .. })
+                    if matches!(
+                        heap.get(*origin),
+                        Ok(Object::TypingForm {
+                            kind: TypingFormKind::Literal,
+                            ..
+                        })
+                    ) =>
+                {
+                    Some(*args)
+                }
+                _ => None,
+            };
+            if let Some(nested_args) = nested_args {
+                append(heap, nested_args, depth + 1, items)?;
+            } else {
+                items.push(literal_type_plan(heap, *argument)?);
+            }
+        }
+        Ok(())
+    }
+
+    let mut items = Vec::new();
+    append(heap, args, 0, &mut items)?;
+    items.sort_unstable();
+    items.dedup();
+    Ok(items)
 }

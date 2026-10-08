@@ -299,6 +299,10 @@ pub(crate) enum Object {
         default: Value,
     },
     TypeNoDefault,
+    TypingForm {
+        class: Value,
+        kind: TypingFormKind,
+    },
     TypeUnpack(Value),
     TypeAlias {
         name: String,
@@ -376,6 +380,11 @@ pub(crate) enum Object {
         step: i128,
     },
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TypingFormKind {
+    Literal,
+}
 impl Object {
     pub(crate) fn instance_class(&self) -> Option<Value> {
         match self {
@@ -390,6 +399,7 @@ impl Object {
             | Self::AsyncEventLoop { class, .. }
             | Self::CallIterator { class, .. }
             | Self::SequenceIterator { class, .. }
+            | Self::TypingForm { class, .. }
             | Self::GenericAlias { class, .. }
             | Self::UnionType { class, .. } => Some(*class),
             _ => None,
@@ -514,6 +524,7 @@ impl Object {
                 bound.iter().copied().for_each(&mut visit);
                 visit(*default);
             }
+            Self::TypingForm { class, .. } => visit(*class),
             Self::TypeUnpack(value) => visit(*value),
             Self::TypeAlias {
                 type_params, value, ..
@@ -1920,10 +1931,21 @@ impl Heap {
             Object::Function { .. } => "<function>".into(),
             Object::TypeParam { name, .. } | Object::TypeAlias { name, .. } => name.clone(),
             Object::TypeNoDefault => "typing.NoDefault".into(),
+            Object::TypingForm {
+                kind: TypingFormKind::Literal,
+                ..
+            } => "typing.Literal".into(),
             Object::TypeUnpack(value) => {
                 format!("*{}", self.format_depth(*value, true, path)?)
             }
             Object::GenericAlias { origin, args, .. } => {
+                let literal = matches!(
+                    self.get(*origin),
+                    Ok(Object::TypingForm {
+                        kind: TypingFormKind::Literal,
+                        ..
+                    })
+                );
                 let origin = match self.get(*origin)? {
                     Object::Class(class) => class.name.clone(),
                     Object::TypeAlias { name, .. } => name.clone(),
@@ -1940,9 +1962,13 @@ impl Heap {
                     if index != 0 {
                         text.push_str(", ");
                     }
-                    match self.get(*argument) {
-                        Ok(Object::Class(class)) => text.push_str(&class.name),
-                        _ => text.push_str(&self.format_depth(*argument, true, path)?),
+                    if literal && *argument == Value::ELLIPSIS {
+                        text.push_str("...");
+                    } else {
+                        match self.get(*argument) {
+                            Ok(Object::Class(class)) => text.push_str(&class.name),
+                            _ => text.push_str(&self.format_depth(*argument, true, path)?),
+                        }
                     }
                 }
                 text.push(']');

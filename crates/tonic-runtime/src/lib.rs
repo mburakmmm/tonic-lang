@@ -33,7 +33,7 @@ pub use native::{
     StatefulNativeSignature,
 };
 pub use type_plan::{
-    AnnotationTypePlan, ExactTypePlan, FunctionTypePlan, TypePlan, TypePlanRejection,
-    TYPE_PLAN_SCHEMA_VERSION,
+    AnnotationTypePlan, ExactTypePlan, FunctionTypePlan, LiteralTypePlan, TypePlan,
+    TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION,
 };
 pub use vm::{ExecutionMode, JitRejection, JitRejectionKind, Limits, RuntimePhase, Stats, Vm};

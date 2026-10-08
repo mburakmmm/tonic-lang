@@ -1,6 +1,7 @@
 use crate::{
     classes::ClassDictionaryKey,
-    heap::{Heap, Object},
+    heap::{Heap, Object, TypingFormKind},
+    type_plan::canonical_literal_arguments,
     value::Value,
 };
 use num_bigint::BigInt;
@@ -520,8 +521,26 @@ impl Heap {
                     ..
                 }),
             ) => {
-                self.equal(*left_origin, *right_origin, depth + 1)?
-                    && self.equal(*left_args, *right_args, depth + 1)?
+                let same_origin = self.equal(*left_origin, *right_origin, depth + 1)?;
+                if same_origin
+                    && matches!(
+                        self.get(*left_origin),
+                        Ok(Object::TypingForm {
+                            kind: TypingFormKind::Literal,
+                            ..
+                        })
+                    )
+                {
+                    match (
+                        canonical_literal_arguments(self, *left_args),
+                        canonical_literal_arguments(self, *right_args),
+                    ) {
+                        (Ok(left), Ok(right)) => left == right,
+                        _ => self.equal(*left_args, *right_args, depth + 1)?,
+                    }
+                } else {
+                    same_origin && self.equal(*left_args, *right_args, depth + 1)?
+                }
             }
             (
                 Ok(Object::UnionType { members: left, .. }),

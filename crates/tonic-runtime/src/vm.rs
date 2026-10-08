@@ -4,7 +4,7 @@ use crate::classes::{DescriptorCall, DirectMethodKind};
 use crate::{
     heap::{
         AsyncGeneratorAwaitState, Builtin, GeneratorFrame, GeneratorKind, GeneratorState, Heap,
-        Object, SuspendedGenerator, TracebackEntry, TypeParameterKind,
+        Object, SuspendedGenerator, TracebackEntry, TypeParameterKind, TypingFormKind,
     },
     native::{
         fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
@@ -13,7 +13,8 @@ use crate::{
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
     type_plan::{
-        resolve_function_type_plan, ExactTypePlan, FunctionTypePlan, TypePlan, TypePlanBuiltins,
+        literal_type_plan, resolve_function_type_plan, ExactTypePlan, FunctionTypePlan,
+        LiteralTypePlan, TypePlan, TypePlanBuiltins,
     },
     value::Value,
 };
@@ -1250,6 +1251,8 @@ struct RuntimeTypes {
     not_implemented: Value,
     ellipsis: Value,
     no_default: Value,
+    typing_form: Value,
+    literal: Value,
     int: Value,
     bool_: Value,
     float: Value,
@@ -1306,6 +1309,8 @@ impl RuntimeTypes {
             not_implemented: Value::UNBOUND,
             ellipsis: Value::UNBOUND,
             no_default: Value::UNBOUND,
+            typing_form: Value::UNBOUND,
+            literal: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
@@ -1350,6 +1355,8 @@ impl RuntimeTypes {
             self.not_implemented,
             self.ellipsis,
             self.no_default,
+            self.typing_form,
+            self.literal,
             self.int,
             self.bool_,
             self.float,
@@ -1899,6 +1906,7 @@ impl Vm {
                 tuple: self.runtime_types.tuple,
                 dict: self.runtime_types.dict,
                 set: self.runtime_types.set,
+                literal: self.runtime_types.literal,
             },
             annotations,
         )?;
@@ -1960,6 +1968,28 @@ impl Vm {
             }
             _ => None,
         };
+        let literal_scalar = |items: &[LiteralTypePlan]| {
+            let mut has_none = false;
+            let mut has_bool = false;
+            let mut has_int = false;
+            for item in items {
+                match item {
+                    LiteralTypePlan::None => has_none = true,
+                    LiteralTypePlan::Bool(_) => has_bool = true,
+                    LiteralTypePlan::Int(_) => has_int = true,
+                    LiteralTypePlan::Str(_) | LiteralTypePlan::Ellipsis => return None,
+                }
+            }
+            match (has_none, has_bool, has_int) {
+                (true, false, false) => Some(AnnotationScalar::None),
+                (false, true, false) => Some(AnnotationScalar::Bool),
+                (false, false, true) => Some(AnnotationScalar::Int),
+                (true, true, false) => Some(AnnotationScalar::BoolOrNone),
+                (true, false, true) => Some(AnnotationScalar::IntOrNone),
+                (false, true, true) => Some(AnnotationScalar::IntOrBool),
+                _ => None,
+            }
+        };
         let scalar = |name: &str| {
             let annotation = plan
                 .annotations
@@ -1972,6 +2002,7 @@ impl Vm {
                 TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
                 TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
                 TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
+                TypePlan::Literal(items) => literal_scalar(items),
                 TypePlan::Union(members) => immediate_union(members),
                 _ => None,
             }
@@ -1988,6 +2019,7 @@ impl Vm {
                 TypePlan::Exact(ExactTypePlan::Int) => Some(AnnotationScalar::Int),
                 TypePlan::Exact(ExactTypePlan::Float) => Some(AnnotationScalar::Float),
                 TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
+                TypePlan::Literal(items) => literal_scalar(items),
                 TypePlan::Union(members) => immediate_union(members),
                 TypePlan::Class { type_id, version } => {
                     plan.class_handle(*type_id, *version)
@@ -2173,10 +2205,40 @@ impl Vm {
     }
 
     fn generic_alias_arguments(&mut self, owner: Value, key: Value) -> Result<Value> {
-        let mut arguments = match self.heap.get(key)? {
-            Object::Tuple(values) => values.clone(),
+        let mut arguments = match self.heap.get(key) {
+            Ok(Object::Tuple(values)) => values.clone(),
             _ => vec![key],
         };
+        if matches!(
+            self.heap.get(owner),
+            Ok(Object::TypingForm {
+                kind: TypingFormKind::Literal,
+                ..
+            })
+        ) {
+            let mut flattened = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                match self.heap.get(argument) {
+                    Ok(Object::GenericAlias { origin, args, .. }) if *origin == owner => {
+                        match self.heap.get(*args)? {
+                            Object::Tuple(values) => flattened.extend(values.iter().copied()),
+                            _ => flattened.push(argument),
+                        }
+                    }
+                    _ => flattened.push(argument),
+                }
+            }
+            let mut seen = Vec::new();
+            flattened.retain(|argument| match literal_type_plan(&self.heap, *argument) {
+                Ok(plan) if seen.contains(&plan) => false,
+                Ok(plan) => {
+                    seen.push(plan);
+                    true
+                }
+                Err(_) => true,
+            });
+            return self.heap.alloc(Object::Tuple(flattened));
+        }
         if !matches!(self.heap.get(owner)?, Object::Class(_)) {
             return self.heap.alloc(Object::Tuple(arguments));
         }
@@ -2529,6 +2591,15 @@ impl Vm {
         vm.heap
             .set_attr(unraisable_hook_args, "__module__", sys_module_name)?;
         let no_default = vm.heap.alloc(Object::TypeNoDefault)?;
+        let typing_form = vm.heap.builtin_class(
+            "_TypedCacheSpecialForm",
+            vec![vm.object_class],
+            vm.type_class,
+        )?;
+        let literal = vm.heap.alloc(Object::TypingForm {
+            class: typing_form,
+            kind: TypingFormKind::Literal,
+        })?;
         vm.runtime_types = RuntimeTypes {
             none: vm
                 .heap
@@ -2542,6 +2613,8 @@ impl Vm {
                 .heap
                 .builtin_class("ellipsis", vec![vm.object_class], vm.type_class)?,
             no_default,
+            typing_form,
+            literal,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
             float: vm
@@ -2931,6 +3004,12 @@ impl Vm {
         vm.heap
             .add_module_member(types, "EllipsisType", vm.runtime_types.ellipsis)?;
         vm.modules.insert("types".into(), types);
+        let typing = vm.heap.alloc(Object::Module(Vec::new()))?;
+        vm.heap
+            .add_module_member(typing, "Literal", vm.runtime_types.literal)?;
+        vm.heap
+            .add_module_member(typing, "NoDefault", vm.runtime_types.no_default)?;
+        vm.modules.insert("typing".into(), typing);
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
             (vm.runtime_types.bool_, Builtin::IntHash),
@@ -4421,6 +4500,7 @@ impl Vm {
             Object::Set(_) => self.runtime_types.set,
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
+            Object::TypingForm { class, .. } => *class,
             Object::GenericAlias { class, .. } => *class,
             Object::UnionType { class, .. } => *class,
             Object::Generator(frame) => frame.class,
@@ -7768,6 +7848,7 @@ impl Vm {
                                             )
                                         })
                             }
+                            Object::TypingForm { .. } => true,
                             _ => false,
                         };
                         if generic {
@@ -10637,7 +10718,9 @@ pub(super) fn base_binary_op(op: Op) -> Op {
 #[cfg(test)]
 mod annotation_type_plan_tests {
     use super::*;
-    use crate::{ExactTypePlan, TypePlan, TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION};
+    use crate::{
+        ExactTypePlan, LiteralTypePlan, TypePlan, TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION,
+    };
     use tonic_compiler::compile;
 
     fn global(program: &Program, vm: &Vm, name: &str) -> Value {
@@ -10652,16 +10735,20 @@ mod annotation_type_plan_tests {
     #[test]
     fn resolved_annotations_have_canonical_plans_and_content_versions() {
         let source = concat!(
+            "import typing\n",
             "class Marker:\n    pass\n",
             "def typed(x:int,y:list[float],z:dict[str,int],",
             "t:tuple[int,str],vt:tuple[int,...],s:type({1}),m:Marker,u:int|None,",
-            "v:str|int|str,g:list[int]|None,bad_tuple:tuple[int,...,str],",
-            "bad:42)->float:\n",
+            "v:str|int|str,g:list[int]|None,lit:typing.Literal[1,True,None,'ok',...,1],",
+            "nested:typing.Literal[typing.Literal[1],True],",
+            "bad_literal:typing.Literal[1.5],bad_tuple:tuple[int,...,str],bad:42)->float:\n",
             "    return 1.0\n",
             "def reordered(v:str|int)->float:\n    return 1.0\n",
             "def canonical(v:int|str)->float:\n    return 1.0\n",
             "def variadic_plan(v:tuple[int,...])->None:\n    pass\n",
             "def fixed_plan(v:tuple[int,int])->None:\n    pass\n",
+            "def literal_order(v:typing.Literal[True,1])->None:\n    pass\n",
+            "def literal_canonical(v:typing.Literal[1,True])->None:\n    pass\n",
         );
         let program = compile(source, "annotation-type-plan").unwrap();
         let mut vm = Vm::new().unwrap();
@@ -10711,6 +10798,23 @@ mod annotation_type_plan_tests {
         );
         assert_eq!(entry("s"), Ok(TypePlan::Exact(ExactTypePlan::Set)));
         assert_eq!(
+            entry("lit"),
+            Ok(TypePlan::Literal(vec![
+                LiteralTypePlan::None,
+                LiteralTypePlan::Bool(true),
+                LiteralTypePlan::Int("1".into()),
+                LiteralTypePlan::Str("ok".into()),
+                LiteralTypePlan::Ellipsis,
+            ]))
+        );
+        assert_eq!(
+            entry("nested"),
+            Ok(TypePlan::Literal(vec![
+                LiteralTypePlan::Bool(true),
+                LiteralTypePlan::Int("1".into()),
+            ]))
+        );
+        assert_eq!(
             entry("u"),
             Ok(TypePlan::Union(vec![
                 TypePlan::None,
@@ -10740,6 +10844,10 @@ mod annotation_type_plan_tests {
         );
         assert_eq!(entry("bad"), Err(TypePlanRejection::UnsupportedValue));
         assert_eq!(
+            entry("bad_literal"),
+            Err(TypePlanRejection::UnsupportedValue)
+        );
+        assert_eq!(
             entry("bad_tuple"),
             Err(TypePlanRejection::InvalidGenericArity)
         );
@@ -10759,6 +10867,16 @@ mod annotation_type_plan_tests {
             .annotation_type_plan(global(program.program(), &vm, "fixed_plan"))
             .unwrap();
         assert_ne!(variadic.canonical_hash, fixed.canonical_hash);
+        let literal_order = vm
+            .annotation_type_plan(global(program.program(), &vm, "literal_order"))
+            .unwrap();
+        let literal_canonical = vm
+            .annotation_type_plan(global(program.program(), &vm, "literal_canonical"))
+            .unwrap();
+        assert_eq!(
+            literal_order.canonical_hash,
+            literal_canonical.canonical_hash
+        );
 
         let annotations = match vm.heap.get(function).unwrap() {
             Object::Function {

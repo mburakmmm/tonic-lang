@@ -147,9 +147,10 @@ sayılmaz.
 
 ## Uygulama durumu
 
-TypePlan v3 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+TypePlan v4 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
 exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
-`list`/`dict`/`set`, fixed/variadic tuple ve kullanıcı class identity/version planlarına
+`list`/`dict`/`set`, fixed/variadic tuple, `typing.Literal` ve kullanıcı class
+identity/version planlarına
 dönüşür. PEP 604 `A | B` ve `T | None` union nesneleri düzleştirilir, eşdeğer
 üyeler elenir ve plan üyeleri sıralanarak yazım sırasından bağımsız canonical
 `Union` planı oluşturulur. User-class üyeleri normal class version dependency'si
@@ -160,10 +161,19 @@ type parameter, recursive alias ve recursion limit ayrı reason code üretir.
 Fonksiyonun `__annotations__` dict'i için structural iterator epoch'undan ayrı
 bir content-mutation epoch vardır. Var olan anahtarın değerini değiştirmek de bu
 epoch'u artırır; function içindeki plan cache yalnız epoch eşleşiyorsa kullanılır.
-TypePlan temeli tek başına typed native entry seçmez. `tuple[T, ...]`, Python
-`Ellipsis` singleton'ı üzerinden ayrı `VariadicTuple(T)` planına dönüşür ve
+`typing.Literal` iç içe kullanımları düzleştirir, aynı tipte tekrarları eler ve
+`1` ile `True` gibi Python eşitliği olan farklı literal tiplerini ayrı tutar.
+`None`/bool/int birleşimleri güvenli scalar kategoriye indirilerek typed JIT'e
+erken aday olabilir; çalışma zamanı guard'ı kaldığı için annotation zorlayıcı
+tip kontrolü değildir. Str/Ellipsis veya desteklenmeyen değer taşıyan Literal
+planı generic yürütmede kalır. Karar [ADR 0123](adr/0123-literal-type-plan.md)
+içindedir.
+
+TypePlan temeli tek başına her plan için typed native entry seçmez.
+`tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
+`VariadicTuple(T)` planına dönüşür ve
 fixed tuple'dan farklı canonical hash üretir. Union narrowing/branch refinement,
-`typing.Literal`/`Callable`, bytes ve buffer/dtype sonraki genişleme dilimleridir.
+`Callable`, bytes ve buffer/dtype sonraki genişleme dilimleridir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

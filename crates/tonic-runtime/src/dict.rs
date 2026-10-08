@@ -5,7 +5,8 @@ use crate::{
         hash_range_parts, hash_string, hash_u64, normalize_bigint, range_length, sequence_finish,
         sequence_start, sequence_step,
     },
-    heap::{Heap, Object},
+    heap::{Heap, Object, TypingFormKind},
+    type_plan::{canonical_literal_arguments, LiteralTypePlan},
     value::Value,
 };
 use num_bigint::BigInt;
@@ -33,6 +34,7 @@ enum Key {
     Identity(u64),
     Method(Box<Key>, Box<Key>),
     GenericAlias(Box<Key>, Box<Key>),
+    LiteralAlias(Box<Key>, Vec<LiteralTypePlan>),
     Union(Vec<Key>),
 }
 #[derive(Debug, Default)]
@@ -87,6 +89,22 @@ fn key_hash(key: &Key) -> u64 {
         Key::GenericAlias(origin, arguments) => {
             let accumulator = sequence_step(sequence_start(), key_hash(origin) as i64);
             sequence_finish(sequence_step(accumulator, key_hash(arguments) as i64), 2)
+        }
+        Key::LiteralAlias(origin, arguments) => {
+            let accumulator = arguments.iter().fold(
+                sequence_step(sequence_start(), key_hash(origin) as i64),
+                |accumulator, argument| {
+                    let hash = match argument {
+                        LiteralTypePlan::None => 0x501_i64,
+                        LiteralTypePlan::Bool(value) => 0x510 + i64::from(*value),
+                        LiteralTypePlan::Int(value) => hash_string(value) ^ 0x520,
+                        LiteralTypePlan::Str(value) => hash_string(value) ^ 0x530,
+                        LiteralTypePlan::Ellipsis => 0x540,
+                    };
+                    sequence_step(accumulator, hash)
+                },
+            );
+            sequence_finish(accumulator, arguments.len() + 1)
         }
         Key::Union(members) => {
             let accumulator = members
@@ -197,10 +215,24 @@ impl Heap {
                     step: (length > 1).then_some(*step),
                 }
             }
-            Object::GenericAlias { origin, args, .. } => Key::GenericAlias(
-                Box::new(self.dict_key(*origin, depth + 1)?),
-                Box::new(self.dict_key(*args, depth + 1)?),
-            ),
+            Object::GenericAlias { origin, args, .. } => {
+                let origin_key = Box::new(self.dict_key(*origin, depth + 1)?);
+                if matches!(
+                    self.get(*origin),
+                    Ok(Object::TypingForm {
+                        kind: TypingFormKind::Literal,
+                        ..
+                    })
+                ) {
+                    if let Ok(arguments) = canonical_literal_arguments(self, *args) {
+                        Key::LiteralAlias(origin_key, arguments)
+                    } else {
+                        Key::GenericAlias(origin_key, Box::new(self.dict_key(*args, depth + 1)?))
+                    }
+                } else {
+                    Key::GenericAlias(origin_key, Box::new(self.dict_key(*args, depth + 1)?))
+                }
+            }
             Object::UnionType { members, .. } => {
                 let mut members = members
                     .iter()
@@ -212,6 +244,7 @@ impl Heap {
             Object::Function { .. }
             | Object::Builtin(_)
             | Object::Native(_)
+            | Object::TypingForm { .. }
             | Object::Class(_)
             | Object::Instance { .. }
             | Object::Exception { .. }
