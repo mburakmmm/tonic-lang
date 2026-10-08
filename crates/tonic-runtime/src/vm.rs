@@ -13,8 +13,9 @@ use crate::{
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
     type_plan::{
-        literal_type_plan, resolve_function_type_plan, ExactTypePlan, FunctionTypePlan,
-        LiteralTypePlan, TypePlan, TypePlanBuiltins,
+        literal_type_plan, resolve_function_type_plan, BufferDTypePlan, BufferMutabilityPlan,
+        BufferTypePlan, ExactTypePlan, FunctionTypePlan, LiteralTypePlan, TypePlan,
+        TypePlanBuiltins,
     },
     value::Value,
 };
@@ -289,6 +290,7 @@ enum AnnotationScalar {
     IntOrNone,
     BoolOrNone,
     IntOrBool,
+    Buffer(BufferTypePlan),
     Class {
         class: Value,
         type_id: u32,
@@ -2029,6 +2031,7 @@ impl Vm {
                 TypePlan::Exact(ExactTypePlan::Bool) => Some(AnnotationScalar::Bool),
                 TypePlan::Literal(items) => literal_scalar(items),
                 TypePlan::Union(members) => immediate_union(members),
+                TypePlan::Buffer(buffer) => Some(AnnotationScalar::Buffer(*buffer)),
                 TypePlan::Class { type_id, version } => {
                     plan.class_handle(*type_id, *version)
                         .map(|class| AnnotationScalar::Class {
@@ -2130,6 +2133,19 @@ impl Vm {
             AnnotationScalar::IntOrNone => value == Value::NONE || value.as_int().is_some(),
             AnnotationScalar::BoolOrNone => value == Value::NONE || value.as_bool().is_some(),
             AnnotationScalar::IntOrBool => value.as_int().is_some() || value.as_bool().is_some(),
+            AnnotationScalar::Buffer(plan) => match self.heap.get(value) {
+                Ok(Object::Buffer(buffer)) if plan.dtype == BufferDTypePlan::F64 => {
+                    let view = buffer.view();
+                    plan.rank
+                        .is_none_or(|rank| usize::try_from(rank) == Ok(view.shape().len()))
+                        && match plan.mutability {
+                            BufferMutabilityPlan::Any => true,
+                            BufferMutabilityPlan::ReadOnly => !view.is_writable(),
+                            BufferMutabilityPlan::Writable => view.is_writable(),
+                        }
+                }
+                _ => false,
+            },
             AnnotationScalar::Class {
                 class,
                 type_id,
@@ -2163,7 +2179,7 @@ impl Vm {
                     || value.as_bool().is_some()
                     || matches!(self.heap.get(value), Ok(Object::Int(_)))
             }
-            AnnotationScalar::Class { .. } => false,
+            AnnotationScalar::Buffer(_) | AnnotationScalar::Class { .. } => false,
         }
     }
 
@@ -9275,9 +9291,9 @@ impl Vm {
                 continue;
             };
             let scalar_type = |kind| match kind {
-                AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
-                    tonic_jit::ScalarType::Dynamic
-                }
+                AnnotationScalar::Dynamic
+                | AnnotationScalar::Buffer(_)
+                | AnnotationScalar::Class { .. } => tonic_jit::ScalarType::Dynamic,
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                 AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
@@ -9317,6 +9333,7 @@ impl Vm {
                 AnnotationScalar::IntOrBool => Some(tonic_jit::ScalarType::IntOrBool),
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Float
+                | AnnotationScalar::Buffer(_)
                 | AnnotationScalar::Class { .. } => None,
             };
             let return_proven =
@@ -9373,6 +9390,7 @@ impl Vm {
                 | AnnotationScalar::IntOrNone
                 | AnnotationScalar::BoolOrNone
                 | AnnotationScalar::IntOrBool
+                | AnnotationScalar::Buffer(_)
                 | AnnotationScalar::Class { .. } => None,
             };
             let Some(scalar) = scalar else {
@@ -10000,9 +10018,9 @@ impl Vm {
             );
             let typed_signature = annotation.as_ref().map(|annotation| {
                 let scalar = |kind| match kind {
-                    AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
-                        tonic_jit::ScalarType::Dynamic
-                    }
+                    AnnotationScalar::Dynamic
+                    | AnnotationScalar::Buffer(_)
+                    | AnnotationScalar::Class { .. } => tonic_jit::ScalarType::Dynamic,
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                     AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,

@@ -1,5 +1,5 @@
 use tonic_compiler::compile;
-use tonic_runtime::Vm;
+use tonic_runtime::{ExecutionMode, Vm};
 
 #[test]
 fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
@@ -96,4 +96,34 @@ fn fastmath_buffer_has_a_stable_runtime_type_for_annotations() {
     assert_eq!(output, b"True\nTrue\n3.0\n");
     assert!(vm.stats.gc_collections > 0);
     assert_eq!(vm.active_handles(), 0);
+}
+
+#[test]
+fn buffer_annotation_guards_first_call_jit_without_enforcing_the_hint() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "sum_buffer=fastmath.sum\n",
+            "def total(values:fastmath.Buffer)->float:\n",
+            "    return sum_buffer(values)\n",
+            "values=fastmath.array([1.0,2.0,3.0])\n",
+            "print(total(values))\n",
+            "print(total([4.0,5.0]))\n",
+        ),
+        "buffer-annotation-jit",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"6.0\n9.0\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_compiled, 1);
+    assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+    assert!(vm.stats.jit_side_exits >= 1);
+    assert!(vm.stats.jit_resumes >= 1);
+    assert!(vm.stats.gc_collections > 0);
 }

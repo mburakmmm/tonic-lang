@@ -442,8 +442,13 @@ sonra alınır.
     materialization. NumPy C ABI veya raw object layout varsayımı yapılmaz.
     - [x] Concrete `f64` buffer için runtime type identity ve canonical TypePlan
       metadata temeli; rank/mutability açıkça unconstrained tutulur.
+    - [x] Annotation-JIT girişinde exact native buffer/dtype ve planın varsa
+      rank/mutability guard'ı; managed değer root buffer'da kalır. İlk çağrı
+      baseline derlemesi native `fastmath.sum` sınırında generic side-exit/resume
+      yapar; yanlış nesne advisory generic fallback'e gider.
     - [ ] Parametreli dtype/rank/mutability annotation yüzeyi, giriş ve loop
-      guard'ları, native indexed loop ve alias/escape materialization.
+      guard üretimi, doğrudan native indexed loop lowering'i, bounds elimination
+      ve alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

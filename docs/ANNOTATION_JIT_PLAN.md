@@ -182,6 +182,14 @@ Callable planı tek başına opaque callable nesnesini unboxed scalar yapmaz. Ka
 `f64` depolama uyguladığı için diğer ABI dtype sabitleri desteklenmiş planlar
 sayılmaz; parametrik dtype/rank/mutability, bunların giriş/loop guard'ları,
 union narrowing/branch refinement ve bytes sonraki genişleme dilimleridir.
+Concrete buffer planı annotation-JIT parametre kapısına da bağlıdır. Exact native
+buffer object kind ve `f64` storage doğrulanır; planda mevcutsa rank ve mutability
+da kontrol edilir. Buffer tagged managed root olarak kaldığı için scalar ABI'ye
+yanlış biçimde unbox edilmez. Mevcut ilk dilim `fastmath.sum` çağrısında güvenli
+generic side-exit üzerinden native zero-copy döngüyü çalıştırıp successor PC'de
+JIT'e döner. Annotation'a uymayan list gibi bir değer normal generic semantiği
+çalıştırır; karar [ADR 0126](adr/0126-buffer-annotation-entry-guard.md)
+içindedir. Doğrudan indexed-loop lowering'i ve bounds elimination açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte
