@@ -68,6 +68,7 @@ pub enum RuntimeOp {
     Le = 20,
     Gt = 21,
     Ge = 22,
+    F64Buffer = 23,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +80,15 @@ pub struct RuntimeFailure {
 pub struct MethodLookup {
     pub function: u64,
     pub receiver: u64,
+}
+
+/// Raw contiguous storage exposed only for the duration of one compiled call.
+/// The embedding runtime must keep `data` valid while the originating guest
+/// value remains rooted and generated code is executing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct F64BufferView {
+    pub data: usize,
+    pub len: usize,
 }
 impl RuntimeFailure {
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
@@ -198,6 +208,25 @@ pub trait Runtime {
         ))
     }
 
+    /// Resolve an exact, C-contiguous rank-1 f64 buffer. `None` is a guard miss
+    /// and deoptimizes to the generic ITEM operation.
+    ///
+    /// # Safety
+    ///
+    /// A returned non-null `data` pointer must address `len` initialized f64
+    /// elements and remain valid while the guest value is rooted and the
+    /// current compiled invocation is executing.
+    unsafe fn f64_buffer(
+        &mut self,
+        _value: u64,
+        _registers: &[u64],
+    ) -> Result<Option<F64BufferView>, RuntimeFailure> {
+        Err(RuntimeFailure::new(
+            "JitError",
+            "compiled function requires f64 buffer services",
+        ))
+    }
+
     fn poll(&mut self, registers: &[u64]) -> Result<u64, RuntimeFailure>;
 }
 
@@ -268,6 +297,10 @@ pub struct Metadata {
     pub typed_return_proven: bool,
     /// Direct-call results imported from guarded annotation summaries.
     pub typed_call_result_sites: usize,
+    /// Exact f64 buffer parameters materialized into ephemeral native views.
+    pub f64_buffer_parameters: usize,
+    /// ITEM instructions lowered to guarded direct f64 loads.
+    pub f64_buffer_item_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +324,10 @@ pub enum ScalarType {
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
+    /// Exact native C-contiguous rank-1 f64 buffer. The logical handle stays in
+    /// the precise root array; a runtime helper supplies ephemeral data/length
+    /// metadata for direct indexed loads.
+    F64Buffer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +433,7 @@ struct FloatAnalysis {
     before: Vec<Option<Vec<bool>>>,
     slots: Vec<bool>,
     deopt_maps: Vec<DeoptMap>,
+    buffer_source: Vec<Option<u16>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,6 +446,7 @@ enum ScalarFact {
     IntOrNone,
     BoolOrNone,
     IntOrBool,
+    F64Buffer,
 }
 
 impl ScalarFact {
@@ -421,6 +460,7 @@ impl ScalarFact {
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
             ScalarType::IntOrBool => Self::IntOrBool,
+            ScalarType::F64Buffer => Self::F64Buffer,
         }
     }
 
@@ -629,6 +669,7 @@ extern "C" fn runtime_helper<R: Runtime>(
             value if value == RuntimeOp::Le as u32 => RuntimeOp::Le,
             value if value == RuntimeOp::Gt as u32 => RuntimeOp::Gt,
             value if value == RuntimeOp::Ge as u32 => RuntimeOp::Ge,
+            value if value == RuntimeOp::F64Buffer as u32 => RuntimeOp::F64Buffer,
             _ => {
                 state.failure = Some(RuntimeFailure::new(
                     "JitError",
@@ -767,6 +808,27 @@ extern "C" fn runtime_helper<R: Runtime>(
                 }
             };
         }
+        if op == RuntimeOp::F64Buffer {
+            // SAFETY: `left` remains in the precise root buffer for this
+            // synchronous compiled invocation. The Runtime implementation owns
+            // and documents the backing-storage stability invariant.
+            return match unsafe { state.runtime.f64_buffer(left, roots) } {
+                Ok(view) => {
+                    // SAFETY: generated F64Buffer calls pass a writable
+                    // two-word stack slot. These words are native metadata,
+                    // never entries in the precise managed-root array.
+                    unsafe {
+                        output.write(view.map_or(0, |view| view.data as u64));
+                        output.add(1).write(view.map_or(0, |view| view.len as u64));
+                    }
+                    0
+                }
+                Err(failure) => {
+                    state.failure = Some(failure);
+                    1
+                }
+            };
+        }
         let result = match op {
             RuntimeOp::Div
             | RuntimeOp::Add
@@ -789,7 +851,8 @@ extern "C" fn runtime_helper<R: Runtime>(
             | RuntimeOp::BuildDict
             | RuntimeOp::DictSetSymbol
             | RuntimeOp::UnboxFloat
-            | RuntimeOp::BoxFloat => unreachable!("handled above"),
+            | RuntimeOp::BoxFloat
+            | RuntimeOp::F64Buffer => unreachable!("handled above"),
             RuntimeOp::Poll => state.runtime.poll(roots),
         };
         match result {
@@ -1091,11 +1154,24 @@ pub fn compile_with_execution_profile_types_and_call_results(
             });
         }
     }
+    let exact_f64_buffer_parameters = typed_signature
+        .map(|signature| {
+            signature
+                .parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(register, kind)| {
+                    (*kind == ScalarType::F64Buffer).then_some(register as u16)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     validate_direct_calls(code, direct_calls)?;
     validate_guarded_call_results(code, direct_calls, call_results)?;
     validate_materialized_constants(code, materialized_constants)?;
     validate_supported(code, direct_calls, materialized_constants, call_results)?;
-    let float_analysis = analyze_float_execution(code, exact_float_parameters)?;
+    let float_analysis =
+        analyze_float_execution(code, exact_float_parameters, &exact_f64_buffer_parameters)?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
             analyze_typed_scalar_execution(code, signature, direct_calls, call_results)
@@ -1134,7 +1210,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
     let resumable = code.instructions.iter().any(|instruction| {
         matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::Call | Op::Attr | Op::BeginArgs | Op::CallExpanded)
+            Ok(Op::Call | Op::Attr | Op::BeginArgs | Op::CallExpanded | Op::Item)
         )
     }) || backedges > 0;
     let started = std::time::Instant::now();
@@ -1197,6 +1273,19 @@ pub fn compile_with_execution_profile_types_and_call_results(
         let float_scratch = float_analysis.as_ref().map(|_| {
             builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3))
         });
+        let buffer_slots = exact_f64_buffer_parameters
+            .iter()
+            .map(|register| {
+                (
+                    *register,
+                    builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        3,
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
         let method_caches = direct_calls
             .iter()
             .filter_map(|call| call.method_attr_pc)
@@ -1273,6 +1362,17 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 pointer_type,
             );
         }
+        registers = emit_buffer_entry_initialization(
+            &mut builder,
+            registers,
+            start_pc,
+            &buffer_slots,
+            runtime_signature,
+            runtime_helper,
+            runtime_context,
+            root_count,
+            pointer_type,
+        );
         for (_, base) in &method_caches {
             let unbound = builder.ins().iconst(types::I64, VALUE_UNBOUND as i64);
             store_word(&mut builder, registers, *base, unbound);
@@ -1853,6 +1953,58 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         );
                     }
                 }
+                Op::Item => {
+                    let source = float_analysis
+                        .as_ref()
+                        .and_then(|analysis| analysis.buffer_source[pc]);
+                    let Some(source) = source else {
+                        side_exit(&mut builder, registers, pc);
+                        continue;
+                    };
+                    let slot = buffer_slots
+                        .iter()
+                        .find_map(|(register, slot)| (*register == source).then_some(*slot))
+                        .expect("analyzed buffer source has an entry descriptor");
+                    let raw = load(&mut builder, registers, instruction.c);
+                    let typed_index = typed_scalar_state
+                        .map(|state| state[instruction.c as usize])
+                        .filter(|fact| fact.is_integer_like());
+                    let registers = if typed_index.is_some() {
+                        registers
+                    } else {
+                        let integer = exact_int(&mut builder, raw);
+                        guard(&mut builder, integer, registers, pc, pointer_type)
+                    };
+                    let index = if let Some(fact) = typed_index {
+                        decode_known_integer(&mut builder, raw, fact)
+                    } else {
+                        decode_int(&mut builder, raw)
+                    };
+                    let len = builder.ins().stack_load(types::I64, slot, 8);
+                    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+                    let from_end = builder.ins().iadd(index, len);
+                    let index = builder.ins().select(negative, from_end, index);
+                    let nonnegative =
+                        builder
+                            .ins()
+                            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+                    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+                    let in_bounds = builder.ins().band(nonnegative, below_len);
+                    let registers = guard(&mut builder, in_bounds, registers, pc, pointer_type);
+                    let data = builder.ins().stack_load(pointer_type, slot, 0);
+                    let byte_offset = builder.ins().imul_imm(index, 8);
+                    let address = builder.ins().iadd(data, byte_offset);
+                    let value = builder
+                        .ins()
+                        .load(types::F64, MemFlags::trusted(), address, 0);
+                    builder.ins().stack_store(
+                        value,
+                        float_slots[instruction.a as usize]
+                            .expect("analyzed buffer item float slot"),
+                        0,
+                    );
+                    fallthrough(&mut builder, &blocks, pc, registers);
+                }
                 Op::Call | Op::CallExpanded => {
                     if let Some(call) = direct_calls.iter().find(|call| call.pc == pc) {
                         emit_direct_call(
@@ -2037,6 +2189,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     .filter(|call| call.float)
                     .map(|call| call.arguments.len() + 1)
                     .sum::<usize>()
+                + exact_f64_buffer_parameters.len()
                 + if backedges > 0 {
                     code.instructions
                         .iter()
@@ -2102,6 +2255,10 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 .filter(|call| call.result.is_some())
                 .count()
                 + call_results.len(),
+            f64_buffer_parameters: exact_f64_buffer_parameters.len(),
+            f64_buffer_item_sites: float_analysis.as_ref().map_or(0, |analysis| {
+                analysis.buffer_source.iter().flatten().count()
+            }),
         },
     })
 }
@@ -2731,8 +2888,9 @@ pub fn unobserved_variadic_parameters(code: &CodeObject) -> bool {
 fn analyze_float_execution(
     code: &CodeObject,
     exact_float_parameters: &[u16],
+    exact_f64_buffer_parameters: &[u16],
 ) -> Result<Option<FloatAnalysis>, Error> {
-    if exact_float_parameters.is_empty() {
+    if exact_float_parameters.is_empty() && exact_f64_buffer_parameters.is_empty() {
         return Ok(None);
     }
     if exact_float_parameters
@@ -2746,6 +2904,18 @@ fn analyze_float_execution(
             "exact-float parameter profile is duplicated or out of bounds".into(),
         ));
     }
+    if exact_f64_buffer_parameters
+        .iter()
+        .enumerate()
+        .any(|(index, register)| {
+            *register >= code.params || exact_f64_buffer_parameters[..index].contains(register)
+        })
+    {
+        return Err(Error::Backend(
+            "exact-f64-buffer parameter profile is duplicated or out of bounds".into(),
+        ));
+    }
+    let buffer_before = analyze_buffer_sources(code, exact_f64_buffer_parameters)?;
     let mut before = vec![None; code.instructions.len()];
     let mut initial = vec![false; code.registers as usize];
     for register in exact_float_parameters {
@@ -2806,6 +2976,18 @@ fn analyze_float_execution(
                 }
             }
             Op::LoadGlobal => after[instruction.a as usize] = false,
+            Op::Item => {
+                if is_float(instruction.c)
+                    || buffer_before[pc]
+                        .as_ref()
+                        .and_then(|state| state[instruction.b as usize])
+                        .is_none()
+                {
+                    return Ok(None);
+                }
+                after[instruction.a as usize] = true;
+                float_ops += 1;
+            }
             Op::Return => {
                 float_return |= is_float(instruction.a);
             }
@@ -2884,7 +3066,90 @@ fn analyze_float_execution(
         before,
         slots,
         deopt_maps,
+        buffer_source: buffer_before
+            .iter()
+            .enumerate()
+            .map(|(pc, state)| {
+                let instruction = code.instructions[pc];
+                (Op::try_from(instruction.opcode) == Ok(Op::Item))
+                    .then(|| {
+                        state
+                            .as_ref()?
+                            .get(instruction.b as usize)
+                            .copied()
+                            .flatten()
+                    })
+                    .flatten()
+            })
+            .collect(),
     }))
+}
+
+fn analyze_buffer_sources(
+    code: &CodeObject,
+    parameters: &[u16],
+) -> Result<Vec<Option<Vec<Option<u16>>>>, Error> {
+    let mut before = vec![None; code.instructions.len()];
+    if before.is_empty() {
+        return Ok(before);
+    }
+    let mut initial = vec![None; code.registers as usize];
+    for register in parameters {
+        initial[*register as usize] = Some(*register);
+    }
+    before[0] = Some(initial);
+    let mut queue = VecDeque::from([0usize]);
+    while let Some(pc) = queue.pop_front() {
+        let mut after = before[pc].clone().expect("queued buffer state exists");
+        let instruction = code.instructions[pc];
+        let op = Op::try_from(instruction.opcode).map_err(|error| {
+            Error::Backend(format!("verified opcode could not be decoded: {error}"))
+        })?;
+        match op {
+            Op::Move => after[instruction.a as usize] = after[instruction.b as usize],
+            Op::Jump
+            | Op::JumpFalse
+            | Op::JumpTrue
+            | Op::Return
+            | Op::BeginArgs
+            | Op::ArgPos
+            | Op::ArgStar
+            | Op::ArgNamed
+            | Op::ArgMapping => {}
+            _ => after[instruction.a as usize] = None,
+        }
+        let mut successors = [None, None];
+        match op {
+            Op::Return => {}
+            Op::Jump => successors[0] = Some(instruction.a as usize),
+            Op::JumpFalse | Op::JumpTrue => {
+                successors[0] = Some(instruction.b as usize);
+                successors[1] = (pc + 1 < code.instructions.len()).then_some(pc + 1);
+            }
+            _ => successors[0] = (pc + 1 < code.instructions.len()).then_some(pc + 1),
+        }
+        for successor in successors.into_iter().flatten() {
+            let changed = match &mut before[successor] {
+                None => {
+                    before[successor] = Some(after.clone());
+                    true
+                }
+                Some(existing) => {
+                    let mut changed = false;
+                    for (known, incoming) in existing.iter_mut().zip(&after) {
+                        let merged = (*known == *incoming).then_some(*known).flatten();
+                        changed |= merged != *known;
+                        *known = merged;
+                    }
+                    changed
+                }
+            };
+            if changed {
+                queue.push_back(successor);
+            }
+        }
+    }
+    Ok(before)
 }
 
 fn analyze_typed_scalar_execution(
@@ -2968,7 +3233,8 @@ fn analyze_typed_scalar_execution(
                     ScalarFact::Unknown
                     | ScalarFact::None
                     | ScalarFact::IntOrNone
-                    | ScalarFact::BoolOrNone => ScalarFact::Unknown,
+                    | ScalarFact::BoolOrNone
+                    | ScalarFact::F64Buffer => ScalarFact::Unknown,
                 };
             }
             Op::Not => after[instruction.a as usize] = ScalarFact::Bool,
@@ -2983,6 +3249,15 @@ fn analyze_typed_scalar_execution(
                     };
             }
             Op::Is | Op::IsNot => after[instruction.a as usize] = ScalarFact::Bool,
+            Op::Item => {
+                after[instruction.a as usize] = if fact(instruction.b) == ScalarFact::F64Buffer
+                    && fact(instruction.c).is_integer_like()
+                {
+                    ScalarFact::Float
+                } else {
+                    ScalarFact::Unknown
+                };
+            }
             Op::Call => {
                 after[instruction.a as usize] = call_results
                     .iter()
@@ -3199,6 +3474,7 @@ fn validate_supported(
                 | Op::ArgNamed
                 | Op::ArgMapping
                 | Op::CallExpanded
+                | Op::Item
                 | Op::Return
         ) {
             return Err(unsupported(
@@ -3367,7 +3643,8 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::Float
         | ScalarFact::None
         | ScalarFact::IntOrNone
-        | ScalarFact::BoolOrNone => {
+        | ScalarFact::BoolOrNone
+        | ScalarFact::F64Buffer => {
             unreachable!("non-integer scalar reached integer lowering")
         }
     }
@@ -3391,7 +3668,8 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::Float
         | ScalarFact::None
         | ScalarFact::IntOrNone
-        | ScalarFact::BoolOrNone => {
+        | ScalarFact::BoolOrNone
+        | ScalarFact::F64Buffer => {
             unreachable!("non-integer scalar reached truth lowering")
         }
     }
@@ -3532,6 +3810,30 @@ fn runtime_guard(
     builder.block_params(pass)[0]
 }
 
+fn runtime_guard_dynamic_pc(
+    builder: &mut FunctionBuilder<'_>,
+    condition: Value,
+    registers: Value,
+    pc: Value,
+    pointer_type: cranelift_codegen::ir::Type,
+    error: bool,
+) -> Value {
+    let pass = builder.create_block();
+    builder.append_block_param(pass, pointer_type);
+    let fail = builder.create_block();
+    builder.ins().brif(condition, pass, &[registers], fail, &[]);
+    builder.switch_to_block(fail);
+    let status = if error {
+        let flag = builder.ins().iconst(types::I64, ERROR_FLAG as i64);
+        builder.ins().bor(pc, flag)
+    } else {
+        pc
+    };
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(pass);
+    builder.block_params(pass)[0]
+}
+
 fn emit_typed_scalar_entry_guards(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
@@ -3595,7 +3897,7 @@ fn emit_typed_scalar_entry_guards(
                     let boolean = exact_bool(builder, raw);
                     builder.ins().bor(integer, boolean)
                 }
-                ScalarFact::Unknown | ScalarFact::Float => unreachable!(),
+                ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer => unreachable!(),
             };
             let valid = builder.create_block();
             builder.append_block_param(valid, pointer_type);
@@ -3724,6 +4026,51 @@ fn emit_float_entry_initialization(
         builder.ins().jump(next, &[skip_registers]);
         builder.switch_to_block(next);
         registers = builder.block_params(next)[0];
+    }
+    registers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_buffer_entry_initialization(
+    builder: &mut FunctionBuilder<'_>,
+    mut registers: Value,
+    start_pc: Value,
+    slots: &[(u16, StackSlot)],
+    runtime_signature: cranelift_codegen::ir::SigRef,
+    runtime_helper: Value,
+    runtime_context: Value,
+    root_count: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    let count = builder.ins().iconst(pointer_type, root_count as i64);
+    let operation = builder
+        .ins()
+        .iconst(types::I32, i64::from(RuntimeOp::F64Buffer as u32));
+    let zero = builder.ins().iconst(types::I64, 0);
+    for (register, slot) in slots {
+        let owner = load(builder, registers, *register);
+        let output = builder.ins().stack_addr(pointer_type, *slot, 0);
+        let call = builder.ins().call_indirect(
+            runtime_signature,
+            runtime_helper,
+            &[
+                runtime_context,
+                registers,
+                count,
+                operation,
+                owner,
+                zero,
+                output,
+            ],
+        );
+        let status = builder.inst_results(call)[0];
+        let helper_ok = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+        registers =
+            runtime_guard_dynamic_pc(builder, helper_ok, registers, start_pc, pointer_type, true);
+        let data = builder.ins().stack_load(pointer_type, *slot, 0);
+        let present = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
+        registers =
+            runtime_guard_dynamic_pc(builder, present, registers, start_pc, pointer_type, false);
     }
     registers
 }
@@ -5325,6 +5672,97 @@ mod tests {
         assert_eq!(runtime.boxed[1], 0.5);
         assert_eq!(registers[0], 0x200);
         assert_eq!(registers[1], 0x208);
+    }
+
+    #[test]
+    fn typed_f64_buffer_item_uses_guarded_native_loads() {
+        struct BufferRuntime {
+            values: Vec<f64>,
+            boxed: Vec<f64>,
+        }
+        impl Runtime for BufferRuntime {
+            fn binary(
+                &mut self,
+                _op: RuntimeOp,
+                _left: u64,
+                _right: u64,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("buffer leaf has no generic binary operation")
+            }
+
+            fn load_global(
+                &mut self,
+                _symbol: u32,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("buffer leaf has no globals")
+            }
+
+            // SAFETY: this test never mutates `values` while compiled code is
+            // running, so its Vec allocation remains valid for the call.
+            unsafe fn f64_buffer(
+                &mut self,
+                value: u64,
+                _registers: &[u64],
+            ) -> Result<Option<F64BufferView>, RuntimeFailure> {
+                Ok((value == 0x100).then_some(F64BufferView {
+                    data: self.values.as_ptr() as usize,
+                    len: self.values.len(),
+                }))
+            }
+
+            fn box_float(&mut self, bits: u64, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                self.boxed.push(f64::from_bits(bits));
+                Ok(0x200)
+            }
+
+            fn poll(&mut self, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                Ok(0)
+            }
+        }
+
+        let program = function("def load(values,index):\n    return values[index]");
+        let code = &program.program().code[1];
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::F64Buffer, ScalarType::Int],
+            result: ScalarType::Float,
+        };
+        assert!(typed_return_is_proven(code, &signature).unwrap());
+        let compiled =
+            compile_with_execution_profile_and_types(code, &[], &[], &[], Some(&signature))
+                .unwrap();
+        assert_eq!(compiled.metadata().f64_buffer_parameters, 1);
+        assert_eq!(compiled.metadata().f64_buffer_item_sites, 1);
+        let item_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Item))
+            .unwrap();
+        let mut runtime = BufferRuntime {
+            values: vec![1.0, 2.0, 3.0],
+            boxed: Vec::new(),
+        };
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(-1);
+        assert!(matches!(
+            compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [3.0]);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        assert_eq!(
+            compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: item_pc }
+        );
     }
 
     #[test]

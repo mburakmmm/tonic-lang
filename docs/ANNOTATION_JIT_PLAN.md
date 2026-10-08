@@ -196,7 +196,15 @@ yanlış biçimde unbox edilmez. Mevcut ilk dilim `fastmath.sum` çağrısında 
 generic side-exit üzerinden native zero-copy döngüyü çalıştırıp successor PC'de
 JIT'e döner. Annotation'a uymayan list gibi bir değer normal generic semantiği
 çalıştırır; karar [ADR 0126](adr/0126-buffer-annotation-entry-guard.md)
-içindedir. Doğrudan indexed-loop lowering'i ve bounds elimination açık iştir.
+içindedir. Exact `Buffer[float, 1, False]` parametresinden yapılan `buffer[index]`
+okumaları için ilk doğrudan Cranelift yolu da tamamlandı. Owner tagged precise
+root olarak kalır; runtime girişte yalnız çağrı ömürlü data/length view üretir ve
+rank-1 C-contiguous shape/stride koşulunu guard eder. JIT küçük tam sayı indeksi
+çözer, negatif indeksi Python gibi normalize eder, bounds miss'te tam `ITEM`
+PC'sine deopt eder ve yüklenen `f64` değerini numeric loop boyunca kutulamadan
+taşır. Karar [ADR 0128](adr/0128-native-f64-buffer-index-load.md) içindedir.
+Range tabanlı bounds elimination, çok boyutlu stride lowering'i, writable store
+ve alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

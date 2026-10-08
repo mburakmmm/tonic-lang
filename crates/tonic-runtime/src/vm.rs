@@ -114,6 +114,8 @@ pub struct Stats {
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
     pub jit_typed_call_result_sites: u64,
+    pub jit_f64_buffer_parameters: u64,
+    pub jit_f64_buffer_item_sites: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -431,6 +433,7 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
             | tonic_jit::RuntimeOp::DictSetSymbol
             | tonic_jit::RuntimeOp::UnboxFloat
             | tonic_jit::RuntimeOp::BoxFloat
+            | tonic_jit::RuntimeOp::F64Buffer
             | tonic_jit::RuntimeOp::Poll => {
                 return Err(tonic_jit::RuntimeFailure::new(
                     "JitError",
@@ -469,6 +472,33 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
             ));
         }
         Ok(value.raw())
+    }
+
+    // SAFETY: Buffer owns an immutable boxed f64 slice. Moving the guest
+    // object moves only the Box handle, and no runtime operation can replace
+    // its backing allocation during a compiled invocation.
+    #[allow(unsafe_code)]
+    unsafe fn f64_buffer(
+        &mut self,
+        value: u64,
+        _registers: &[u64],
+    ) -> std::result::Result<Option<tonic_jit::F64BufferView>, tonic_jit::RuntimeFailure> {
+        self.stats.jit_helper_calls += 1;
+        let object = self
+            .heap
+            .get(Value::from_jit(value))
+            .map_err(runtime_failure)?;
+        let Object::Buffer(buffer) = object else {
+            return Ok(None);
+        };
+        let view = buffer.view();
+        if view.shape().len() != 1 || view.strides() != [std::mem::size_of::<f64>() as isize] {
+            return Ok(None);
+        }
+        Ok(Some(tonic_jit::F64BufferView {
+            data: view.as_slice().as_ptr() as usize,
+            len: view.as_slice().len(),
+        }))
     }
 
     fn load_method(
@@ -9292,9 +9322,16 @@ impl Vm {
                 continue;
             };
             let scalar_type = |kind| match kind {
-                AnnotationScalar::Dynamic
-                | AnnotationScalar::Buffer(_)
-                | AnnotationScalar::Class { .. } => tonic_jit::ScalarType::Dynamic,
+                AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
+                    tonic_jit::ScalarType::Dynamic
+                }
+                AnnotationScalar::Buffer(plan)
+                    if plan.rank == Some(1)
+                        && plan.mutability == BufferMutabilityPlan::ReadOnly =>
+                {
+                    tonic_jit::ScalarType::F64Buffer
+                }
+                AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                 AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
@@ -10019,9 +10056,16 @@ impl Vm {
             );
             let typed_signature = annotation.as_ref().map(|annotation| {
                 let scalar = |kind| match kind {
-                    AnnotationScalar::Dynamic
-                    | AnnotationScalar::Buffer(_)
-                    | AnnotationScalar::Class { .. } => tonic_jit::ScalarType::Dynamic,
+                    AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
+                        tonic_jit::ScalarType::Dynamic
+                    }
+                    AnnotationScalar::Buffer(plan)
+                        if plan.rank == Some(1)
+                            && plan.mutability == BufferMutabilityPlan::ReadOnly =>
+                    {
+                        tonic_jit::ScalarType::F64Buffer
+                    }
+                    AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
                     AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
@@ -10093,6 +10137,8 @@ impl Vm {
                         u64::from(annotation.is_some() && metadata.typed_return_proven);
                     self.stats.jit_typed_call_result_sites +=
                         metadata.typed_call_result_sites as u64;
+                    self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
+                    self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
                     self.jit_rejections[code_id] = None;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),

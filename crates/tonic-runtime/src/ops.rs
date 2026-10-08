@@ -711,6 +711,7 @@ impl Heap {
             Object::Tuple(v) | Object::List(v) => v.len() as i128,
             Object::Str(s) => s.chars().count() as i128,
             Object::Range { start, stop, step } => range_len(*start, *stop, *step),
+            Object::Buffer(buffer) => buffer.len() as i128,
             _ => return Err(Diagnostic::new("TypeError", "object is not subscriptable")),
         };
         let i = if i < 0 { len + i } else { i };
@@ -729,6 +730,10 @@ impl Heap {
             }
             Object::Range { start, step, .. } => {
                 self.int(BigInt::from(*start as i128 + i * (*step as i128)))
+            }
+            Object::Buffer(buffer) => {
+                let value = buffer.view().as_slice()[i as usize];
+                self.alloc(Object::Float(value))
             }
             _ => Err(type_error()),
         }

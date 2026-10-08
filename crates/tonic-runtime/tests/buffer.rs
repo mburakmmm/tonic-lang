@@ -135,3 +135,67 @@ fn buffer_annotation_guards_first_call_jit_without_enforcing_the_hint() {
     assert!(vm.stats.jit_resumes >= 1);
     assert!(vm.stats.gc_collections > 0);
 }
+
+#[test]
+fn annotated_rank_one_buffer_loop_loads_f64_values_in_native_code() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "def total(values:fastmath.Buffer[float,1,False], count:int)->float:\n",
+            "    index=0\n",
+            "    result=0.0\n",
+            "    while index<count:\n",
+            "        result=result+values[index]\n",
+            "        index+=1\n",
+            "    return result\n",
+            "values=fastmath.array([1.0,2.0,3.0,4.0])\n",
+            "print(values[0],values[-1])\n",
+            "print(total(values,4),total(values,2))\n",
+        ),
+        "buffer-native-load",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"1.0 4.0\n10.0 3.0\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_compiled, 1);
+    assert_eq!(vm.stats.jit_side_exits, 0);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
+    assert!(vm.stats.jit_helper_calls >= 4);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn native_buffer_load_preserves_negative_and_out_of_bounds_index_semantics() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "def load(values:fastmath.Buffer[float,1,False], index:int)->float:\n",
+            "    return values[index]\n",
+            "values=fastmath.array([1.0,2.0,3.0])\n",
+            "print(load(values,-1))\n",
+            "try:\n",
+            "    load(values,3)\n",
+            "except IndexError:\n",
+            "    print('bounds')\n",
+        ),
+        "buffer-native-bounds",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"3.0\nbounds\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}

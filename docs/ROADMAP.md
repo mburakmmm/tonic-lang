@@ -452,8 +452,13 @@ sonra alınır.
       yapar; yanlış nesne advisory generic fallback'e gider.
     - [x] Uygulanan `f64` storage için parametrik dtype/rank/mutability annotation
       yüzeyi ve gerçek giriş guard üretimi; wildcard ve advisory fallback.
-    - [ ] Doğrudan native indexed loop lowering'i, shape/stride loop guard'ı,
-      bounds elimination, writable store ve alias/escape materialization.
+    - [x] Exact rank-1/read-only `f64` annotation için ilk doğrudan native
+      indexed-load dilimi: managed owner root'u, çağrı ömürlü data/length view,
+      C-contiguous shape/stride guard'ı, Python negatif indeks normalizasyonu,
+      exact-PC bounds deopt'u ve döngü boyunca unboxed `f64` arithmetic.
+    - [ ] Döngü range kanıtıyla bounds-check elimination, çok boyutlu stride
+      lowering'i, writable store, mutation/version guard'ı ve alias/escape
+      materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

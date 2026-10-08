@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 33, runtime unit 27,
-direct bytecode VM 4, buffer 5, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 27,
+direct bytecode VM 4, buffer 7, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 439 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 442 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -160,6 +160,15 @@ native döngüyü çalıştırır ve successor PC'de JIT'e döner. Aynı annotat
 fonksiyona list verilmesi giriş guard'ını kaçırır, fakat annotation runtime type
 check'e dönüşmeden generic `fastmath.sum` sonucu verir. Vaka allocation-stress
 moving GC, compile/candidate, guard-miss ve side-exit/resume sayaçlarını doğrular.
+
+Native buffer indexed-load testleri `Buffer[float,1,False]` owner'ını precise
+root'ta tutarken rank-1 C-contiguous data/length view'ının yalnız girişte
+alındığını doğrular. Cranelift `ITEM` doğrudan `f64` yüküne iner; toplama döngüsü
+ara float kutulaması veya per-item runtime helper olmadan çalışır. Public JIT
+testi native-view ve direct-item metadata sayaçlarını, negatif indeksi ve boxed
+tek dönüşü doğrular. Runtime testi sınır dışı indeksi tam `ITEM` PC'sinde deopt
+ederek generic `IndexError` semantiğini, ayrıca stress-GC altında aynı sonucu
+korur.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
