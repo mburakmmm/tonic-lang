@@ -35,6 +35,11 @@ enum Key {
     Method(Box<Key>, Box<Key>),
     GenericAlias(Box<Key>, Box<Key>),
     LiteralAlias(Box<Key>, Vec<LiteralTypePlan>),
+    CallableAlias {
+        origin: Box<Key>,
+        parameters: Option<Vec<Key>>,
+        result: Box<Key>,
+    },
     Union(Vec<Key>),
 }
 #[derive(Debug, Default)]
@@ -105,6 +110,26 @@ fn key_hash(key: &Key) -> u64 {
                 },
             );
             sequence_finish(accumulator, arguments.len() + 1)
+        }
+        Key::CallableAlias {
+            origin,
+            parameters,
+            result,
+        } => {
+            let mut accumulator = sequence_step(sequence_start(), key_hash(origin) as i64);
+            accumulator = match parameters {
+                None => sequence_step(accumulator, 0x601),
+                Some(parameters) => parameters.iter().fold(
+                    sequence_step(accumulator, 0x602),
+                    |accumulator, parameter| sequence_step(accumulator, key_hash(parameter) as i64),
+                ),
+            };
+            sequence_finish(
+                sequence_step(accumulator, key_hash(result) as i64),
+                parameters
+                    .as_ref()
+                    .map_or(2, |parameters| parameters.len() + 2),
+            )
         }
         Key::Union(members) => {
             let accumulator = members
@@ -228,6 +253,43 @@ impl Heap {
                         Key::LiteralAlias(origin_key, arguments)
                     } else {
                         Key::GenericAlias(origin_key, Box::new(self.dict_key(*args, depth + 1)?))
+                    }
+                } else if matches!(
+                    self.get(*origin),
+                    Ok(Object::TypingForm {
+                        kind: TypingFormKind::Callable,
+                        ..
+                    })
+                ) {
+                    let Object::Tuple(arguments) = self.get(*args)? else {
+                        return Err(Diagnostic::new("TypeError", "invalid Callable arguments"));
+                    };
+                    if arguments.len() != 2 {
+                        return Err(Diagnostic::new("TypeError", "invalid Callable arguments"));
+                    }
+                    let parameters = if arguments[0] == Value::ELLIPSIS {
+                        None
+                    } else {
+                        let values = match self.get(arguments[0])? {
+                            Object::List(values) | Object::Tuple(values) => values,
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "TypeError",
+                                    "invalid Callable parameters",
+                                ))
+                            }
+                        };
+                        Some(
+                            values
+                                .iter()
+                                .map(|value| self.dict_key(*value, depth + 1))
+                                .collect::<Result<Vec<_>>>()?,
+                        )
+                    };
+                    Key::CallableAlias {
+                        origin: origin_key,
+                        parameters,
+                        result: Box::new(self.dict_key(arguments[1], depth + 1)?),
                     }
                 } else {
                     Key::GenericAlias(origin_key, Box::new(self.dict_key(*args, depth + 1)?))

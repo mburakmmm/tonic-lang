@@ -1582,6 +1582,37 @@ impl Heap {
         if let Ok(Object::GenericAlias { origin, args, .. }) = self.get(owner) {
             return match name {
                 "__origin__" => Ok(*origin),
+                "__args__"
+                    if matches!(
+                        self.get(*origin),
+                        Ok(Object::TypingForm {
+                            kind: crate::heap::TypingFormKind::Callable,
+                            ..
+                        })
+                    ) =>
+                {
+                    let Object::Tuple(arguments) = self.get(*args)? else {
+                        return Err(Diagnostic::new("TypeError", "invalid Callable arguments"));
+                    };
+                    if arguments.len() != 2 {
+                        return Err(Diagnostic::new("TypeError", "invalid Callable arguments"));
+                    }
+                    let mut flattened = if arguments[0] == Value::ELLIPSIS {
+                        vec![Value::ELLIPSIS]
+                    } else {
+                        match self.get(arguments[0])? {
+                            Object::List(values) | Object::Tuple(values) => values.clone(),
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "TypeError",
+                                    "invalid Callable parameters",
+                                ))
+                            }
+                        }
+                    };
+                    flattened.push(arguments[1]);
+                    self.alloc(Object::Tuple(flattened))
+                }
                 "__args__" => Ok(*args),
                 "__value__" | "__type_params__"
                     if matches!(self.get(*origin), Ok(Object::TypeAlias { .. })) =>

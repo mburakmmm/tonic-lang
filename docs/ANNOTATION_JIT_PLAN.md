@@ -147,10 +147,10 @@ sayılmaz.
 
 ## Uygulama durumu
 
-TypePlan v4 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+TypePlan v5 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
 exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
-`list`/`dict`/`set`, fixed/variadic tuple, `typing.Literal` ve kullanıcı class
-identity/version planlarına
+`list`/`dict`/`set`, fixed/variadic tuple, `typing.Literal`, `typing.Callable` ve
+kullanıcı class identity/version planlarına
 dönüşür. PEP 604 `A | B` ve `T | None` union nesneleri düzleştirilir, eşdeğer
 üyeler elenir ve plan üyeleri sıralanarak yazım sırasından bağımsız canonical
 `Union` planı oluşturulur. User-class üyeleri normal class version dependency'si
@@ -172,8 +172,12 @@ içindedir.
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve
-fixed tuple'dan farklı canonical hash üretir. Union narrowing/branch refinement,
-`Callable`, bytes ve buffer/dtype sonraki genişleme dilimleridir.
+fixed tuple'dan farklı canonical hash üretir. `typing.Callable[[A, B], R]`, boş
+parametre listesi ve `typing.Callable[..., R]` ayrı canonical imza planlarıdır.
+Bu bilgi guarded direct-call graph ve callee result analizinde kullanılacaktır;
+Callable planı tek başına opaque callable nesnesini unboxed scalar yapmaz. Karar
+[ADR 0124](adr/0124-callable-type-plan.md) içindedir. Union narrowing/branch
+refinement, bytes ve buffer/dtype sonraki genişleme dilimleridir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

@@ -384,6 +384,7 @@ pub(crate) enum Object {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TypingFormKind {
     Literal,
+    Callable,
 }
 impl Object {
     pub(crate) fn instance_class(&self) -> Option<Value> {
@@ -1935,6 +1936,10 @@ impl Heap {
                 kind: TypingFormKind::Literal,
                 ..
             } => "typing.Literal".into(),
+            Object::TypingForm {
+                kind: TypingFormKind::Callable,
+                ..
+            } => "typing.Callable".into(),
             Object::TypeUnpack(value) => {
                 format!("*{}", self.format_depth(*value, true, path)?)
             }
@@ -1943,6 +1948,13 @@ impl Heap {
                     self.get(*origin),
                     Ok(Object::TypingForm {
                         kind: TypingFormKind::Literal,
+                        ..
+                    })
+                );
+                let callable = matches!(
+                    self.get(*origin),
+                    Ok(Object::TypingForm {
+                        kind: TypingFormKind::Callable,
                         ..
                     })
                 );
@@ -1957,6 +1969,35 @@ impl Heap {
                         "invalid generic alias args",
                     ));
                 };
+                if callable && arguments.len() == 2 {
+                    let mut text = format!("{origin}[");
+                    if arguments[0] == Value::ELLIPSIS {
+                        text.push_str("...");
+                    } else if let Ok(Object::List(parameters) | Object::Tuple(parameters)) =
+                        self.get(arguments[0])
+                    {
+                        text.push('[');
+                        for (index, parameter) in parameters.iter().enumerate() {
+                            if index != 0 {
+                                text.push_str(", ");
+                            }
+                            match self.get(*parameter) {
+                                Ok(Object::Class(class)) => text.push_str(&class.name),
+                                _ => text.push_str(&self.format_depth(*parameter, true, path)?),
+                            }
+                        }
+                        text.push(']');
+                    } else {
+                        text.push_str(&self.format_depth(arguments[0], true, path)?);
+                    }
+                    text.push_str(", ");
+                    match self.get(arguments[1]) {
+                        Ok(Object::Class(class)) => text.push_str(&class.name),
+                        _ => text.push_str(&self.format_depth(arguments[1], true, path)?),
+                    }
+                    text.push(']');
+                    return Ok(text);
+                }
                 let mut text = format!("{origin}[");
                 for (index, argument) in arguments.iter().enumerate() {
                     if index != 0 {

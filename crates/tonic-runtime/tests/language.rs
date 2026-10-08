@@ -1762,6 +1762,41 @@ fn typing_literal_preserves_runtime_identity_and_routes_numeric_jit_guards() {
 }
 
 #[test]
+fn typing_callable_preserves_signature_shape_hash_and_reflection() {
+    let source = concat!(
+        "import typing\n",
+        "from typing import Callable\n",
+        "Pair=Callable[[int,str],float]\n",
+        "AnyArgs=Callable[...,int]\n",
+        "Empty=Callable[[],None]\n",
+        "Short=Callable[int,str]\n",
+        "Listed=Callable[[int],str]\n",
+        "print(Callable,type(Callable).__name__)\n",
+        "print(Pair,Pair.__origin__ is Callable,Pair.__args__)\n",
+        "print(AnyArgs,AnyArgs.__args__)\n",
+        "print(Empty,Empty.__args__)\n",
+        "print(Short,Short==Listed,hash(Short)==hash(Listed),{Short:'ok'}[Listed])",
+    );
+    let program = compile(source, "typing-callable").unwrap();
+    let expected = concat!(
+        "typing.Callable _TypedCacheSpecialForm\n",
+        "typing.Callable[[int, str], float] True (<class 'int'>, <class 'str'>, <class 'float'>)\n",
+        "typing.Callable[..., int] (Ellipsis, <class 'int'>)\n",
+        "typing.Callable[[], None] (None,)\n",
+        "typing.Callable[[int], str] True True ok\n",
+    )
+    .as_bytes();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, expected);
+    }
+}
+
+#[test]
 fn variable_annotations_obey_scope_order_and_survive_jit_and_stress_gc() {
     let source = "def annotation():\n    print('annotation')\n    return int\nvalue: annotation() = 1\nmissing: str\nif False:\n    dead: float\ndef owner():\n    print('owner')\n    return {}\ndef key():\n    print('key')\n    return 0\nowner()[key()]: print('ignored')\nbox={}\nbox['item']: print('ignored') = 3\ndef build():\n    class Marker:\n        pass\n    class Holder:\n        item: Marker\n        absent: str\n    return Holder\nHolder=build()\ndef local_ok():\n    hidden: missing_name\n    return 7\ndef local_missing():\n    hidden: int\n    return hidden\nprint(value,__annotations__)\nprint(box)\nprint(Holder.__annotations__['item'].__name__,Holder.__annotations__['absent'].__name__)\nprint(local_ok())\ntry:\n    local_missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
     let program = compile(source, "variable-annotations").unwrap();

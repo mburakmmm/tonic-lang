@@ -313,17 +313,17 @@ sonra alınır.
   varsayımıdır; annotation yazmayan kod tamamen dinamik kalır. Desteklenen bir
   annotation planı bulunan kod profil sıcaklığını beklemeden guarded typed-JIT
   yoluna aday olur; yanlış tipte çağrı generic Python yoluna deopt eder.
-  - [x] TypePlan v4 temeli: exact `None/bool/int/float/str`, plain container,
+  - [x] TypePlan v5 temeli: exact `None/bool/int/float/str`, plain container,
     nested homogeneous list/dict/set, fixed tuple, class identity/version,
-    canonical PEP 604 union/optional, variadic tuple, canonical Literal,
+    canonical PEP 604 union/optional, variadic tuple, Literal ve Callable,
     canonical hash, deterministic rejection code ve annotation-dict content
     mutation epoch'uyla lazy cache yenileme.
   - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
     union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
     callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
-    deterministic “optimize edilmedi” nedeni. V4 exact/container/class, PEP 604
-    union/optional, variadic tuple ve `typing.Literal` temeli tamamlandı;
-    `Callable`, bytes ve buffer/dtype genişlemesi açık.
+    deterministic “optimize edilmedi” nedeni. V5 exact/container/class, PEP 604
+    union/optional, variadic tuple, `typing.Literal` ve `typing.Callable` temeli
+    tamamlandı; bytes ve buffer/dtype genişlemesi açık.
     - [x] PEP 604 runtime/type-plan yolu: `A | B`/`T | None`, GenericAlias ve
       user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
       class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
@@ -332,7 +332,7 @@ sonra alınır.
       branch refinement tamamlandı; genel union branch narrowing açık iştir.
     - [x] Python `Ellipsis` singleton'ı ve `types.EllipsisType`; parser/bytecode/
       interpreter/Cranelift sabit yolu, truth/hash/dict davranışı ve canonical
-      schema v3 ile tanıtılan ve v4'te korunan
+      schema v3 ile tanıtılan ve güncel v5'te korunan
       `tuple[T, ...] -> VariadicTuple(T)` planı. Hatalı ellipsis yerleşimleri
       deterministic `invalid-generic-arity` üretir.
     - [x] `typing.Literal` runtime özel formu ve schema v4 canonical planı:
@@ -341,6 +341,12 @@ sonra alınır.
       ve sayısal/optional Literal kümelerinden guarded scalar JIT yönlendirmesi.
       Desteklenmeyen Literal değerleri runtime'da taşınabilir, fakat TypePlan'da
       deterministic `unsupported-value` ile generic yolda kalır.
+    - [x] `typing.Callable` runtime özel formu ve schema v5 canonical imza planı:
+      sıralı positional parametre listesi, boş parametre listesi, `...` any-args,
+      nested return planı, kısa `Callable[T, R]` normalizasyonu, reflection,
+      structural equality/hash ve deterministic arity/value reddi. Plan bilgisi
+      direct-call graph analizine hazırdır; tek başına callable nesnesini unbox
+      ettiği varsayılmaz.
   - [x] Function identity + code/execution + annotation-dict content/version
     guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
     version değişiminde cache invalidation veya atomik generic fallback. Eager

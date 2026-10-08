@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 4;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 5;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,6 +19,7 @@ pub(crate) struct TypePlanBuiltins {
     pub dict: Value,
     pub set: Value,
     pub literal: Value,
+    pub callable: Value,
 }
 
 #[repr(u8)]
@@ -45,6 +46,12 @@ pub enum LiteralTypePlan {
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum CallableParameters {
+    Any,
+    Positional(Vec<TypePlan>),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum TypePlan {
     None,
     Exact(ExactTypePlan),
@@ -54,8 +61,15 @@ pub enum TypePlan {
     FixedTuple(Vec<TypePlan>),
     VariadicTuple(Box<TypePlan>),
     Literal(Vec<LiteralTypePlan>),
+    Callable {
+        parameters: CallableParameters,
+        result: Box<TypePlan>,
+    },
     Union(Vec<TypePlan>),
-    Class { type_id: u32, version: u64 },
+    Class {
+        type_id: u32,
+        version: u64,
+    },
 }
 
 #[repr(u8)]
@@ -185,6 +199,16 @@ fn plan_bytes(plan: &Result<TypePlan, TypePlanRejection>) -> usize {
                             _ => 0,
                         })
                         .sum::<usize>()
+            }
+            TypePlan::Callable { parameters, result } => {
+                let parameters = match parameters {
+                    CallableParameters::Any => 0,
+                    CallableParameters::Positional(items) => {
+                        items.capacity() * std::mem::size_of::<TypePlan>()
+                            + items.iter().map(nested).sum::<usize>()
+                    }
+                };
+                parameters + std::mem::size_of::<TypePlan>() + nested(result)
             }
             _ => 0,
         }
@@ -349,6 +373,45 @@ fn resolve_generic_alias(
     };
     if origin == builtins.literal {
         return canonical_literal_arguments(heap, args).map(TypePlan::Literal);
+    }
+    if origin == builtins.callable {
+        if arguments.len() != 2 {
+            return Err(TypePlanRejection::InvalidGenericArity);
+        }
+        let parameters = if arguments[0] == Value::ELLIPSIS {
+            CallableParameters::Any
+        } else {
+            let parameter_values = match heap.get(arguments[0]) {
+                Ok(Object::List(values)) | Ok(Object::Tuple(values)) => values.as_slice(),
+                _ => return Err(TypePlanRejection::InvalidGenericArity),
+            };
+            let parameters = parameter_values
+                .iter()
+                .map(|parameter| {
+                    resolve_type_plan(
+                        heap,
+                        builtins,
+                        *parameter,
+                        depth,
+                        visiting,
+                        class_dependencies,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            CallableParameters::Positional(parameters)
+        };
+        let result = resolve_type_plan(
+            heap,
+            builtins,
+            arguments[1],
+            depth,
+            visiting,
+            class_dependencies,
+        )?;
+        return Ok(TypePlan::Callable {
+            parameters,
+            result: Box::new(result),
+        });
     }
     if origin == builtins.list || origin == builtins.set {
         if arguments.len() != 1 {
@@ -531,6 +594,18 @@ impl CanonicalHash {
                         LiteralTypePlan::Ellipsis => self.u8(4),
                     }
                 }
+            }
+            TypePlan::Callable { parameters, result } => {
+                self.u8(10);
+                match parameters {
+                    CallableParameters::Any => self.u8(0),
+                    CallableParameters::Positional(items) => {
+                        self.u8(1);
+                        self.u64(items.len() as u64);
+                        items.iter().for_each(|item| self.plan(item));
+                    }
+                }
+                self.plan(result);
             }
         }
     }

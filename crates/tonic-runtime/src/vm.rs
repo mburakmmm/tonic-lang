@@ -1253,6 +1253,7 @@ struct RuntimeTypes {
     no_default: Value,
     typing_form: Value,
     literal: Value,
+    callable: Value,
     int: Value,
     bool_: Value,
     float: Value,
@@ -1311,6 +1312,7 @@ impl RuntimeTypes {
             no_default: Value::UNBOUND,
             typing_form: Value::UNBOUND,
             literal: Value::UNBOUND,
+            callable: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
@@ -1357,6 +1359,7 @@ impl RuntimeTypes {
             self.no_default,
             self.typing_form,
             self.literal,
+            self.callable,
             self.int,
             self.bool_,
             self.float,
@@ -1907,6 +1910,7 @@ impl Vm {
                 dict: self.runtime_types.dict,
                 set: self.runtime_types.set,
                 literal: self.runtime_types.literal,
+                callable: self.runtime_types.callable,
             },
             annotations,
         )?;
@@ -2238,6 +2242,24 @@ impl Vm {
                 Err(_) => true,
             });
             return self.heap.alloc(Object::Tuple(flattened));
+        }
+        if matches!(
+            self.heap.get(owner),
+            Ok(Object::TypingForm {
+                kind: TypingFormKind::Callable,
+                ..
+            })
+        ) {
+            if arguments.len() == 2
+                && arguments[0] != Value::ELLIPSIS
+                && !matches!(
+                    self.heap.get(arguments[0]),
+                    Ok(Object::List(_) | Object::Tuple(_))
+                )
+            {
+                arguments[0] = self.heap.alloc(Object::List(vec![arguments[0]]))?;
+            }
+            return self.heap.alloc(Object::Tuple(arguments));
         }
         if !matches!(self.heap.get(owner)?, Object::Class(_)) {
             return self.heap.alloc(Object::Tuple(arguments));
@@ -2600,6 +2622,10 @@ impl Vm {
             class: typing_form,
             kind: TypingFormKind::Literal,
         })?;
+        let callable = vm.heap.alloc(Object::TypingForm {
+            class: typing_form,
+            kind: TypingFormKind::Callable,
+        })?;
         vm.runtime_types = RuntimeTypes {
             none: vm
                 .heap
@@ -2615,6 +2641,7 @@ impl Vm {
             no_default,
             typing_form,
             literal,
+            callable,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
             float: vm
@@ -3007,6 +3034,8 @@ impl Vm {
         let typing = vm.heap.alloc(Object::Module(Vec::new()))?;
         vm.heap
             .add_module_member(typing, "Literal", vm.runtime_types.literal)?;
+        vm.heap
+            .add_module_member(typing, "Callable", vm.runtime_types.callable)?;
         vm.heap
             .add_module_member(typing, "NoDefault", vm.runtime_types.no_default)?;
         vm.modules.insert("typing".into(), typing);
@@ -10719,7 +10748,8 @@ pub(super) fn base_binary_op(op: Op) -> Op {
 mod annotation_type_plan_tests {
     use super::*;
     use crate::{
-        ExactTypePlan, LiteralTypePlan, TypePlan, TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION,
+        CallableParameters, ExactTypePlan, LiteralTypePlan, TypePlan, TypePlanRejection,
+        TYPE_PLAN_SCHEMA_VERSION,
     };
     use tonic_compiler::compile;
 
@@ -10741,6 +10771,9 @@ mod annotation_type_plan_tests {
             "t:tuple[int,str],vt:tuple[int,...],s:type({1}),m:Marker,u:int|None,",
             "v:str|int|str,g:list[int]|None,lit:typing.Literal[1,True,None,'ok',...,1],",
             "nested:typing.Literal[typing.Literal[1],True],",
+            "cb:typing.Callable[[int,str],float],any_cb:typing.Callable[...,int],",
+            "empty_cb:typing.Callable[[],None],bad_callable:typing.Callable[[42],int],",
+            "bad_callable_arity:typing.Callable[[int]],",
             "bad_literal:typing.Literal[1.5],bad_tuple:tuple[int,...,str],bad:42)->float:\n",
             "    return 1.0\n",
             "def reordered(v:str|int)->float:\n    return 1.0\n",
@@ -10749,6 +10782,8 @@ mod annotation_type_plan_tests {
             "def fixed_plan(v:tuple[int,int])->None:\n    pass\n",
             "def literal_order(v:typing.Literal[True,1])->None:\n    pass\n",
             "def literal_canonical(v:typing.Literal[1,True])->None:\n    pass\n",
+            "def callable_short(v:typing.Callable[int,str])->None:\n    pass\n",
+            "def callable_list(v:typing.Callable[[int],str])->None:\n    pass\n",
         );
         let program = compile(source, "annotation-type-plan").unwrap();
         let mut vm = Vm::new().unwrap();
@@ -10815,6 +10850,30 @@ mod annotation_type_plan_tests {
             ]))
         );
         assert_eq!(
+            entry("cb"),
+            Ok(TypePlan::Callable {
+                parameters: CallableParameters::Positional(vec![
+                    TypePlan::Exact(ExactTypePlan::Int),
+                    TypePlan::Exact(ExactTypePlan::Str),
+                ]),
+                result: Box::new(TypePlan::Exact(ExactTypePlan::Float)),
+            })
+        );
+        assert_eq!(
+            entry("any_cb"),
+            Ok(TypePlan::Callable {
+                parameters: CallableParameters::Any,
+                result: Box::new(TypePlan::Exact(ExactTypePlan::Int)),
+            })
+        );
+        assert_eq!(
+            entry("empty_cb"),
+            Ok(TypePlan::Callable {
+                parameters: CallableParameters::Positional(Vec::new()),
+                result: Box::new(TypePlan::None),
+            })
+        );
+        assert_eq!(
             entry("u"),
             Ok(TypePlan::Union(vec![
                 TypePlan::None,
@@ -10843,6 +10902,14 @@ mod annotation_type_plan_tests {
             })
         );
         assert_eq!(entry("bad"), Err(TypePlanRejection::UnsupportedValue));
+        assert_eq!(
+            entry("bad_callable"),
+            Err(TypePlanRejection::UnsupportedValue)
+        );
+        assert_eq!(
+            entry("bad_callable_arity"),
+            Err(TypePlanRejection::InvalidGenericArity)
+        );
         assert_eq!(
             entry("bad_literal"),
             Err(TypePlanRejection::UnsupportedValue)
@@ -10877,6 +10944,13 @@ mod annotation_type_plan_tests {
             literal_order.canonical_hash,
             literal_canonical.canonical_hash
         );
+        let callable_short = vm
+            .annotation_type_plan(global(program.program(), &vm, "callable_short"))
+            .unwrap();
+        let callable_list = vm
+            .annotation_type_plan(global(program.program(), &vm, "callable_list"))
+            .unwrap();
+        assert_eq!(callable_short.canonical_hash, callable_list.canonical_hash);
 
         let annotations = match vm.heap.get(function).unwrap() {
             Object::Function {
