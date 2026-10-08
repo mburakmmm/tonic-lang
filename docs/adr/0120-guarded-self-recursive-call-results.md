@@ -38,5 +38,6 @@ can retain typed local and return flow across recursive calls. The call itself
 still pays the generic VM/frame boundary, so this is a correctness-preserving
 analysis and continuation step rather than the final native recursion ABI.
 
-Mutual recursion, SCC-wide proof, native recursive entry calls, graph-wide code
-budgets and recursive method edges remain future work.
+Native recursive entry calls, SCC-wide code generation and graph-wide code
+budgets remain future work. Guarded mutual-recursive and non-inline method result
+edges were added later in ADR 0121.

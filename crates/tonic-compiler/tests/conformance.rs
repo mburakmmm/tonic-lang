@@ -1,8 +1,8 @@
 use tonic_compiler::{compile, compile_modules, discover_imports, parse, ModuleSource};
 use tonic_core::{
     ast::{
-        BinaryOp, CompareOp, ComprehensionKind, ExprKind, FormatConversion, PatternKind, StmtKind,
-        Target, TypeParamKind,
+        BinaryOp, CompareOp, ComprehensionKind, Constant, ExprKind, FormatConversion, PatternKind,
+        StmtKind, Target, TypeParamKind,
     },
     bytecode::Op,
 };
@@ -43,6 +43,26 @@ fn valid_python_forms() {
     ] {
         compile(src, "x").unwrap();
     }
+}
+
+#[test]
+fn ellipsis_has_owned_ast_and_verified_bytecode() {
+    let source = "marker = ...\ndef variadic(values: tuple[int, ...]):\n    return values";
+    let ast = parse(source, "ellipsis").unwrap();
+    let StmtKind::Assign(_, marker) = &ast.body[0].kind else {
+        panic!("ellipsis assignment")
+    };
+    assert!(matches!(
+        marker.kind,
+        ExprKind::Constant(Constant::Ellipsis)
+    ));
+
+    let program = compile(source, "ellipsis").unwrap();
+    assert!(program.program().code.iter().any(|code| {
+        code.constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Ellipsis))
+    }));
 }
 
 #[test]

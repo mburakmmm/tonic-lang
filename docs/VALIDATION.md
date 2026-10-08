@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 29, core verifier 20, Cranelift JIT 33, runtime unit 26,
-direct bytecode VM 4, buffer 3, C ABI integration 16, foreign wrapper 6, lifecycle/callback 6,
+Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 33, runtime unit 26,
+direct bytecode VM 4, buffer 3, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 146, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 431 test.
+native handles 5, language/runtime 147, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 434 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -105,8 +105,17 @@ hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hat
 operand reddi ve custom metaclass `__or__` önceliğini interpreter/JIT-caller ×
 her-allocation GC matrisinde doğrular. Builtin gözlenebilir çıktı aynı yerel Python
 koşusuyla eşleşir. TypePlan unit testi `int | None`, sırası ters `str | int` ve
-`list[int] | None` planlarını canonical schema v2 `Union` olarak, eşdeğer yazım
+`list[int] | None` planlarını canonical schema v3 `Union` olarak, eşdeğer yazım
 sıralarını da aynı hash ile doğrular.
+
+Ellipsis parser testi `...` sabitini Tonic-owned AST ve doğrulanmış bytecode'a
+taşır. Runtime testi singleton kimliği, `types.EllipsisType`, repr, truth, hash ve
+dict-key davranışını interpreter ile gerçek Cranelift dönüşünde stress-GC altında
+karşılaştırır. TypePlan testi `tuple[int, ...]` değerini schema v3
+`VariadicTuple(Int)` planına çözer, fixed tuple'dan farklı hash üretir ve hatalı
+ellipsis yerleşimini `invalid-generic-arity` olarak kaydeder.
+C ABI testi aynı immediate değeri `OTHER`/opaque olarak güvenle sınıflandırır,
+handle kimliğini koruyarak geri döndürür ve heap adresi varsayımı yapmaz.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

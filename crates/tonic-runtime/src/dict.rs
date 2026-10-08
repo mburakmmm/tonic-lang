@@ -17,6 +17,7 @@ use tonic_core::diagnostic::{Diagnostic, Result};
 enum Key {
     None,
     NotImplemented,
+    Ellipsis,
     SmallInt(i64),
     Int(BigInt),
     Float(u64),
@@ -62,6 +63,7 @@ fn key_hash(key: &Key) -> u64 {
     let hash = match key {
         Key::None => 0x421,
         Key::NotImplemented => 0x422,
+        Key::Ellipsis => 0x423,
         Key::SmallInt(value) => crate::hashing::normalize_i64(*value),
         Key::Int(value) => normalize_bigint(value),
         Key::Float(bits) => hash_u64(*bits),
@@ -149,6 +151,9 @@ impl Heap {
         }
         if value == Value::NOT_IMPLEMENTED {
             return Ok(Key::NotImplemented);
+        }
+        if value == Value::ELLIPSIS {
+            return Ok(Key::Ellipsis);
         }
         if let Some(n) = value.integer() {
             return Ok(Key::SmallInt(n));

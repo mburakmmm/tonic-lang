@@ -1248,6 +1248,7 @@ struct PendingClass {
 struct RuntimeTypes {
     none: Value,
     not_implemented: Value,
+    ellipsis: Value,
     no_default: Value,
     int: Value,
     bool_: Value,
@@ -1303,6 +1304,7 @@ impl RuntimeTypes {
         Self {
             none: Value::UNBOUND,
             not_implemented: Value::UNBOUND,
+            ellipsis: Value::UNBOUND,
             no_default: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
@@ -1346,6 +1348,7 @@ impl RuntimeTypes {
         let mut roots = vec![
             self.none,
             self.not_implemented,
+            self.ellipsis,
             self.no_default,
             self.int,
             self.bool_,
@@ -2535,6 +2538,9 @@ impl Vm {
                 vec![vm.object_class],
                 vm.type_class,
             )?,
+            ellipsis: vm
+                .heap
+                .builtin_class("ellipsis", vec![vm.object_class], vm.type_class)?,
             no_default,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
@@ -2922,6 +2928,8 @@ impl Vm {
             .add_module_member(types, "GenericAlias", vm.runtime_types.generic_alias)?;
         vm.heap
             .add_module_member(types, "UnionType", vm.runtime_types.union_type)?;
+        vm.heap
+            .add_module_member(types, "EllipsisType", vm.runtime_types.ellipsis)?;
         vm.modules.insert("types".into(), types);
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
@@ -2960,6 +2968,7 @@ impl Vm {
             ("dict", vm.runtime_types.dict),
             ("range", vm.runtime_types.range),
             ("NotImplemented", Value::NOT_IMPLEMENTED),
+            ("Ellipsis", Value::ELLIPSIS),
             ("BaseException", vm.runtime_types.base_exception),
             ("Exception", vm.runtime_types.exception),
             ("TypeError", vm.runtime_types.type_error),
@@ -3874,6 +3883,7 @@ impl Vm {
             for c in &code.constants {
                 constants.push(match c {
                     Constant::None => Value::NONE,
+                    Constant::Ellipsis => Value::ELLIPSIS,
                     Constant::Bool(b) => Value::bool(*b),
                     Constant::Int(s) => self.heap.int(s.parse::<BigInt>().map_err(|_| {
                         Diagnostic::new("BytecodeError", "invalid integer constant")
@@ -4392,6 +4402,9 @@ impl Vm {
         }
         if value == Value::NOT_IMPLEMENTED {
             return Ok(self.runtime_types.not_implemented);
+        }
+        if value == Value::ELLIPSIS {
+            return Ok(self.runtime_types.ellipsis);
         }
         if value.integer().is_some() {
             return Ok(self.runtime_types.int);
@@ -10641,11 +10654,14 @@ mod annotation_type_plan_tests {
         let source = concat!(
             "class Marker:\n    pass\n",
             "def typed(x:int,y:list[float],z:dict[str,int],",
-            "t:tuple[int,str],s:type({1}),m:Marker,u:int|None,",
-            "v:str|int|str,g:list[int]|None,bad:42)->float:\n",
+            "t:tuple[int,str],vt:tuple[int,...],s:type({1}),m:Marker,u:int|None,",
+            "v:str|int|str,g:list[int]|None,bad_tuple:tuple[int,...,str],",
+            "bad:42)->float:\n",
             "    return 1.0\n",
             "def reordered(v:str|int)->float:\n    return 1.0\n",
             "def canonical(v:int|str)->float:\n    return 1.0\n",
+            "def variadic_plan(v:tuple[int,...])->None:\n    pass\n",
+            "def fixed_plan(v:tuple[int,int])->None:\n    pass\n",
         );
         let program = compile(source, "annotation-type-plan").unwrap();
         let mut vm = Vm::new().unwrap();
@@ -10687,6 +10703,12 @@ mod annotation_type_plan_tests {
                 TypePlan::Exact(ExactTypePlan::Str),
             ]))
         );
+        assert_eq!(
+            entry("vt"),
+            Ok(TypePlan::VariadicTuple(Box::new(TypePlan::Exact(
+                ExactTypePlan::Int
+            ))))
+        );
         assert_eq!(entry("s"), Ok(TypePlan::Exact(ExactTypePlan::Set)));
         assert_eq!(
             entry("u"),
@@ -10717,6 +10739,10 @@ mod annotation_type_plan_tests {
             })
         );
         assert_eq!(entry("bad"), Err(TypePlanRejection::UnsupportedValue));
+        assert_eq!(
+            entry("bad_tuple"),
+            Err(TypePlanRejection::InvalidGenericArity)
+        );
         assert_eq!(entry("return"), Ok(TypePlan::Exact(ExactTypePlan::Float)));
 
         let reordered = vm
@@ -10726,6 +10752,13 @@ mod annotation_type_plan_tests {
             .annotation_type_plan(global(program.program(), &vm, "canonical"))
             .unwrap();
         assert_eq!(reordered.canonical_hash, canonical.canonical_hash);
+        let variadic = vm
+            .annotation_type_plan(global(program.program(), &vm, "variadic_plan"))
+            .unwrap();
+        let fixed = vm
+            .annotation_type_plan(global(program.program(), &vm, "fixed_plan"))
+            .unwrap();
+        assert_ne!(variadic.canonical_hash, fixed.canonical_hash);
 
         let annotations = match vm.heap.get(function).unwrap() {
             Object::Function {

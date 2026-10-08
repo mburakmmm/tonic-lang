@@ -3139,6 +3139,34 @@ fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
 }
 
 #[test]
+fn ellipsis_singleton_matches_python_runtime_semantics() {
+    let source = concat!(
+        "import types\n",
+        "def marker():\n    return ...\n",
+        "print(marker(),Ellipsis,marker() is Ellipsis)\n",
+        "print(type(...) is types.EllipsisType,type(...).__name__,bool(...))\n",
+        "mapping={...:'ok'}\n",
+        "print(mapping[Ellipsis],hash(...)==hash(Ellipsis))",
+    );
+    let program = compile(source, "ellipsis-singleton").unwrap();
+    let expected = b"Ellipsis Ellipsis True\nTrue ellipsis True\nok True\n";
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.jit_threshold = 1;
+        vm.jit_min_instructions = 0;
+        vm.gc_interval = Some(1);
+        let mut output = Vec::new();
+        vm.run(&program, &mut output).unwrap();
+        assert_eq!(output, expected);
+        if mode == ExecutionMode::Jit {
+            assert!(vm.stats.jit_compiled >= 1);
+            assert!(vm.stats.jit_returns >= 1);
+        }
+    }
+}
+
+#[test]
 fn pep604_unions_are_canonical_and_preserve_metaclass_protocols() {
     let source = concat!(
         "import types\n",

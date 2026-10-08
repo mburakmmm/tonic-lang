@@ -6668,6 +6668,8 @@ impl Vm {
             Some(0x421)
         } else if value == Value::NOT_IMPLEMENTED {
             Some(0x422)
+        } else if value == Value::ELLIPSIS {
+            Some(0x423)
         } else if value == Value::UNBOUND {
             return Err(Diagnostic::new(
                 "TypeError",

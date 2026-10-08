@@ -7,9 +7,28 @@ use tonic_runtime::{
         CAP_PROTOCOL_ACCESS_V1,
     },
     Context, DType, Handle, TonicBuffer, TonicContext, TonicExceptionKind, TonicHandle,
-    TonicPersistentHandle, TonicStatus, Vm, BUFFER_C_CONTIGUOUS, BUFFER_WRITABLE,
+    TonicPersistentHandle, TonicStatus, TonicValueKind, Vm, BUFFER_C_CONTIGUOUS, BUFFER_WRITABLE,
     TONIC_ABI_VERSION,
 };
+
+unsafe extern "C-unwind" fn classify_opaque_singleton(
+    context: *mut TonicContext,
+    arguments: *const TonicHandle,
+    count: usize,
+    output: *mut TonicHandle,
+) -> TonicStatus {
+    assert_eq!(count, 1);
+    let api = negotiate_api(TONIC_ABI_VERSION, 0, CAP_CORE).unwrap();
+    let value = unsafe { arguments.read() };
+    let mut kind = TonicValueKind::NONE;
+    let status = unsafe { (api.value_kind)(context, value, &mut kind) };
+    if status != TonicStatus::OK {
+        return status;
+    }
+    assert_eq!(kind, TonicValueKind::OTHER);
+    unsafe { output.write(value) };
+    TonicStatus::OK
+}
 
 unsafe extern "C-unwind" fn build_container(
     context: *mut TonicContext,
@@ -552,6 +571,28 @@ fn c_function_table_native_executes_without_guest_argument_containers() {
     .unwrap();
     assert_eq!(output, b"42\n");
     assert_eq!(vm.stats.native_calls, 1);
+    assert_eq!(vm.active_handles(), 0);
+}
+
+#[test]
+fn c_value_kind_keeps_ellipsis_as_a_valid_opaque_singleton() {
+    let mut vm = Vm::new().unwrap();
+    vm.register_c_native(
+        "demo",
+        "opaque",
+        1,
+        classify_opaque_singleton,
+        TONIC_ABI_VERSION,
+        CAP_CORE,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    vm.run(
+        &compile("import demo\nprint(demo.opaque(...))", "c-api-ellipsis").unwrap(),
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, b"Ellipsis\n");
     assert_eq!(vm.active_handles(), 0);
 }
 

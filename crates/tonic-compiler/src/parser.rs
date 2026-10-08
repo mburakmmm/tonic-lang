@@ -934,6 +934,7 @@ impl Adapter {
         let kind = match node {
             py::Expr::Constant(c) => ExprKind::Constant(match c.value {
                 py::Constant::None => Constant::None,
+                py::Constant::Ellipsis => Constant::Ellipsis,
                 py::Constant::Bool(b) => Constant::Bool(b),
                 py::Constant::Int(n) => Constant::Int(n.to_string()),
                 py::Constant::Float(n) => Constant::Float(n),

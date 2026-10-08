@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 2;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 3;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +42,7 @@ pub enum TypePlan {
     Dict(Box<TypePlan>, Box<TypePlan>),
     Set(Box<TypePlan>),
     FixedTuple(Vec<TypePlan>),
+    VariadicTuple(Box<TypePlan>),
     Union(Vec<TypePlan>),
     Class { type_id: u32, version: u64 },
 }
@@ -152,7 +153,7 @@ impl FunctionTypePlan {
 fn plan_bytes(plan: &Result<TypePlan, TypePlanRejection>) -> usize {
     fn nested(plan: &TypePlan) -> usize {
         match plan {
-            TypePlan::List(item) | TypePlan::Set(item) => {
+            TypePlan::List(item) | TypePlan::Set(item) | TypePlan::VariadicTuple(item) => {
                 std::mem::size_of::<TypePlan>() + nested(item)
             }
             TypePlan::Dict(key, value) => {
@@ -364,6 +365,20 @@ fn resolve_generic_alias(
         return Ok(TypePlan::Dict(Box::new(key), Box::new(value)));
     }
     if origin == builtins.tuple {
+        if arguments.len() == 2 && arguments[1] == Value::ELLIPSIS {
+            let item = resolve_type_plan(
+                heap,
+                builtins,
+                arguments[0],
+                depth,
+                visiting,
+                class_dependencies,
+            )?;
+            return Ok(TypePlan::VariadicTuple(Box::new(item)));
+        }
+        if arguments.contains(&Value::ELLIPSIS) {
+            return Err(TypePlanRejection::InvalidGenericArity);
+        }
         let items = arguments
             .iter()
             .map(|argument| {
@@ -464,6 +479,10 @@ impl CanonicalHash {
                 self.u8(7);
                 self.u64(items.len() as u64);
                 items.iter().for_each(|item| self.plan(item));
+            }
+            TypePlan::VariadicTuple(item) => {
+                self.u8(8);
+                self.plan(item);
             }
         }
     }

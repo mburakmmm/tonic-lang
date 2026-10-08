@@ -147,9 +147,9 @@ sayılmaz.
 
 ## Uygulama durumu
 
-TypePlan v2 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+TypePlan v3 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
 exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
-`list`/`dict`/`set`, fixed tuple ve kullanıcı class identity/version planlarına
+`list`/`dict`/`set`, fixed/variadic tuple ve kullanıcı class identity/version planlarına
 dönüşür. PEP 604 `A | B` ve `T | None` union nesneleri düzleştirilir, eşdeğer
 üyeler elenir ve plan üyeleri sıralanarak yazım sırasından bağımsız canonical
 `Union` planı oluşturulur. User-class üyeleri normal class version dependency'si
@@ -160,12 +160,16 @@ type parameter, recursive alias ve recursion limit ayrı reason code üretir.
 Fonksiyonun `__annotations__` dict'i için structural iterator epoch'undan ayrı
 bir content-mutation epoch vardır. Var olan anahtarın değerini değiştirmek de bu
 epoch'u artırır; function içindeki plan cache yalnız epoch eşleşiyorsa kullanılır.
-TypePlan temeli tek başına typed native entry seçmez. Union narrowing/branch
-refinement, `typing.Literal`/`Callable`, variadic tuple, bytes ve buffer/dtype
-sonraki genişleme dilimleridir. PEP 604 runtime nesnesi; `types.UnionType`,
+TypePlan temeli tek başına typed native entry seçmez. `tuple[T, ...]`, Python
+`Ellipsis` singleton'ı üzerinden ayrı `VariadicTuple(T)` planına dönüşür ve
+fixed tuple'dan farklı canonical hash üretir. Union narrowing/branch refinement,
+`typing.Literal`/`Callable`, bytes ve buffer/dtype sonraki genişleme dilimleridir.
+PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte
 uygulanmıştır. Karar [ADR 0115](adr/0115-pep604-union-type-plan.md) içindedir.
+Variadic tuple kararı [ADR 0122](adr/0122-ellipsis-variadic-tuple-plan.md)
+içindedir.
 Temel kararın ayrıntısı [ADR 0104](adr/0104-type-plan-v1.md) içindedir.
 
 İlk typed giriş dilimi de tamamlandı. Bütün parametreleri ve dönüşü exact

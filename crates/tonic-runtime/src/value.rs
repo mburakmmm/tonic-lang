@@ -6,6 +6,7 @@ impl Value {
     pub const NONE: Self = Self(4);
     pub const UNBOUND: Self = Self(5);
     pub const NOT_IMPLEMENTED: Self = Self(6);
+    pub const ELLIPSIS: Self = Self(7);
     pub(crate) fn raw(self) -> u64 {
         self.0
     }
@@ -68,5 +69,6 @@ mod tests {
         }
         assert!(Value::int(Value::MAX_INT + 1).is_none());
         assert!(Value::NONE.as_int().is_none());
+        assert!(Value::ELLIPSIS.heap_index().is_none());
     }
 }

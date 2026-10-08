@@ -30,6 +30,7 @@ use tonic_core::{
 pub const CRANELIFT_VERSION: &str = cranelift_codegen::VERSION;
 pub const VALUE_NONE: u64 = 4;
 pub const VALUE_UNBOUND: u64 = 5;
+pub const VALUE_ELLIPSIS: u64 = 7;
 const TAG_MASK: i64 = 7;
 const INT_TAG: i64 = 1;
 const VALUE_FALSE: i64 = 2;
@@ -2920,7 +2921,7 @@ fn analyze_typed_scalar_execution(
                     }
                     Constant::Float(_) => ScalarFact::Float,
                     Constant::None => ScalarFact::None,
-                    Constant::Int(_) | Constant::Str(_) => ScalarFact::Unknown,
+                    Constant::Ellipsis | Constant::Int(_) | Constant::Str(_) => ScalarFact::Unknown,
                 };
             }
             Op::Move => after[instruction.a as usize] = fact(instruction.b),
@@ -3269,6 +3270,7 @@ fn unsupported(pc: usize, opcode: Option<Op>, reason: &str) -> Error {
 fn encode_constant(constant: &Constant) -> Option<u64> {
     match constant {
         Constant::None => Some(VALUE_NONE),
+        Constant::Ellipsis => Some(VALUE_ELLIPSIS),
         Constant::Bool(value) => Some(if *value {
             VALUE_TRUE as u64
         } else {

@@ -291,6 +291,7 @@ pub struct CallArguments {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
     None,
+    Ellipsis,
     Bool(bool),
     Int(String),
     Float(f64),

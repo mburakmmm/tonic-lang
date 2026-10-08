@@ -279,7 +279,7 @@ impl<'a> Context<'a> {
         if value == Value::NONE {
             return Ok(ValueKind::None);
         }
-        if value == Value::NOT_IMPLEMENTED {
+        if value == Value::NOT_IMPLEMENTED || value == Value::ELLIPSIS {
             return Ok(ValueKind::Other);
         }
         if value.as_bool().is_some() {

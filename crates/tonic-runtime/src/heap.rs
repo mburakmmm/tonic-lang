@@ -1713,6 +1713,9 @@ impl Heap {
                 "NotImplemented should not be used in a boolean context",
             ));
         }
+        if v == Value::ELLIPSIS {
+            return Ok(true);
+        }
         Ok(match self.get(v)? {
             Object::Int(n) => !n.is_zero(),
             Object::Float(n) => *n != 0.0,
@@ -1787,6 +1790,9 @@ impl Heap {
         }
         if v == Value::NOT_IMPLEMENTED {
             return Ok("NotImplemented".into());
+        }
+        if v == Value::ELLIPSIS {
+            return Ok("Ellipsis".into());
         }
         Ok(match self.get(v)? {
             Object::Class(c) => format!("<class '{}'>", c.name),
