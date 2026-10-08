@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-7 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+8 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 33, runtime unit 26,
-direct bytecode VM 4, buffer 3, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 4, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 436 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 437 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -105,13 +105,13 @@ hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hat
 operand reddi ve custom metaclass `__or__` önceliğini interpreter/JIT-caller ×
 her-allocation GC matrisinde doğrular. Builtin gözlenebilir çıktı aynı yerel Python
 koşusuyla eşleşir. TypePlan unit testi `int | None`, sırası ters `str | int` ve
-`list[int] | None` planlarını canonical schema v5 `Union` olarak, eşdeğer yazım
+`list[int] | None` planlarını canonical schema v6 `Union` olarak, eşdeğer yazım
 sıralarını da aynı hash ile doğrular.
 
 Ellipsis parser testi `...` sabitini Tonic-owned AST ve doğrulanmış bytecode'a
 taşır. Runtime testi singleton kimliği, `types.EllipsisType`, repr, truth, hash ve
 dict-key davranışını interpreter ile gerçek Cranelift dönüşünde stress-GC altında
-karşılaştırır. TypePlan testi `tuple[int, ...]` değerini güncel schema v5
+karşılaştırır. TypePlan testi `tuple[int, ...]` değerini güncel schema v6
 `VariadicTuple(Int)` planına çözer, fixed tuple'dan farklı hash üretir ve hatalı
 ellipsis yerleşimini `invalid-generic-arity` olarak kaydeder.
 C ABI testi aynı immediate değeri `OTHER`/opaque olarak güvenle sınıflandırır,
@@ -123,7 +123,7 @@ ve dict-key kullanımını interpreter/JIT ile stress-GC altında doğrular. Ayn
 `Literal[1] -> Literal[2]` fonksiyonunun ilk çağrıda guarded typed JIT'e girdiğini,
 anotasyonda yazmayan başka bir int değerin de Python'ın advisory annotation
 semantiği korunarak güvenli geniş int guard'ından geçtiğini doğrular. TypePlan
-unit testi güncel schema v5 `Literal` sıralama/tekrar elemesini, nested flattening'i,
+unit testi güncel schema v6 `Literal` sıralama/tekrar elemesini, nested flattening'i,
 canonical hash'i ve float literal için deterministic `unsupported-value` sonucunu
 denetler.
 
@@ -134,6 +134,14 @@ interpreter/JIT ile stress-GC altında doğrular. TypePlan unit testi schema v5
 `Callable` parametre/dönüş planlarını, `Any` parametre biçimini, empty signature'ı,
 eşdeğer yazımların canonical hash'ini ve hatalı arity/value için deterministic
 reddi doğrular.
+
+Native buffer tür testi `fastmath.array` sonucunun exact `fastmath.Buffer`
+runtime sınıfını `type` ve `isinstance` üzerinden verdiğini, annotation içinde
+aynı kimliğin kullanılabildiğini ve allocation-stress moving GC altında kökünün
+korunduğunu doğrular. TypePlan unit testi schema v6 planını yalnız gerçekten
+uygulanan `f64` dtype ile, rank ve mutability kısıtlarını `any` bırakarak üretir.
+Diğer public ABI dtype sabitleri bu test veya plan tarafından uygulanmış storage
+olarak kabul edilmez.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

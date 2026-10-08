@@ -147,10 +147,11 @@ sayılmaz.
 
 ## Uygulama durumu
 
-TypePlan v5 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+TypePlan v6 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
 exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
 `list`/`dict`/`set`, fixed/variadic tuple, `typing.Literal`, `typing.Callable` ve
-kullanıcı class identity/version planlarına
+kullanıcı class identity/version planlarına; native `fastmath.Buffer` ise exact
+`f64` dtype, unconstrained rank ve unconstrained mutability taşıyan buffer planına
 dönüşür. PEP 604 `A | B` ve `T | None` union nesneleri düzleştirilir, eşdeğer
 üyeler elenir ve plan üyeleri sıralanarak yazım sırasından bağımsız canonical
 `Union` planı oluşturulur. User-class üyeleri normal class version dependency'si
@@ -176,8 +177,11 @@ fixed tuple'dan farklı canonical hash üretir. `typing.Callable[[A, B], R]`, bo
 parametre listesi ve `typing.Callable[..., R]` ayrı canonical imza planlarıdır.
 Bu bilgi guarded direct-call graph ve callee result analizinde kullanılacaktır;
 Callable planı tek başına opaque callable nesnesini unboxed scalar yapmaz. Karar
-[ADR 0124](adr/0124-callable-type-plan.md) içindedir. Union narrowing/branch
-refinement, bytes ve buffer/dtype sonraki genişleme dilimleridir.
+[ADR 0124](adr/0124-callable-type-plan.md) içindedir. Mevcut buffer planı
+[ADR 0125](adr/0125-f64-buffer-type-plan.md) içindedir. Runtime henüz yalnız
+`f64` depolama uyguladığı için diğer ABI dtype sabitleri desteklenmiş planlar
+sayılmaz; parametrik dtype/rank/mutability, bunların giriş/loop guard'ları,
+union narrowing/branch refinement ve bytes sonraki genişleme dilimleridir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

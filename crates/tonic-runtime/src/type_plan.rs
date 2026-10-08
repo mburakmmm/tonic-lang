@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 5;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 6;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +18,7 @@ pub(crate) struct TypePlanBuiltins {
     pub tuple: Value,
     pub dict: Value,
     pub set: Value,
+    pub buffer: Value,
     pub literal: Value,
     pub callable: Value,
 }
@@ -51,6 +52,27 @@ pub enum CallableParameters {
     Positional(Vec<TypePlan>),
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum BufferDTypePlan {
+    F64,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub enum BufferMutabilityPlan {
+    Any,
+    ReadOnly,
+    Writable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct BufferTypePlan {
+    pub dtype: BufferDTypePlan,
+    pub rank: Option<u32>,
+    pub mutability: BufferMutabilityPlan,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum TypePlan {
     None,
@@ -65,6 +87,7 @@ pub enum TypePlan {
         parameters: CallableParameters,
         result: Box<TypePlan>,
     },
+    Buffer(BufferTypePlan),
     Union(Vec<TypePlan>),
     Class {
         type_id: u32,
@@ -287,6 +310,13 @@ fn resolve_type_plan(
         .find_map(|(candidate, kind)| (annotation == candidate).then_some(kind))
     {
         return Ok(TypePlan::Exact(kind));
+    }
+    if annotation == builtins.buffer {
+        return Ok(TypePlan::Buffer(BufferTypePlan {
+            dtype: BufferDTypePlan::F64,
+            rank: None,
+            mutability: BufferMutabilityPlan::Any,
+        }));
     }
     if !visiting.insert(annotation) {
         return Err(TypePlanRejection::RecursiveAlias);
@@ -606,6 +636,18 @@ impl CanonicalHash {
                     }
                 }
                 self.plan(result);
+            }
+            TypePlan::Buffer(buffer) => {
+                self.u8(11);
+                self.u8(buffer.dtype as u8);
+                match buffer.rank {
+                    Some(rank) => {
+                        self.u8(1);
+                        self.u32(rank);
+                    }
+                    None => self.u8(0),
+                }
+                self.u8(buffer.mutability as u8);
             }
         }
     }

@@ -1254,6 +1254,7 @@ struct RuntimeTypes {
     typing_form: Value,
     literal: Value,
     callable: Value,
+    buffer: Value,
     int: Value,
     bool_: Value,
     float: Value,
@@ -1313,6 +1314,7 @@ impl RuntimeTypes {
             typing_form: Value::UNBOUND,
             literal: Value::UNBOUND,
             callable: Value::UNBOUND,
+            buffer: Value::UNBOUND,
             int: Value::UNBOUND,
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
@@ -1360,6 +1362,7 @@ impl RuntimeTypes {
             self.typing_form,
             self.literal,
             self.callable,
+            self.buffer,
             self.int,
             self.bool_,
             self.float,
@@ -1909,6 +1912,7 @@ impl Vm {
                 tuple: self.runtime_types.tuple,
                 dict: self.runtime_types.dict,
                 set: self.runtime_types.set,
+                buffer: self.runtime_types.buffer,
                 literal: self.runtime_types.literal,
                 callable: self.runtime_types.callable,
             },
@@ -2626,6 +2630,9 @@ impl Vm {
             class: typing_form,
             kind: TypingFormKind::Callable,
         })?;
+        let buffer = vm
+            .heap
+            .builtin_class("Buffer", vec![vm.object_class], vm.type_class)?;
         vm.runtime_types = RuntimeTypes {
             none: vm
                 .heap
@@ -2642,6 +2649,7 @@ impl Vm {
             typing_form,
             literal,
             callable,
+            buffer,
             int,
             bool_: vm.heap.builtin_class("bool", vec![int], vm.type_class)?,
             float: vm
@@ -3039,6 +3047,9 @@ impl Vm {
         vm.heap
             .add_module_member(typing, "NoDefault", vm.runtime_types.no_default)?;
         vm.modules.insert("typing".into(), typing);
+        let fastmath = vm.native_module_value("fastmath")?;
+        vm.heap
+            .add_module_member(fastmath, "Buffer", vm.runtime_types.buffer)?;
         for (class, builtin) in [
             (vm.runtime_types.int, Builtin::IntHash),
             (vm.runtime_types.bool_, Builtin::IntHash),
@@ -4527,6 +4538,7 @@ impl Vm {
             Object::Tuple(_) => self.runtime_types.tuple,
             Object::Dict(_) => self.runtime_types.dict,
             Object::Set(_) => self.runtime_types.set,
+            Object::Buffer(_) => self.runtime_types.buffer,
             Object::Range { .. } => self.runtime_types.range,
             Object::Function { .. } => self.runtime_types.function,
             Object::TypingForm { class, .. } => *class,
@@ -10748,8 +10760,8 @@ pub(super) fn base_binary_op(op: Op) -> Op {
 mod annotation_type_plan_tests {
     use super::*;
     use crate::{
-        CallableParameters, ExactTypePlan, LiteralTypePlan, TypePlan, TypePlanRejection,
-        TYPE_PLAN_SCHEMA_VERSION,
+        BufferDTypePlan, BufferMutabilityPlan, BufferTypePlan, CallableParameters, ExactTypePlan,
+        LiteralTypePlan, TypePlan, TypePlanRejection, TYPE_PLAN_SCHEMA_VERSION,
     };
     use tonic_compiler::compile;
 
@@ -10766,13 +10778,15 @@ mod annotation_type_plan_tests {
     fn resolved_annotations_have_canonical_plans_and_content_versions() {
         let source = concat!(
             "import typing\n",
+            "import fastmath\n",
             "class Marker:\n    pass\n",
             "def typed(x:int,y:list[float],z:dict[str,int],",
             "t:tuple[int,str],vt:tuple[int,...],s:type({1}),m:Marker,u:int|None,",
             "v:str|int|str,g:list[int]|None,lit:typing.Literal[1,True,None,'ok',...,1],",
             "nested:typing.Literal[typing.Literal[1],True],",
             "cb:typing.Callable[[int,str],float],any_cb:typing.Callable[...,int],",
-            "empty_cb:typing.Callable[[],None],bad_callable:typing.Callable[[42],int],",
+            "empty_cb:typing.Callable[[],None],buffer:fastmath.Buffer,",
+            "bad_callable:typing.Callable[[42],int],",
             "bad_callable_arity:typing.Callable[[int]],",
             "bad_literal:typing.Literal[1.5],bad_tuple:tuple[int,...,str],bad:42)->float:\n",
             "    return 1.0\n",
@@ -10872,6 +10886,14 @@ mod annotation_type_plan_tests {
                 parameters: CallableParameters::Positional(Vec::new()),
                 result: Box::new(TypePlan::None),
             })
+        );
+        assert_eq!(
+            entry("buffer"),
+            Ok(TypePlan::Buffer(BufferTypePlan {
+                dtype: BufferDTypePlan::F64,
+                rank: None,
+                mutability: BufferMutabilityPlan::Any,
+            }))
         );
         assert_eq!(
             entry("u"),

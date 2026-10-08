@@ -73,3 +73,27 @@ fn fastmath_sum_reads_one_typed_buffer_without_element_boxing_or_copying() {
     assert!(vm.stats.gc_collections > 0);
     assert_eq!(vm.active_handles(), 0);
 }
+
+#[test]
+fn fastmath_buffer_has_a_stable_runtime_type_for_annotations() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "values=fastmath.array([1.0,2.0])\n",
+            "print(type(values) is fastmath.Buffer)\n",
+            "print(isinstance(values,fastmath.Buffer))\n",
+            "def total(values:fastmath.Buffer)->float:\n",
+            "    return fastmath.sum(values)\n",
+            "print(total(values))\n",
+        ),
+        "buffer-type",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"True\nTrue\n3.0\n");
+    assert!(vm.stats.gc_collections > 0);
+    assert_eq!(vm.active_handles(), 0);
+}
