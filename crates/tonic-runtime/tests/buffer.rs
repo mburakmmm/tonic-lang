@@ -80,6 +80,9 @@ fn fastmath_buffer_has_a_stable_runtime_type_for_annotations() {
         concat!(
             "import fastmath\n",
             "values=fastmath.array([1.0,2.0])\n",
+            "alias=fastmath.Buffer[float,1,False]\n",
+            "print(alias.__origin__ is fastmath.Buffer,",
+            "alias.__args__==(float,1,False))\n",
             "print(type(values) is fastmath.Buffer)\n",
             "print(isinstance(values,fastmath.Buffer))\n",
             "def total(values:fastmath.Buffer)->float:\n",
@@ -93,7 +96,7 @@ fn fastmath_buffer_has_a_stable_runtime_type_for_annotations() {
     vm.gc_interval = Some(1);
     let mut output = Vec::new();
     vm.run(&program, &mut output).unwrap();
-    assert_eq!(output, b"True\nTrue\n3.0\n");
+    assert_eq!(output, b"True True\nTrue\nTrue\n3.0\n");
     assert!(vm.stats.gc_collections > 0);
     assert_eq!(vm.active_handles(), 0);
 }
@@ -104,11 +107,16 @@ fn buffer_annotation_guards_first_call_jit_without_enforcing_the_hint() {
         concat!(
             "import fastmath\n",
             "sum_buffer=fastmath.sum\n",
-            "def total(values:fastmath.Buffer)->float:\n",
+            "def total(values:fastmath.Buffer[float,1,False])->float:\n",
+            "    return sum_buffer(values)\n",
+            "def rank_two(values:fastmath.Buffer[float,2,False])->float:\n",
+            "    return sum_buffer(values)\n",
+            "def need_writable(values:fastmath.Buffer[float,...,True])->float:\n",
             "    return sum_buffer(values)\n",
             "values=fastmath.array([1.0,2.0,3.0])\n",
             "print(total(values))\n",
             "print(total([4.0,5.0]))\n",
+            "print(rank_two(values),need_writable(values))\n",
         ),
         "buffer-annotation-jit",
     )
@@ -118,11 +126,11 @@ fn buffer_annotation_guards_first_call_jit_without_enforcing_the_hint() {
     vm.gc_interval = Some(1);
     let mut output = Vec::new();
     vm.run(&program, &mut output).unwrap();
-    assert_eq!(output, b"6.0\n9.0\n");
-    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(output, b"6.0\n9.0\n6.0 6.0\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 3);
     assert_eq!(vm.stats.jit_annotation_compiled, 1);
     assert_eq!(vm.stats.jit_compiled, 1);
-    assert_eq!(vm.stats.jit_annotation_guard_misses, 1);
+    assert_eq!(vm.stats.jit_annotation_guard_misses, 3);
     assert!(vm.stats.jit_side_exits >= 1);
     assert!(vm.stats.jit_resumes >= 1);
     assert!(vm.stats.gc_collections > 0);

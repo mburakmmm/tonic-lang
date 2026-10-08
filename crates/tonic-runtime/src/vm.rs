@@ -7892,6 +7892,7 @@ impl Vm {
                                     self.runtime_types.tuple,
                                     self.runtime_types.dict,
                                     self.runtime_types.set,
+                                    self.runtime_types.buffer,
                                     self.type_class,
                                 ]
                                 .contains(&owner)
@@ -10991,7 +10992,6 @@ mod annotation_type_plan_tests {
             .annotation_type_plan(global(program.program(), &vm, "callable_list"))
             .unwrap();
         assert_eq!(callable_short.canonical_hash, callable_list.canonical_hash);
-
         let annotations = match vm.heap.get(function).unwrap() {
             Object::Function {
                 annotations: Some(annotations),
@@ -11038,5 +11038,73 @@ mod annotation_type_plan_tests {
             panic!("expected class plan")
         };
         assert!(*version > marker_plan.1);
+    }
+
+    #[test]
+    fn parameterized_buffer_annotations_encode_only_implemented_constraints() {
+        let source = concat!(
+            "import fastmath\n",
+            "def plain(v:fastmath.Buffer)->None: pass\n",
+            "def dtype(v:fastmath.Buffer[float])->None: pass\n",
+            "def equivalent(v:fastmath.Buffer[float,...,...])->None: pass\n",
+            "def constrained(v:fastmath.Buffer[float,1,False])->None: pass\n",
+            "def writable(v:fastmath.Buffer[float,...,True])->None: pass\n",
+            "def bad_dtype(v:fastmath.Buffer[int])->None: pass\n",
+            "def bad_rank(v:fastmath.Buffer[float,-1])->None: pass\n",
+            "def bad_mutability(v:fastmath.Buffer[float,1,'readonly'])->None: pass\n",
+            "def bad_arity(v:fastmath.Buffer[float,1,False,None])->None: pass\n",
+        );
+        let program = compile(source, "buffer-type-plan").unwrap();
+        let mut vm = Vm::new().unwrap();
+        vm.run(&program, &mut Vec::new()).unwrap();
+        let plan = |vm: &mut Vm, name: &str| {
+            vm.annotation_type_plan(global(program.program(), vm, name))
+                .unwrap()
+        };
+        let plain = plan(&mut vm, "plain");
+        let dtype = plan(&mut vm, "dtype");
+        let equivalent = plan(&mut vm, "equivalent");
+        assert_eq!(plain.canonical_hash, dtype.canonical_hash);
+        assert_eq!(plain.canonical_hash, equivalent.canonical_hash);
+        let parameter = |plan: &FunctionTypePlan| {
+            plan.annotations
+                .iter()
+                .find(|entry| entry.name == "v")
+                .unwrap()
+                .plan
+                .clone()
+        };
+        assert_eq!(
+            parameter(&plan(&mut vm, "constrained")),
+            Ok(TypePlan::Buffer(BufferTypePlan {
+                dtype: BufferDTypePlan::F64,
+                rank: Some(1),
+                mutability: BufferMutabilityPlan::ReadOnly,
+            }))
+        );
+        assert_eq!(
+            parameter(&plan(&mut vm, "writable")),
+            Ok(TypePlan::Buffer(BufferTypePlan {
+                dtype: BufferDTypePlan::F64,
+                rank: None,
+                mutability: BufferMutabilityPlan::Writable,
+            }))
+        );
+        assert_eq!(
+            parameter(&plan(&mut vm, "bad_dtype")),
+            Err(TypePlanRejection::UnsupportedBufferDType)
+        );
+        assert_eq!(
+            parameter(&plan(&mut vm, "bad_rank")),
+            Err(TypePlanRejection::InvalidBufferRank)
+        );
+        assert_eq!(
+            parameter(&plan(&mut vm, "bad_mutability")),
+            Err(TypePlanRejection::InvalidBufferMutability)
+        );
+        assert_eq!(
+            parameter(&plan(&mut vm, "bad_arity")),
+            Err(TypePlanRejection::InvalidGenericArity)
+        );
     }
 }

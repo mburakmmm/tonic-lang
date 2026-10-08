@@ -147,7 +147,7 @@ sayılmaz.
 
 ## Uygulama durumu
 
-TypePlan v6 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
+TypePlan v7 temeli tamamlandı. Runtime'da değerlendirilen annotation değerleri
 exact `None`/`NoneType`/`bool`/`int`/`float`/`str`, plain container, homogeneous
 `list`/`dict`/`set`, fixed/variadic tuple, `typing.Literal`, `typing.Callable` ve
 kullanıcı class identity/version planlarına; native `fastmath.Buffer` ise exact
@@ -180,8 +180,15 @@ Callable planı tek başına opaque callable nesnesini unboxed scalar yapmaz. Ka
 [ADR 0124](adr/0124-callable-type-plan.md) içindedir. Mevcut buffer planı
 [ADR 0125](adr/0125-f64-buffer-type-plan.md) içindedir. Runtime henüz yalnız
 `f64` depolama uyguladığı için diğer ABI dtype sabitleri desteklenmiş planlar
-sayılmaz; parametrik dtype/rank/mutability, bunların giriş/loop guard'ları,
-union narrowing/branch refinement ve bytes sonraki genişleme dilimleridir.
+sayılmaz. Advisory parametrik yüzey `Buffer[float]`,
+`Buffer[float, rank]` ve `Buffer[float, rank, writable]` biçimlerini çözer;
+`...` rank veya mutability kısıtını kaldırır. Plain `Buffer`, `Buffer[float]` ve
+`Buffer[float, ..., ...]` aynı canonical planı üretir. Desteklenmeyen dtype,
+geçersiz rank/mutability ve arity ayrı rejection code taşır. Karar
+[ADR 0127](adr/0127-parameterized-f64-buffer-annotations.md) içindedir.
+Ek gerçek storage dtype'ları, strict `tonic.types`, giriş ötesindeki loop
+guard'ları, union narrowing/branch refinement ve bytes sonraki genişleme
+dilimleridir.
 Concrete buffer planı annotation-JIT parametre kapısına da bağlıdır. Exact native
 buffer object kind ve `f64` storage doğrulanır; planda mevcutsa rank ve mutability
 da kontrol edilir. Buffer tagged managed root olarak kaldığı için scalar ABI'ye

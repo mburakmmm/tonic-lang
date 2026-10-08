@@ -313,7 +313,7 @@ sonra alınır.
   varsayımıdır; annotation yazmayan kod tamamen dinamik kalır. Desteklenen bir
   annotation planı bulunan kod profil sıcaklığını beklemeden guarded typed-JIT
   yoluna aday olur; yanlış tipte çağrı generic Python yoluna deopt eder.
-  - [x] TypePlan v6 temeli: exact `None/bool/int/float/str`, plain container,
+  - [x] TypePlan v7 temeli: exact `None/bool/int/float/str`, plain container,
     nested homogeneous list/dict/set, fixed tuple, class identity/version,
     canonical PEP 604 union/optional, variadic tuple, Literal, Callable ve exact
     `f64` buffer,
@@ -322,10 +322,10 @@ sonra alınır.
   - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
     union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
     callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
-    deterministic “optimize edilmedi” nedeni. V6 exact/container/class, PEP 604
+    deterministic “optimize edilmedi” nedeni. V7 exact/container/class, PEP 604
     union/optional, variadic tuple, `typing.Literal` ve `typing.Callable` temeli
-    ile mevcut concrete `fastmath.Buffer`/`f64` planı tamamlandı; bytes ve
-    parametreli dtype/rank/mutability genişlemesi açık.
+    ile mevcut concrete ve parametrik `fastmath.Buffer`/`f64` planı tamamlandı;
+    bytes, ek gerçek storage dtype'ları ve strict `tonic.types` yüzeyi açık.
     - [x] PEP 604 runtime/type-plan yolu: `A | B`/`T | None`, GenericAlias ve
       user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
       class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
@@ -334,7 +334,7 @@ sonra alınır.
       branch refinement tamamlandı; genel union branch narrowing açık iştir.
     - [x] Python `Ellipsis` singleton'ı ve `types.EllipsisType`; parser/bytecode/
       interpreter/Cranelift sabit yolu, truth/hash/dict davranışı ve canonical
-      schema v3 ile tanıtılan ve güncel v6'da korunan
+      schema v3 ile tanıtılan ve güncel v7'de korunan
       `tuple[T, ...] -> VariadicTuple(T)` planı. Hatalı ellipsis yerleşimleri
       deterministic `invalid-generic-arity` üretir.
     - [x] `typing.Literal` runtime özel formu ve schema v4 canonical planı:
@@ -354,6 +354,10 @@ sonra alınır.
       `isinstance`, canonical hash, precise runtime root ve moving-GC testi.
       Henüz uygulanmayan dtype'lar veya annotation'da ifade edilmeyen shape/
       mutability kısıtları plan tarafından varmış gibi kabul edilmez.
+    - [x] Advisory parametrik buffer annotation'ı:
+      `Buffer[float]`, `Buffer[float, rank]` ve
+      `Buffer[float, rank, writable]`; `...` wildcard, canonical eşdeğerlik ve
+      unsupported dtype/invalid rank/mutability/arity için ayrı rejection code.
   - [x] Function identity + code/execution + annotation-dict content/version
     guard'ı; `__annotations__` mutation/replacement/delete ve class dependency
     version değişiminde cache invalidation veya atomik generic fallback. Eager
@@ -446,9 +450,10 @@ sonra alınır.
       rank/mutability guard'ı; managed değer root buffer'da kalır. İlk çağrı
       baseline derlemesi native `fastmath.sum` sınırında generic side-exit/resume
       yapar; yanlış nesne advisory generic fallback'e gider.
-    - [ ] Parametreli dtype/rank/mutability annotation yüzeyi, giriş ve loop
-      guard üretimi, doğrudan native indexed loop lowering'i, bounds elimination
-      ve alias/escape materialization.
+    - [x] Uygulanan `f64` storage için parametrik dtype/rank/mutability annotation
+      yüzeyi ve gerçek giriş guard üretimi; wildcard ve advisory fallback.
+    - [ ] Doğrudan native indexed loop lowering'i, shape/stride loop guard'ı,
+      bounds elimination, writable store ve alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

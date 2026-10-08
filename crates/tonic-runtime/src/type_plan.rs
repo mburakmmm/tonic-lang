@@ -2,9 +2,10 @@ use crate::{
     heap::{Heap, Object, TypingFormKind},
     value::Value,
 };
+use num_traits::ToPrimitive;
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 6;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 7;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +106,9 @@ pub enum TypePlanRejection {
     RecursiveAlias,
     RecursionLimit,
     NonStringAnnotationKey,
+    UnsupportedBufferDType,
+    InvalidBufferRank,
+    InvalidBufferMutability,
 }
 
 impl TypePlanRejection {
@@ -118,6 +122,9 @@ impl TypePlanRejection {
             Self::RecursiveAlias => "recursive-alias",
             Self::RecursionLimit => "recursion-limit",
             Self::NonStringAnnotationKey => "non-string-annotation-key",
+            Self::UnsupportedBufferDType => "unsupported-buffer-dtype",
+            Self::InvalidBufferRank => "invalid-buffer-rank",
+            Self::InvalidBufferMutability => "invalid-buffer-mutability",
         }
     }
 }
@@ -442,6 +449,39 @@ fn resolve_generic_alias(
             parameters,
             result: Box::new(result),
         });
+    }
+    if origin == builtins.buffer {
+        if !(1..=3).contains(&arguments.len()) {
+            return Err(TypePlanRejection::InvalidGenericArity);
+        }
+        if arguments[0] != builtins.float {
+            return Err(TypePlanRejection::UnsupportedBufferDType);
+        }
+        let rank = if arguments.len() < 2 || arguments[1] == Value::ELLIPSIS {
+            None
+        } else if let Some(rank) = arguments[1].as_int() {
+            Some(u32::try_from(rank).map_err(|_| TypePlanRejection::InvalidBufferRank)?)
+        } else if let Ok(Object::Int(rank)) = heap.get(arguments[1]) {
+            Some(rank.to_u32().ok_or(TypePlanRejection::InvalidBufferRank)?)
+        } else {
+            return Err(TypePlanRejection::InvalidBufferRank);
+        };
+        let mutability = if arguments.len() < 3 || arguments[2] == Value::ELLIPSIS {
+            BufferMutabilityPlan::Any
+        } else if let Some(writable) = arguments[2].as_bool() {
+            if writable {
+                BufferMutabilityPlan::Writable
+            } else {
+                BufferMutabilityPlan::ReadOnly
+            }
+        } else {
+            return Err(TypePlanRejection::InvalidBufferMutability);
+        };
+        return Ok(TypePlan::Buffer(BufferTypePlan {
+            dtype: BufferDTypePlan::F64,
+            rank,
+            mutability,
+        }));
     }
     if origin == builtins.list || origin == builtins.set {
         if arguments.len() != 1 {
