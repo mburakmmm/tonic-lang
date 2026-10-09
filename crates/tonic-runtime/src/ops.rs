@@ -700,6 +700,14 @@ impl Heap {
                     .unwrap_or_else(|_| "missing key".into()),
             ));
         }
+        if matches!(self.get(v)?, Object::Buffer(_)) {
+            let index = self.buffer_index(v, index)?;
+            let Object::Buffer(buffer) = self.get(v)? else {
+                unreachable!("buffer type checked above")
+            };
+            let value = buffer.view().as_slice()[index];
+            return self.alloc(Object::Float(value));
+        }
         if let Ok(Object::Slice(components)) = self.get(index) {
             return self.slice(v, *components);
         }
@@ -711,7 +719,6 @@ impl Heap {
             Object::Tuple(v) | Object::List(v) => v.len() as i128,
             Object::Str(s) => s.chars().count() as i128,
             Object::Range { start, stop, step } => range_len(*start, *stop, *step),
-            Object::Buffer(buffer) => buffer.len() as i128,
             _ => return Err(Diagnostic::new("TypeError", "object is not subscriptable")),
         };
         let i = if i < 0 { len + i } else { i };
@@ -731,12 +738,58 @@ impl Heap {
             Object::Range { start, step, .. } => {
                 self.int(BigInt::from(*start as i128 + i * (*step as i128)))
             }
-            Object::Buffer(buffer) => {
-                let value = buffer.view().as_slice()[i as usize];
-                self.alloc(Object::Float(value))
-            }
             _ => Err(type_error()),
         }
+    }
+    pub(crate) fn buffer_index(&self, buffer: Value, index: Value) -> Result<usize> {
+        let Object::Buffer(buffer) = self.get(buffer)? else {
+            return Err(Diagnostic::new("TypeError", "expected f64 buffer"));
+        };
+        let view = buffer.view();
+        let shape = view.shape();
+        let tuple = match self.get(self.native_value(index)) {
+            Ok(Object::Tuple(indices)) => Some(indices.as_slice()),
+            _ => None,
+        };
+        if let Some(indices) = tuple {
+            if indices.len() != shape.len() {
+                return Err(Diagnostic::new(
+                    "IndexError",
+                    format!(
+                        "buffer expects {} indices, got {}",
+                        shape.len(),
+                        indices.len()
+                    ),
+                ));
+            }
+            let mut offset = 0usize;
+            for (value, dimension) in indices.iter().zip(shape) {
+                let raw = self
+                    .integer(*value)?
+                    .to_i128()
+                    .ok_or_else(|| Diagnostic::new("IndexError", "buffer index out of range"))?;
+                let dimension = *dimension as i128;
+                let normalized = if raw < 0 { dimension + raw } else { raw };
+                if normalized < 0 || normalized >= dimension {
+                    return Err(Diagnostic::new("IndexError", "buffer index out of range"));
+                }
+                offset = offset
+                    .checked_mul(dimension as usize)
+                    .and_then(|offset| offset.checked_add(normalized as usize))
+                    .ok_or_else(|| Diagnostic::new("IndexError", "buffer index out of range"))?;
+            }
+            return Ok(offset);
+        }
+        let raw = self
+            .integer(index)?
+            .to_i128()
+            .ok_or_else(|| Diagnostic::new("IndexError", "buffer index out of range"))?;
+        let len = buffer.len() as i128;
+        let normalized = if raw < 0 { len + raw } else { raw };
+        if normalized < 0 || normalized >= len {
+            return Err(Diagnostic::new("IndexError", "buffer index out of range"));
+        }
+        Ok(normalized as usize)
     }
     fn slice(&mut self, source: Value, components: [Value; 3]) -> Result<Value> {
         let source = self.native_value(source);

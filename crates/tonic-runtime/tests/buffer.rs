@@ -36,6 +36,58 @@ fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
 }
 
 #[test]
+fn multidimensional_buffer_indices_and_writable_assignment_preserve_fallback_semantics() {
+    let mut vm = Vm::new().unwrap();
+    let mut context = vm.context().unwrap();
+    let writable = context
+        .from_f64_buffer(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true)
+        .unwrap();
+    let row = context.from_i64(1).unwrap();
+    let column = context.from_i64(0).unwrap();
+    let index = context.new_tuple(&[row, column]).unwrap();
+    let value = context.get_item(writable, index).unwrap();
+    assert_eq!(context.to_f64(value).unwrap(), 3.0);
+
+    let row = context.from_i64(0).unwrap();
+    let column = context.from_i64(-1).unwrap();
+    let index = context.new_tuple(&[row, column]).unwrap();
+    let replacement = context.from_f64(9.5).unwrap();
+    context.set_item(writable, index, replacement).unwrap();
+    assert_eq!(
+        context.f64_buffer(writable).unwrap().as_slice(),
+        &[1.0, 9.5, 3.0, 4.0]
+    );
+
+    let one = context.from_i64(1).unwrap();
+    let wrong_rank = context.new_tuple(&[one]).unwrap();
+    assert_eq!(
+        context.get_item(writable, wrong_rank).unwrap_err().kind,
+        "IndexError"
+    );
+    let row = context.from_i64(2).unwrap();
+    let column = context.from_i64(0).unwrap();
+    let out_of_bounds = context.new_tuple(&[row, column]).unwrap();
+    assert_eq!(
+        context.get_item(writable, out_of_bounds).unwrap_err().kind,
+        "IndexError"
+    );
+
+    let read_only = context
+        .from_f64_buffer(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false)
+        .unwrap();
+    let row = context.from_i64(0).unwrap();
+    let column = context.from_i64(0).unwrap();
+    let index = context.new_tuple(&[row, column]).unwrap();
+    assert_eq!(
+        context
+            .set_item(read_only, index, replacement)
+            .unwrap_err()
+            .kind,
+        "TypeError"
+    );
+}
+
+#[test]
 fn shape_product_and_sequence_elements_are_validated() {
     let mut vm = Vm::new().unwrap();
     let mut context = vm.context().unwrap();

@@ -219,8 +219,12 @@ derleme zamanında, üst sınırı offset-aware giriş guard'ında kanıtlar. Po
 offset için `bound <= len-offset`, negatif offset için saturating
 `bound <= len-offset` uygulanır; indeks arithmetic taşması exact-PC deopt eder.
 Karar [ADR 0131](adr/0131-affine-buffer-index-proof.md) içindedir. Dinamik range
-ve shape kanıtı, çok boyutlu stride lowering'i, writable store ve alias/escape
-materialization açık iştir.
+ve shape kanıtından önce generic buffer fallback'i rank-exact tuple indeksleme,
+her eksende Python negatif-index normalizasyonu ve writable `f64` item assignment
+kazanmıştır. Read-only atama reddedilir; karar
+[ADR 0132](adr/0132-multidimensional-buffer-fallback.md) içindedir. Çok boyutlu
+JIT stride lowering, writable native store, mutation/version guard'ı ve
+alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

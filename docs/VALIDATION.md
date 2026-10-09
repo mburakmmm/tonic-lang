@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 27,
-direct bytecode VM 4, buffer 7, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 8, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 442 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 443 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -190,6 +190,12 @@ guard'ını, `buffer[index-1]` için güvenli başlangıç ve saturating genişl
 girişte PC 0'a deopt eder. Başlangıçta negatif gerçek indeks üreten
 `index=0; buffer[index-1]` varyantı proof üretmez ve Python negatif indeks
 normalizasyonu checked yolda kalır.
+
+Multidimensional buffer fallback testi rank-2 C-contiguous buffer'ı tuple ile
+okur, her eksendeki negatif indeksi normalize eder ve writable `f64` hücreyi
+sayısal değerle günceller. Yanlış tuple rank'i ve eksen sınır aşımı `IndexError`,
+read-only atama `TypeError` üretir; mutation doğrudan unboxed backing storage'a
+yazılır ve managed write barrier gerektirmez.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

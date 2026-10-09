@@ -119,6 +119,16 @@ impl Buffer {
     pub fn len(&self) -> usize {
         self.data.len()
     }
+    pub fn set_f64(&mut self, index: usize, value: f64) -> Result<()> {
+        if !self.writable {
+            return Err(Diagnostic::new("TypeError", "buffer is read-only"));
+        }
+        let Some(slot) = self.data.get_mut(index) else {
+            return Err(Diagnostic::new("IndexError", "buffer index out of range"));
+        };
+        *slot = value;
+        Ok(())
+    }
     pub fn estimated_bytes(&self) -> usize {
         self.data.len() * std::mem::size_of::<f64>()
             + self.shape.len() * std::mem::size_of::<usize>()

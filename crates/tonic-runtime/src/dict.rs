@@ -474,6 +474,21 @@ impl Heap {
                 "mappingproxy does not support item assignment",
             ));
         }
+        if matches!(self.get(owner)?, Object::Buffer(_)) {
+            let writable = match self.get(owner)? {
+                Object::Buffer(buffer) => buffer.view().is_writable(),
+                _ => unreachable!("buffer type checked above"),
+            };
+            if !writable {
+                return Err(Diagnostic::new("TypeError", "buffer is read-only"));
+            }
+            let index = self.buffer_index(owner, key)?;
+            let value = self.float(value)?;
+            let Object::Buffer(buffer) = self.get_mut(owner)? else {
+                unreachable!("buffer type checked above")
+            };
+            return buffer.set_f64(index, value);
+        }
         let i = self
             .integer(key)?
             .to_i128()

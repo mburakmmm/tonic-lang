@@ -465,8 +465,12 @@ sonra alınır.
     - [x] Tek sabit toplama/çıkarma kullanan affine `buffer[i + offset]` indeksi:
       derleme-zamanlı alt sınır, offset-aware saturating giriş üst-sınır guard'ı
       ve arithmetic overflow'da checked arbitrary-PC resume.
-    - [ ] Dinamik range ve shape kanıtı, çok boyutlu stride lowering'i, writable
-      store, mutation/version guard'ı ve alias/escape materialization.
+    - [x] Generic fallback'te rank-exact tuple indeks, eksen başına Python
+      negatif-index normalizasyonu ve writable `f64` item assignment; read-only,
+      rank ve bounds hataları açık semantik taşır.
+    - [ ] JIT dinamik range/shape kanıtı ve çok boyutlu stride lowering'i;
+      writable native store, mutation/version guard'ı ve alias/escape
+      materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.
