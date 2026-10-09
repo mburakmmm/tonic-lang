@@ -173,9 +173,8 @@ korur.
 Canonical buffer-loop testi sıfır başlangıçlı, birer artan
 `while index < count` bytecode'unu verified induction proof ile tanır. Public JIT
 metadata'sı bir bounds-elided `ITEM` raporlar; geçerli count native sonucu verir,
-`count > len(buffer)` tek giriş guard'ında PC 0'a deopt eder ve offset
-`buffer[index+1]` varyantı ile exception-region kodu proof üretmez. Runtime
-entegrasyonu aynı fazla-count
+`count > len(buffer)` tek giriş guard'ında PC 0'a deopt eder ve exception-region
+kodu proof üretmez. Runtime entegrasyonu aynı fazla-count
 çağrısının generic `IndexError` sonucunu stress-GC altında koruduğunu ve normal
 döngüde side-exit olmadığını doğrular.
 
@@ -184,6 +183,13 @@ geçerli aralık yalnız indeks 1'i bounds checksiz yükler ve generic integer h
 çağırmaz. Negatif başlangıç varyantı proof üretmez. Pozitif sabit adımın integer
 taşması mevcut typed arithmetic guard'ında exact-PC deopt ettiği için unchecked
 bir sonraki `ITEM` erişimine ulaşamaz.
+
+Affine buffer-index testi `buffer[index+1]` için pozitif offset üst-sınır
+guard'ını, `buffer[index-1]` için güvenli başlangıç ve saturating genişletilmiş
+üst sınırı çalıştırır. İki yol da beklenen native toplamı üretir; fazla bound
+girişte PC 0'a deopt eder. Başlangıçta negatif gerçek indeks üreten
+`index=0; buffer[index-1]` varyantı proof üretmez ve Python negatif indeks
+normalizasyonu checked yolda kalır.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

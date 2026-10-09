@@ -214,8 +214,13 @@ ilk kanonik analiz kapsamının dışındadır. Karar
 sabit induction dilimi negatif olmayan başlangıç ve pozitif sabit adımı da kabul
 eder; `bound <= len(buffer)` aynı güvenlik kanıtını korur, integer taşması
 exact-PC deopt eder. Karar [ADR 0130](adr/0130-strided-buffer-range-proof.md)
-içindedir. Affine offset/dinamik range ve shape kanıtı, çok boyutlu stride
-lowering'i, writable store ve alias/escape materialization açık iştir.
+içindedir. Tek sabit toplama/çıkarma kullanan affine indeks de alt sınırı
+derleme zamanında, üst sınırı offset-aware giriş guard'ında kanıtlar. Pozitif
+offset için `bound <= len-offset`, negatif offset için saturating
+`bound <= len-offset` uygulanır; indeks arithmetic taşması exact-PC deopt eder.
+Karar [ADR 0131](adr/0131-affine-buffer-index-proof.md) içindedir. Dinamik range
+ve shape kanıtı, çok boyutlu stride lowering'i, writable store ve alias/escape
+materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

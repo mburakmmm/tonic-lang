@@ -444,6 +444,7 @@ struct BufferBoundsProof {
     item_pc: usize,
     buffer_parameter: u16,
     bound_parameter: u16,
+    index_offset: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3308,7 +3309,15 @@ fn analyze_buffer_bounds(
             continue;
         }
         let item = code.instructions[item_pc];
-        if trace_move_base(code, branch_pc + 1, item_pc, item.c) != Some(induction) {
+        let Some(index_offset) =
+            resolve_induction_offset(code, branch_pc + 1, item_pc, item.c, induction)
+        else {
+            continue;
+        };
+        if start
+            .checked_add(index_offset)
+            .is_none_or(|index| index < 0)
+        {
             continue;
         }
         let induction_writes = code.instructions[branch_pc + 1..backedge_pc]
@@ -3359,6 +3368,7 @@ fn analyze_buffer_bounds(
             item_pc,
             buffer_parameter,
             bound_parameter,
+            index_offset,
         });
     }
     proofs
@@ -3433,6 +3443,46 @@ fn resolve_integer_constant(
                     return None;
                 };
                 return value.parse().ok();
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn resolve_induction_offset(
+    code: &CodeObject,
+    start: usize,
+    mut before: usize,
+    mut register: u16,
+    induction: u16,
+) -> Option<i64> {
+    for _ in 0..=code.registers {
+        if register == induction {
+            return Some(0);
+        }
+        let (pc, writer) = last_writer(code, start, before, register)?;
+        match Op::try_from(writer.opcode) {
+            Ok(Op::Move) => {
+                register = writer.b;
+                before = pc;
+            }
+            Ok(Op::Add | Op::InplaceAdd) => {
+                let left_induction = trace_move_base(code, start, pc, writer.b) == Some(induction);
+                let right_induction = trace_move_base(code, start, pc, writer.c) == Some(induction);
+                if left_induction == right_induction {
+                    return None;
+                }
+                let constant = if left_induction { writer.c } else { writer.b };
+                return resolve_integer_constant(code, start, pc, constant);
+            }
+            Ok(Op::Sub | Op::InplaceSub) => {
+                if trace_move_base(code, start, pc, writer.b) != Some(induction)
+                    || trace_move_base(code, start, pc, writer.c) == Some(induction)
+                {
+                    return None;
+                }
+                return resolve_integer_constant(code, start, pc, writer.c)?.checked_neg();
             }
             _ => return None,
         }
@@ -4388,7 +4438,11 @@ fn emit_buffer_bounds_entry_guards(
 ) -> Value {
     let mut guarded = Vec::new();
     for proof in proofs {
-        let key = (proof.buffer_parameter, proof.bound_parameter);
+        let key = (
+            proof.buffer_parameter,
+            proof.bound_parameter,
+            proof.index_offset,
+        );
         if guarded.contains(&key) {
             continue;
         }
@@ -4403,7 +4457,42 @@ fn emit_buffer_bounds_entry_guards(
             runtime_guard_dynamic_pc(builder, exact, registers, start_pc, pointer_type, false);
         let bound = decode_int(builder, raw_bound);
         let len = builder.ins().stack_load(types::I64, slot, 8);
-        let within_buffer = builder.ins().icmp(IntCC::SignedLessThanOrEqual, bound, len);
+        let max_bound = match proof.index_offset.cmp(&0) {
+            std::cmp::Ordering::Greater => {
+                let accommodates_offset = builder.ins().icmp_imm(
+                    IntCC::UnsignedGreaterThanOrEqual,
+                    len,
+                    proof.index_offset,
+                );
+                registers = runtime_guard_dynamic_pc(
+                    builder,
+                    accommodates_offset,
+                    registers,
+                    start_pc,
+                    pointer_type,
+                    false,
+                );
+                builder.ins().iadd_imm(len, -proof.index_offset)
+            }
+            std::cmp::Ordering::Less => {
+                let expansion = proof
+                    .index_offset
+                    .checked_neg()
+                    .expect("accepted negative offset is representable");
+                let addition_limit = i64::MAX - expansion;
+                let addition_fits =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::UnsignedLessThanOrEqual, len, addition_limit);
+                let expanded = builder.ins().iadd_imm(len, expansion);
+                let saturated = builder.ins().iconst(types::I64, i64::MAX);
+                builder.ins().select(addition_fits, expanded, saturated)
+            }
+            std::cmp::Ordering::Equal => len,
+        };
+        let within_buffer = builder
+            .ins()
+            .icmp(IntCC::SignedLessThanOrEqual, bound, max_bound);
         registers = runtime_guard_dynamic_pc(
             builder,
             within_buffer,
@@ -6250,7 +6339,104 @@ mod tests {
             Some(&signature),
         )
         .unwrap();
-        assert_eq!(offset_compiled.metadata().f64_buffer_bounds_elided_sites, 0);
+        assert_eq!(offset_compiled.metadata().f64_buffer_bounds_elided_sites, 1);
+        registers = vec![VALUE_UNBOUND; offset_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(2);
+        runtime.boxed.clear();
+        assert!(matches!(
+            offset_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [5.0]);
+        assert_eq!(runtime.binary_calls, 0);
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        assert_eq!(
+            offset_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let negative_offset_program = function(
+            "def total(values,count):\n    index=1\n    result=0.0\n    while index<count:\n        result=result+values[index-1]\n        index+=2\n    return result",
+        );
+        let negative_offset_code = &negative_offset_program.program().code[1];
+        let negative_offset_constants = negative_offset_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        negative_offset_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let negative_offset_compiled = compile_with_execution_profile_and_types(
+            negative_offset_code,
+            &[],
+            &negative_offset_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(
+            negative_offset_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            1
+        );
+        registers = vec![VALUE_UNBOUND; negative_offset_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(4);
+        runtime.boxed.clear();
+        assert!(matches!(
+            negative_offset_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [4.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
+        let unsafe_offset_program = function(
+            "def total(values,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[index-1]\n        index+=1\n    return result",
+        );
+        let unsafe_offset_code = &unsafe_offset_program.program().code[1];
+        let unsafe_offset_constants = unsafe_offset_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        unsafe_offset_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let unsafe_offset_compiled = compile_with_execution_profile_and_types(
+            unsafe_offset_code,
+            &[],
+            &unsafe_offset_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe_offset_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            0
+        );
 
         let negative_start_program = function(
             "def total(values,count):\n    index=-1\n    result=0.0\n    while index<count:\n        result=result+values[index]\n        index+=1\n    return result",

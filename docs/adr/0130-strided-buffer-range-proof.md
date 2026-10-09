@@ -35,3 +35,6 @@ Loops such as `index = 1; while index < count: ...; index += 2` now perform one
 entry length guard and no per-item bounds check. The analysis remains
 conservative for affine offsets, dynamic ranges, descending loops and
 multidimensional shape/stride calculations.
+
+ADR 0131 subsequently adds one constant affine index offset while retaining the
+same induction restrictions.
