@@ -1,5 +1,10 @@
 use tonic_compiler::compile;
-use tonic_runtime::{ExecutionMode, Vm};
+use tonic_core::diagnostic::Result;
+use tonic_runtime::{Context, ExecutionMode, Handle, Vm};
+
+fn make_rank_two_read_only(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
+    context.from_f64_buffer(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false)
+}
 
 #[test]
 fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
@@ -254,6 +259,40 @@ fn native_buffer_load_preserves_negative_and_out_of_bounds_index_semantics() {
     assert_eq!(output, b"3.0\nbounds\n");
     assert_eq!(vm.stats.jit_annotation_compiled, 1);
     assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn annotated_rank_two_buffer_tuple_index_loads_f64_in_native_code() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "import matrix\n",
+            "def load(values:fastmath.Buffer[float,2,False], row:int, column:int)->float:\n",
+            "    return values[row,column]\n",
+            "values=matrix.make()\n",
+            "print(load(values,0,1),load(values,-1,-1))\n",
+            "try:\n",
+            "    load(values,2,0)\n",
+            "except IndexError:\n",
+            "    print('bounds')\n",
+        ),
+        "buffer-rank-two-native-load",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.register_native("matrix", "make", 0, make_rank_two_read_only)
+        .unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"2.0 4.0\nbounds\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 1);
     assert!(vm.stats.jit_deopts >= 1);
     assert!(vm.stats.gc_collections > 0);
 }

@@ -222,9 +222,16 @@ Karar [ADR 0131](adr/0131-affine-buffer-index-proof.md) içindedir. Dinamik rang
 ve shape kanıtından önce generic buffer fallback'i rank-exact tuple indeksleme,
 her eksende Python negatif-index normalizasyonu ve writable `f64` item assignment
 kazanmıştır. Read-only atama reddedilir; karar
-[ADR 0132](adr/0132-multidimensional-buffer-fallback.md) içindedir. Çok boyutlu
-JIT stride lowering, writable native store, mutation/version guard'ı ve
-alias/escape materialization açık iştir.
+[ADR 0132](adr/0132-multidimensional-buffer-fallback.md) içindedir. Exact
+`Buffer[float, 2, False]` yolu ayrıca iki öğeli tuple indeksini başarılı native
+yolda materialize etmeden row-major `row * columns + column` adresine indirir.
+İki eksen de Python negatif indeks ve bounds guard'ı taşır; başarısız guard,
+generic yolun tuple register'ını kurabilmesi için `TUPLE` PC'sine deopt eder.
+Owner precise root olarak kalır, shape metadata'sı yalnız çağrı ömürlü native
+stack slotundadır ve yüklenen `f64` dönüşe kadar unboxed taşınır. Karar
+[ADR 0133](adr/0133-native-rank2-f64-buffer-load.md) içindedir. Dinamik range/
+shape kanıtı, rank-N veya dış stride lowering, writable native store,
+mutation/version guard'ı ve alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

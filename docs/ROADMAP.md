@@ -468,7 +468,10 @@ sonra alınır.
     - [x] Generic fallback'te rank-exact tuple indeks, eksen başına Python
       negatif-index normalizasyonu ve writable `f64` item assignment; read-only,
       rank ve bounds hataları açık semantik taşır.
-    - [ ] JIT dinamik range/shape kanıtı ve çok boyutlu stride lowering'i;
+    - [x] Exact rank-2/read-only C-contiguous `f64` annotation için allocation-free
+      tuple-index lowering: eksen başına negatif indeks/bounds guard'ı, row-major
+      adres hesabı, unboxed yükleme ve tuple-materialization PC'sine güvenli deopt.
+    - [ ] JIT dinamik range/shape kanıtı ve rank-N/strided çok boyutlu lowering;
       writable native store, mutation/version guard'ı ve alias/escape
       materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,

@@ -117,6 +117,7 @@ pub struct Stats {
     pub jit_f64_buffer_parameters: u64,
     pub jit_f64_buffer_item_sites: u64,
     pub jit_f64_buffer_bounds_elided_sites: u64,
+    pub jit_f64_buffer_rank2_item_sites: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -493,12 +494,27 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
             return Ok(None);
         };
         let view = buffer.view();
-        if view.shape().len() != 1 || view.strides() != [std::mem::size_of::<f64>() as isize] {
+        if view.is_writable() {
             return Ok(None);
         }
+        let (rank, shape0, shape1) = match view.shape() {
+            [length] if view.strides() == [std::mem::size_of::<f64>() as isize] => (1, *length, 0),
+            [rows, columns]
+                if isize::try_from(columns.saturating_mul(std::mem::size_of::<f64>()))
+                    .is_ok_and(|row_stride| {
+                        view.strides() == [row_stride, std::mem::size_of::<f64>() as isize]
+                    }) =>
+            {
+                (2, *rows, *columns)
+            }
+            _ => return Ok(None),
+        };
         Ok(Some(tonic_jit::F64BufferView {
             data: view.as_slice().as_ptr() as usize,
             len: view.as_slice().len(),
+            rank,
+            shape0,
+            shape1,
         }))
     }
 
@@ -9332,6 +9348,12 @@ impl Vm {
                 {
                     tonic_jit::ScalarType::F64Buffer
                 }
+                AnnotationScalar::Buffer(plan)
+                    if plan.rank == Some(2)
+                        && plan.mutability == BufferMutabilityPlan::ReadOnly =>
+                {
+                    tonic_jit::ScalarType::F64Buffer2
+                }
                 AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
                 AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                 AnnotationScalar::Float => tonic_jit::ScalarType::Float,
@@ -10066,6 +10088,12 @@ impl Vm {
                     {
                         tonic_jit::ScalarType::F64Buffer
                     }
+                    AnnotationScalar::Buffer(plan)
+                        if plan.rank == Some(2)
+                            && plan.mutability == BufferMutabilityPlan::ReadOnly =>
+                    {
+                        tonic_jit::ScalarType::F64Buffer2
+                    }
                     AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
                     AnnotationScalar::Int => tonic_jit::ScalarType::Int,
                     AnnotationScalar::Float => tonic_jit::ScalarType::Float,
@@ -10142,6 +10170,8 @@ impl Vm {
                     self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
                     self.stats.jit_f64_buffer_bounds_elided_sites +=
                         metadata.f64_buffer_bounds_elided_sites as u64;
+                    self.stats.jit_f64_buffer_rank2_item_sites +=
+                        metadata.f64_buffer_rank2_item_sites as u64;
                     self.jit_rejections[code_id] = None;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),

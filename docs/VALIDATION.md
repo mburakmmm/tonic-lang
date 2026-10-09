@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-8 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+9 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 27,
-direct bytecode VM 4, buffer 8, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 9, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 443 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 444 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -196,6 +196,14 @@ okur, her eksendeki negatif indeksi normalize eder ve writable `f64` hücreyi
 sayısal değerle günceller. Yanlış tuple rank'i ve eksen sınır aşımı `IndexError`,
 read-only atama `TypeError` üretir; mutation doğrudan unboxed backing storage'a
 yazılır ve managed write barrier gerektirmez.
+
+Rank-2 native buffer testi exact `Buffer[float,2,False]` parametresinde iki öğeli
+tuple indeks üretimini başarılı Cranelift yolunda atlar. Row/column ayrı negatif
+indeks ve bounds guard'larından sonra row-major adres doğrudan yüklenir; sonuç
+dönüşe kadar unboxed kalır. Eksen taşması tuple üretim PC'sine deopt edip generic
+`IndexError` semantiğini, rank uyuşmazlığı giriş deopt'unu ve precise owner
+root'unu allocation-stress GC altında korur. Public metadata ile VM istatistiği
+rank-2 site'ını ayrıca sayar.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
