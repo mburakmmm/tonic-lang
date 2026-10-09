@@ -203,8 +203,16 @@ rank-1 C-contiguous shape/stride koşulunu guard eder. JIT küçük tam sayı in
 çözer, negatif indeksi Python gibi normalize eder, bounds miss'te tam `ITEM`
 PC'sine deopt eder ve yüklenen `f64` değerini numeric loop boyunca kutulamadan
 taşır. Karar [ADR 0128](adr/0128-native-f64-buffer-index-load.md) içindedir.
-Range tabanlı bounds elimination, çok boyutlu stride lowering'i, writable store
-ve alias/escape materialization açık iştir.
+Canonical sıfır başlangıçlı, birer artan `while index < count` döngüsü ayrıca
+verified induction analiziyle tanınır. `count <= len(buffer)` guard'ı native
+girişe kaldırılır; normal PC 0 girişinde ilgili `ITEM` tekrar bounds kontrolü
+yapmaz. Side-exit sonrası arbitrary-PC resume aynı siteyi checked çalıştırır.
+Offset index, farklı başlangıç/artış, iç control flow veya loop içinde buffer/
+bound rebinding kanıtı reddeder; exception region ve suspended function da bu
+ilk kanonik analiz kapsamının dışındadır. Karar
+[ADR 0129](adr/0129-buffer-loop-bounds-hoisting.md) içindedir. Genelleştirilmiş
+range/shape kanıtı, çok boyutlu stride lowering'i, writable store ve alias/escape
+materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

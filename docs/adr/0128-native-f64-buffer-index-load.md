@@ -42,6 +42,7 @@ and float arithmetic. No heap address enters persistent bytecode, inline-cache
 or JIT metadata, and no NumPy object layout is assumed. The backend reports
 native buffer parameter and item-site counts for deterministic validation.
 
-Bounds checks currently remain at each indexed load. Loop-range proof, bounds
-elimination, multidimensional stride lowering, writable stores, mutation
-versioning and alias/escape materialization remain separate roadmap work.
+Bounds checks remain at arbitrary indexed loads. ADR 0129 removes them for one
+verified canonical loop form. General loop-range proof, multidimensional stride
+lowering, writable stores, mutation versioning and alias/escape materialization
+remain separate roadmap work.

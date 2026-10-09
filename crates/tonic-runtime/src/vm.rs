@@ -116,6 +116,7 @@ pub struct Stats {
     pub jit_typed_call_result_sites: u64,
     pub jit_f64_buffer_parameters: u64,
     pub jit_f64_buffer_item_sites: u64,
+    pub jit_f64_buffer_bounds_elided_sites: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -10139,6 +10140,8 @@ impl Vm {
                         metadata.typed_call_result_sites as u64;
                     self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
                     self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
+                    self.stats.jit_f64_buffer_bounds_elided_sites +=
+                        metadata.f64_buffer_bounds_elided_sites as u64;
                     self.jit_rejections[code_id] = None;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),

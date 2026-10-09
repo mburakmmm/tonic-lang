@@ -456,9 +456,11 @@ sonra alınır.
       indexed-load dilimi: managed owner root'u, çağrı ömürlü data/length view,
       C-contiguous shape/stride guard'ı, Python negatif indeks normalizasyonu,
       exact-PC bounds deopt'u ve döngü boyunca unboxed `f64` arithmetic.
-    - [ ] Döngü range kanıtıyla bounds-check elimination, çok boyutlu stride
-      lowering'i, writable store, mutation/version guard'ı ve alias/escape
-      materialization.
+    - [x] Canonical `i=0; while i<count; i+=1` döngüsü için doğrulanmış induction
+      analizi, `count <= len(buffer)` giriş guard'ı ve normal-entry yolunda
+      per-item bounds-check elimination; arbitrary-PC resume checked kalır.
+    - [ ] Genelleştirilmiş range/shape kanıtı, çok boyutlu stride lowering'i,
+      writable store, mutation/version guard'ı ve alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

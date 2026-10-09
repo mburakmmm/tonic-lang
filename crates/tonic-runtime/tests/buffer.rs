@@ -151,6 +151,10 @@ fn annotated_rank_one_buffer_loop_loads_f64_values_in_native_code() {
             "values=fastmath.array([1.0,2.0,3.0,4.0])\n",
             "print(values[0],values[-1])\n",
             "print(total(values,4),total(values,2))\n",
+            "try:\n",
+            "    total(values,5)\n",
+            "except IndexError:\n",
+            "    print('loop-bounds')\n",
         ),
         "buffer-native-load",
     )
@@ -160,13 +164,15 @@ fn annotated_rank_one_buffer_loop_loads_f64_values_in_native_code() {
     vm.gc_interval = Some(1);
     let mut output = Vec::new();
     vm.run(&program, &mut output).unwrap();
-    assert_eq!(output, b"1.0 4.0\n10.0 3.0\n");
+    assert_eq!(output, b"1.0 4.0\n10.0 3.0\nloop-bounds\n");
     assert_eq!(vm.stats.jit_annotation_candidates, 1);
     assert_eq!(vm.stats.jit_annotation_compiled, 1);
     assert_eq!(vm.stats.jit_compiled, 1);
     assert_eq!(vm.stats.jit_side_exits, 0);
     assert_eq!(vm.stats.jit_f64_buffer_parameters, 1);
     assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 1);
+    assert!(vm.stats.jit_deopts >= 1);
     assert!(vm.stats.jit_helper_calls >= 4);
     assert!(vm.stats.gc_collections > 0);
 }

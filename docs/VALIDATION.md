@@ -170,6 +170,15 @@ tek dönüşü doğrular. Runtime testi sınır dışı indeksi tam `ITEM` PC'si
 ederek generic `IndexError` semantiğini, ayrıca stress-GC altında aynı sonucu
 korur.
 
+Canonical buffer-loop testi sıfır başlangıçlı, birer artan
+`while index < count` bytecode'unu verified induction proof ile tanır. Public JIT
+metadata'sı bir bounds-elided `ITEM` raporlar; geçerli count native sonucu verir,
+`count > len(buffer)` tek giriş guard'ında PC 0'a deopt eder ve offset
+`buffer[index+1]` varyantı ile exception-region kodu proof üretmez. Runtime
+entegrasyonu aynı fazla-count
+çağrısının generic `IndexError` sonucunu stress-GC altında koruduğunu ve normal
+döngüde side-exit olmadığını doğrular.
+
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
 host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`

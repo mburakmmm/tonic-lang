@@ -301,6 +301,9 @@ pub struct Metadata {
     pub f64_buffer_parameters: usize,
     /// ITEM instructions lowered to guarded direct f64 loads.
     pub f64_buffer_item_sites: usize,
+    /// Canonical loop ITEM sites whose normal-entry bounds checks are replaced
+    /// by one buffer-length guard at native entry.
+    pub f64_buffer_bounds_elided_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +437,13 @@ struct FloatAnalysis {
     slots: Vec<bool>,
     deopt_maps: Vec<DeoptMap>,
     buffer_source: Vec<Option<u16>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BufferBoundsProof {
+    item_pc: usize,
+    buffer_parameter: u16,
+    bound_parameter: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1177,6 +1187,11 @@ pub fn compile_with_execution_profile_types_and_call_results(
             analyze_typed_scalar_execution(code, signature, direct_calls, call_results)
         })
         .transpose()?;
+    let buffer_bounds_proofs = typed_signature
+        .zip(float_analysis.as_ref())
+        .map_or_else(Vec::new, |(signature, analysis)| {
+            analyze_buffer_bounds(code, signature, analysis)
+        });
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
         .iter()
@@ -1373,6 +1388,14 @@ pub fn compile_with_execution_profile_types_and_call_results(
             root_count,
             pointer_type,
         );
+        registers = emit_buffer_bounds_entry_guards(
+            &mut builder,
+            registers,
+            start_pc,
+            &buffer_slots,
+            &buffer_bounds_proofs,
+            pointer_type,
+        );
         for (_, base) in &method_caches {
             let unbound = builder.ins().iconst(types::I64, VALUE_UNBOUND as i64);
             store_word(&mut builder, registers, *base, unbound);
@@ -1546,6 +1569,11 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     continue;
                 }
                 Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul | Op::FloorDiv | Op::Mod => {
+                    let typed_operands = typed_scalar_state.and_then(|state| {
+                        let left = state[instruction.b as usize];
+                        let right = state[instruction.c as usize];
+                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
+                    });
                     if float_state.is_some_and(|state| {
                         state[instruction.b as usize] && state[instruction.c as usize]
                     }) {
@@ -1576,7 +1604,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         fallthrough(&mut builder, &blocks, pc, registers);
                         continue;
                     }
-                    if float_state.is_some() {
+                    if float_state.is_some() && typed_operands.is_none() {
                         emit_generic_binary(
                             &mut builder,
                             registers,
@@ -1592,11 +1620,6 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         );
                         continue;
                     }
-                    let typed_operands = typed_scalar_state.and_then(|state| {
-                        let left = state[instruction.b as usize];
-                        let right = state[instruction.c as usize];
-                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
-                    });
                     let registers = if typed_operands.is_some() {
                         registers
                     } else if backedges > 0 {
@@ -1788,7 +1811,12 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
-                    if float_state.is_some() {
+                    let typed_operands = typed_scalar_state.and_then(|state| {
+                        let left = state[instruction.b as usize];
+                        let right = state[instruction.c as usize];
+                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
+                    });
+                    if float_state.is_some() && typed_operands.is_none() {
                         emit_generic_binary(
                             &mut builder,
                             registers,
@@ -1804,11 +1832,6 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         );
                         continue;
                     }
-                    let typed_operands = typed_scalar_state.and_then(|state| {
-                        let left = state[instruction.b as usize];
-                        let right = state[instruction.c as usize];
-                        (left.is_integer_like() && right.is_integer_like()).then_some((left, right))
-                    });
                     let registers = if typed_operands.is_some() {
                         registers
                     } else {
@@ -1980,17 +2003,71 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     } else {
                         decode_int(&mut builder, raw)
                     };
-                    let len = builder.ins().stack_load(types::I64, slot, 8);
-                    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
-                    let from_end = builder.ins().iadd(index, len);
-                    let index = builder.ins().select(negative, from_end, index);
-                    let nonnegative =
+                    let bounds_elided =
+                        buffer_bounds_proofs.iter().any(|proof| proof.item_pc == pc);
+                    let (registers, index) = if bounds_elided {
+                        let direct = builder.create_block();
+                        builder.append_block_param(direct, pointer_type);
+                        builder.append_block_param(direct, types::I64);
+                        let checked = builder.create_block();
+                        builder.append_block_param(checked, pointer_type);
+                        builder.append_block_param(checked, types::I64);
+                        let normal_entry = builder.ins().icmp_imm(IntCC::Equal, start_pc, 0);
+                        builder.ins().brif(
+                            normal_entry,
+                            direct,
+                            &[registers, index],
+                            checked,
+                            &[registers, index],
+                        );
+
+                        builder.switch_to_block(checked);
+                        let checked_registers = builder.block_params(checked)[0];
+                        let checked_index = builder.block_params(checked)[1];
+                        let len = builder.ins().stack_load(types::I64, slot, 8);
+                        let negative =
+                            builder
+                                .ins()
+                                .icmp_imm(IntCC::SignedLessThan, checked_index, 0);
+                        let from_end = builder.ins().iadd(checked_index, len);
+                        let checked_index = builder.ins().select(negative, from_end, checked_index);
+                        let nonnegative = builder.ins().icmp_imm(
+                            IntCC::SignedGreaterThanOrEqual,
+                            checked_index,
+                            0,
+                        );
+                        let below_len =
+                            builder
+                                .ins()
+                                .icmp(IntCC::UnsignedLessThan, checked_index, len);
+                        let in_bounds = builder.ins().band(nonnegative, below_len);
+                        let checked_registers =
+                            guard(&mut builder, in_bounds, checked_registers, pc, pointer_type);
                         builder
                             .ins()
-                            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
-                    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
-                    let in_bounds = builder.ins().band(nonnegative, below_len);
-                    let registers = guard(&mut builder, in_bounds, registers, pc, pointer_type);
+                            .jump(direct, &[checked_registers, checked_index]);
+
+                        builder.switch_to_block(direct);
+                        (
+                            builder.block_params(direct)[0],
+                            builder.block_params(direct)[1],
+                        )
+                    } else {
+                        let len = builder.ins().stack_load(types::I64, slot, 8);
+                        let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+                        let from_end = builder.ins().iadd(index, len);
+                        let index = builder.ins().select(negative, from_end, index);
+                        let nonnegative =
+                            builder
+                                .ins()
+                                .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+                        let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+                        let in_bounds = builder.ins().band(nonnegative, below_len);
+                        (
+                            guard(&mut builder, in_bounds, registers, pc, pointer_type),
+                            index,
+                        )
+                    };
                     let data = builder.ins().stack_load(pointer_type, slot, 0);
                     let byte_offset = builder.ins().imul_imm(index, 8);
                     let address = builder.ins().iadd(data, byte_offset);
@@ -2259,6 +2336,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
             f64_buffer_item_sites: float_analysis.as_ref().map_or(0, |analysis| {
                 analysis.buffer_source.iter().flatten().count()
             }),
+            f64_buffer_bounds_elided_sites: buffer_bounds_proofs.len(),
         },
     })
 }
@@ -3150,6 +3228,225 @@ fn analyze_buffer_sources(
         }
     }
     Ok(before)
+}
+
+fn analyze_buffer_bounds(
+    code: &CodeObject,
+    signature: &TypedSignature,
+    floats: &FloatAnalysis,
+) -> Vec<BufferBoundsProof> {
+    if code.generator || code.coroutine || !code.exception_regions.is_empty() {
+        return Vec::new();
+    }
+    let mut proofs = Vec::new();
+    for (item_pc, buffer_parameter) in floats.buffer_source.iter().copied().enumerate() {
+        let Some(buffer_parameter) = buffer_parameter else {
+            continue;
+        };
+        if signature.parameters.get(buffer_parameter as usize) != Some(&ScalarType::F64Buffer) {
+            continue;
+        }
+        let Some((backedge_pc, header)) = code.instructions[item_pc + 1..]
+            .iter()
+            .copied()
+            .enumerate()
+            .find_map(|(offset, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Jump)
+                    && usize::from(instruction.a) <= item_pc)
+                    .then_some((item_pc + 1 + offset, usize::from(instruction.a)))
+            })
+        else {
+            continue;
+        };
+        let Some((branch_pc, branch)) = code.instructions[header..item_pc]
+            .iter()
+            .copied()
+            .enumerate()
+            .rev()
+            .find_map(|(offset, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::JumpFalse))
+                    .then_some((header + offset, instruction))
+            })
+        else {
+            continue;
+        };
+        if code.instructions[..header]
+            .iter()
+            .copied()
+            .any(prevents_straight_line_range_proof)
+            || code.instructions[header..branch_pc]
+                .iter()
+                .copied()
+                .any(prevents_straight_line_range_proof)
+            || usize::from(branch.b) != backedge_pc + 1
+            || code.instructions[branch_pc + 1..backedge_pc]
+                .iter()
+                .copied()
+                .any(prevents_straight_line_range_proof)
+        {
+            continue;
+        }
+        let Some((compare_pc, compare)) = last_writer(code, header, branch_pc, branch.a) else {
+            continue;
+        };
+        if Op::try_from(compare.opcode) != Ok(Op::Lt) {
+            continue;
+        }
+        let Some(induction) = trace_move_base(code, header, compare_pc, compare.b) else {
+            continue;
+        };
+        let Some(bound_parameter) = trace_move_base(code, header, compare_pc, compare.c) else {
+            continue;
+        };
+        if usize::from(bound_parameter) >= signature.parameters.len()
+            || signature.parameters[bound_parameter as usize] != ScalarType::Int
+            || resolve_integer_constant(code, 0, header, induction) != Some(0)
+        {
+            continue;
+        }
+        let item = code.instructions[item_pc];
+        if trace_move_base(code, branch_pc + 1, item_pc, item.c) != Some(induction) {
+            continue;
+        }
+        let induction_writes = code.instructions[branch_pc + 1..backedge_pc]
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(offset, instruction)| {
+                let pc = branch_pc + 1 + offset;
+                instruction_writes_a(instruction)
+                    .then_some((pc, instruction))
+                    .filter(|(_, instruction)| instruction.a == induction)
+            })
+            .collect::<Vec<_>>();
+        let [(update_pc, update)] = induction_writes.as_slice() else {
+            continue;
+        };
+        if *update_pc <= item_pc || Op::try_from(update.opcode) != Ok(Op::Move) {
+            continue;
+        }
+        let Some((add_pc, add)) = last_writer(code, branch_pc + 1, *update_pc, update.b) else {
+            continue;
+        };
+        if !matches!(Op::try_from(add.opcode), Ok(Op::Add | Op::InplaceAdd)) {
+            continue;
+        }
+        let left_induction = trace_move_base(code, branch_pc + 1, add_pc, add.b) == Some(induction);
+        let right_induction =
+            trace_move_base(code, branch_pc + 1, add_pc, add.c) == Some(induction);
+        let increments_by_one = left_induction
+            && resolve_integer_constant(code, branch_pc + 1, add_pc, add.c) == Some(1)
+            || right_induction
+                && resolve_integer_constant(code, branch_pc + 1, add_pc, add.b) == Some(1);
+        if !increments_by_one
+            || code.instructions[header..backedge_pc]
+                .iter()
+                .copied()
+                .any(|instruction| {
+                    instruction_writes_a(instruction)
+                        && (instruction.a == bound_parameter || instruction.a == buffer_parameter)
+                })
+        {
+            continue;
+        }
+        proofs.push(BufferBoundsProof {
+            item_pc,
+            buffer_parameter,
+            bound_parameter,
+        });
+    }
+    proofs
+}
+
+fn prevents_straight_line_range_proof(instruction: tonic_core::bytecode::Instr) -> bool {
+    matches!(
+        Op::try_from(instruction.opcode),
+        Ok(Op::Jump
+            | Op::JumpFalse
+            | Op::JumpTrue
+            | Op::Return
+            | Op::Raise
+            | Op::Yield
+            | Op::YieldFrom
+            | Op::AsyncYield
+            | Op::EndAsyncFor)
+    )
+}
+
+fn last_writer(
+    code: &CodeObject,
+    start: usize,
+    before: usize,
+    register: u16,
+) -> Option<(usize, tonic_core::bytecode::Instr)> {
+    code.instructions[start..before]
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find_map(|(offset, instruction)| {
+            (instruction_writes_a(instruction) && instruction.a == register)
+                .then_some((start + offset, instruction))
+        })
+}
+
+fn trace_move_base(
+    code: &CodeObject,
+    start: usize,
+    mut before: usize,
+    mut register: u16,
+) -> Option<u16> {
+    for _ in 0..=code.registers {
+        let Some((pc, writer)) = last_writer(code, start, before, register) else {
+            return Some(register);
+        };
+        if Op::try_from(writer.opcode) != Ok(Op::Move) {
+            return None;
+        }
+        register = writer.b;
+        before = pc;
+    }
+    None
+}
+
+fn resolve_integer_constant(
+    code: &CodeObject,
+    start: usize,
+    mut before: usize,
+    mut register: u16,
+) -> Option<i64> {
+    for _ in 0..=code.registers {
+        let (pc, writer) = last_writer(code, start, before, register)?;
+        match Op::try_from(writer.opcode) {
+            Ok(Op::Move) => {
+                register = writer.b;
+                before = pc;
+            }
+            Ok(Op::Const) => {
+                let Constant::Int(value) = &code.constants[writer.b as usize] else {
+                    return None;
+                };
+                return value.parse().ok();
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn instruction_writes_a(instruction: tonic_core::bytecode::Instr) -> bool {
+    !matches!(
+        Op::try_from(instruction.opcode),
+        Ok(Op::Jump
+            | Op::JumpFalse
+            | Op::JumpTrue
+            | Op::Return
+            | Op::BeginArgs
+            | Op::ArgPos
+            | Op::ArgStar
+            | Op::ArgNamed
+            | Op::ArgMapping)
+    )
 }
 
 fn analyze_typed_scalar_execution(
@@ -4071,6 +4368,44 @@ fn emit_buffer_entry_initialization(
         let present = builder.ins().icmp_imm(IntCC::NotEqual, data, 0);
         registers =
             runtime_guard_dynamic_pc(builder, present, registers, start_pc, pointer_type, false);
+    }
+    registers
+}
+
+fn emit_buffer_bounds_entry_guards(
+    builder: &mut FunctionBuilder<'_>,
+    mut registers: Value,
+    start_pc: Value,
+    buffer_slots: &[(u16, StackSlot)],
+    proofs: &[BufferBoundsProof],
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    let mut guarded = Vec::new();
+    for proof in proofs {
+        let key = (proof.buffer_parameter, proof.bound_parameter);
+        if guarded.contains(&key) {
+            continue;
+        }
+        guarded.push(key);
+        let slot = buffer_slots
+            .iter()
+            .find_map(|(register, slot)| (*register == proof.buffer_parameter).then_some(*slot))
+            .expect("bounds proof buffer has an entry descriptor");
+        let raw_bound = load(builder, registers, proof.bound_parameter);
+        let exact = exact_int(builder, raw_bound);
+        registers =
+            runtime_guard_dynamic_pc(builder, exact, registers, start_pc, pointer_type, false);
+        let bound = decode_int(builder, raw_bound);
+        let len = builder.ins().stack_load(types::I64, slot, 8);
+        let within_buffer = builder.ins().icmp(IntCC::SignedLessThanOrEqual, bound, len);
+        registers = runtime_guard_dynamic_pc(
+            builder,
+            within_buffer,
+            registers,
+            start_pc,
+            pointer_type,
+            false,
+        );
     }
     registers
 }
@@ -5679,16 +6014,30 @@ mod tests {
         struct BufferRuntime {
             values: Vec<f64>,
             boxed: Vec<f64>,
+            binary_calls: usize,
         }
         impl Runtime for BufferRuntime {
             fn binary(
                 &mut self,
-                _op: RuntimeOp,
-                _left: u64,
-                _right: u64,
+                op: RuntimeOp,
+                left: u64,
+                right: u64,
                 _registers: &[u64],
             ) -> Result<u64, RuntimeFailure> {
-                unreachable!("buffer leaf has no generic binary operation")
+                self.binary_calls += 1;
+                let left = decode_i64(left).expect("loop integer left operand");
+                let right = decode_i64(right).expect("loop integer right operand");
+                Ok(match op {
+                    RuntimeOp::InplaceAdd | RuntimeOp::Add => encode_i64(left + right),
+                    RuntimeOp::Lt => {
+                        if left < right {
+                            VALUE_TRUE as u64
+                        } else {
+                            VALUE_FALSE as u64
+                        }
+                    }
+                    _ => unreachable!("buffer test uses only loop integer operations"),
+                })
             }
 
             fn load_global(
@@ -5734,6 +6083,7 @@ mod tests {
                 .unwrap();
         assert_eq!(compiled.metadata().f64_buffer_parameters, 1);
         assert_eq!(compiled.metadata().f64_buffer_item_sites, 1);
+        assert_eq!(compiled.metadata().f64_buffer_bounds_elided_sites, 0);
         let item_pc = code
             .instructions
             .iter()
@@ -5742,6 +6092,7 @@ mod tests {
         let mut runtime = BufferRuntime {
             values: vec![1.0, 2.0, 3.0],
             boxed: Vec::new(),
+            binary_calls: 0,
         };
         let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -5763,6 +6114,95 @@ mod tests {
                 .unwrap(),
             Outcome::Deopt { pc: item_pc }
         );
+
+        let loop_program = function(
+            "def total(values,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[index]\n        index+=1\n    return result",
+        );
+        let loop_code = &loop_program.program().code[1];
+        let loop_constants = loop_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        loop_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let loop_compiled = compile_with_execution_profile_and_types(
+            loop_code,
+            &[],
+            &loop_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(loop_compiled.metadata().f64_buffer_bounds_elided_sites, 1);
+        let float_analysis = analyze_float_execution(loop_code, &[], &[0])
+            .unwrap()
+            .expect("buffer loop has a float analysis");
+        let mut exceptional_loop = loop_code.clone();
+        exceptional_loop
+            .exception_regions
+            .push(tonic_core::bytecode::ExceptionRegion {
+                start: 0,
+                end: 1,
+                target: 1,
+                exception: 0,
+            });
+        assert!(analyze_buffer_bounds(&exceptional_loop, &signature, &float_analysis).is_empty());
+        registers = vec![VALUE_UNBOUND; loop_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        runtime.boxed.clear();
+        assert!(matches!(
+            loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [6.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(4);
+        assert_eq!(
+            loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let offset_program = function(
+            "def total(values,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[index+1]\n        index+=1\n    return result",
+        );
+        let offset_code = &offset_program.program().code[1];
+        let offset_constants = offset_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        offset_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let offset_compiled = compile_with_execution_profile_and_types(
+            offset_code,
+            &[],
+            &offset_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(offset_compiled.metadata().f64_buffer_bounds_elided_sites, 0);
     }
 
     #[test]
