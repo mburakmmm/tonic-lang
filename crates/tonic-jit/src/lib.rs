@@ -3399,37 +3399,54 @@ fn analyze_buffer_axis_bounds(
     index_register: u16,
     dimension_offset: i32,
 ) -> Option<BufferBoundsProof> {
-    let (backedge_pc, header) = code.instructions[item_pc + 1..]
+    code.instructions[item_pc + 1..]
         .iter()
         .copied()
         .enumerate()
-        .find_map(|(offset, instruction)| {
+        .filter_map(|(offset, instruction)| {
             (Op::try_from(instruction.opcode) == Ok(Op::Jump)
                 && usize::from(instruction.a) <= item_pc)
                 .then_some((item_pc + 1 + offset, usize::from(instruction.a)))
-        })?;
+        })
+        .find_map(|(backedge_pc, header)| {
+            analyze_buffer_axis_loop_bounds(
+                code,
+                signature,
+                item_pc,
+                buffer_parameter,
+                index_register,
+                dimension_offset,
+                backedge_pc,
+                header,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_buffer_axis_loop_bounds(
+    code: &CodeObject,
+    signature: &TypedSignature,
+    item_pc: usize,
+    buffer_parameter: u16,
+    index_register: u16,
+    dimension_offset: i32,
+    backedge_pc: usize,
+    header: usize,
+) -> Option<BufferBoundsProof> {
     let (branch_pc, branch) = code.instructions[header..item_pc]
         .iter()
         .copied()
         .enumerate()
         .rev()
         .find_map(|(offset, instruction)| {
-            (Op::try_from(instruction.opcode) == Ok(Op::JumpFalse))
+            (Op::try_from(instruction.opcode) == Ok(Op::JumpFalse)
+                && usize::from(instruction.b) == backedge_pc + 1)
                 .then_some((header + offset, instruction))
         })?;
-    if code.instructions[..header]
+    if code.instructions[header..branch_pc]
         .iter()
         .copied()
         .any(prevents_straight_line_range_proof)
-        || code.instructions[header..branch_pc]
-            .iter()
-            .copied()
-            .any(prevents_straight_line_range_proof)
-        || usize::from(branch.b) != backedge_pc + 1
-        || code.instructions[branch_pc + 1..backedge_pc]
-            .iter()
-            .copied()
-            .any(prevents_straight_line_range_proof)
     {
         return None;
     }
@@ -3437,17 +3454,24 @@ fn analyze_buffer_axis_bounds(
     if Op::try_from(compare.opcode) != Ok(Op::Lt) {
         return None;
     }
-    let induction = trace_move_base(code, header, compare_pc, compare.b)?;
-    let bound_parameter = trace_move_base(code, header, compare_pc, compare.c)?;
-    let start = resolve_integer_constant(code, 0, header, induction)?;
+    let induction = trace_dominating_move_base(code, header, compare_pc, compare.b, compare_pc)?;
+    let bound_parameter =
+        trace_dominating_move_base(code, header, compare_pc, compare.c, compare_pc)?;
+    let start = resolve_dominating_integer_constant(code, 0, header, induction, header)?;
     if usize::from(bound_parameter) >= signature.parameters.len()
         || signature.parameters[bound_parameter as usize] != ScalarType::Int
         || start < 0
     {
         return None;
     }
-    let index_offset =
-        resolve_induction_offset(code, branch_pc + 1, item_pc, index_register, induction)?;
+    let index_offset = resolve_dominating_induction_offset(
+        code,
+        branch_pc + 1,
+        item_pc,
+        index_register,
+        induction,
+        item_pc,
+    )?;
     if start
         .checked_add(index_offset)
         .is_none_or(|index| index < 0)
@@ -3471,16 +3495,23 @@ fn analyze_buffer_axis_bounds(
     if *update_pc <= item_pc || Op::try_from(update.opcode) != Ok(Op::Move) {
         return None;
     }
-    let (add_pc, add) = last_writer(code, branch_pc + 1, *update_pc, update.b)?;
-    if !matches!(Op::try_from(add.opcode), Ok(Op::Add | Op::InplaceAdd)) {
+    if !instruction_dominates(code, *update_pc, backedge_pc) {
         return None;
     }
-    let left_induction = trace_move_base(code, branch_pc + 1, add_pc, add.b) == Some(induction);
-    let right_induction = trace_move_base(code, branch_pc + 1, add_pc, add.c) == Some(induction);
+    let (add_pc, add) = last_writer(code, branch_pc + 1, *update_pc, update.b)?;
+    if !matches!(Op::try_from(add.opcode), Ok(Op::Add | Op::InplaceAdd))
+        || !instruction_dominates(code, add_pc, *update_pc)
+    {
+        return None;
+    }
+    let left_induction =
+        trace_dominating_move_base(code, branch_pc + 1, add_pc, add.b, add_pc) == Some(induction);
+    let right_induction =
+        trace_dominating_move_base(code, branch_pc + 1, add_pc, add.c, add_pc) == Some(induction);
     let step = if left_induction {
-        resolve_integer_constant(code, branch_pc + 1, add_pc, add.c)
+        resolve_dominating_integer_constant(code, branch_pc + 1, add_pc, add.c, add_pc)
     } else if right_induction {
-        resolve_integer_constant(code, branch_pc + 1, add_pc, add.b)
+        resolve_dominating_integer_constant(code, branch_pc + 1, add_pc, add.b, add_pc)
     } else {
         None
     };
@@ -3502,6 +3533,40 @@ fn analyze_buffer_axis_bounds(
         index_offset,
         dimension_offset,
     })
+}
+
+fn instruction_dominates(code: &CodeObject, dominator: usize, node: usize) -> bool {
+    if dominator == node || dominator == 0 {
+        return true;
+    }
+    let mut seen = vec![false; code.instructions.len()];
+    let mut queue = VecDeque::from([0usize]);
+    seen[0] = true;
+    while let Some(pc) = queue.pop_front() {
+        let instruction = code.instructions[pc];
+        let op = Op::try_from(instruction.opcode).expect("verified opcode");
+        let mut successors = [None, None];
+        match op {
+            Op::Return | Op::Raise => {}
+            Op::Jump => successors[0] = Some(instruction.a as usize),
+            Op::JumpFalse | Op::JumpTrue => {
+                successors[0] = Some(instruction.b as usize);
+                successors[1] = (pc + 1 < code.instructions.len()).then_some(pc + 1);
+            }
+            _ => successors[0] = (pc + 1 < code.instructions.len()).then_some(pc + 1),
+        }
+        for successor in successors.into_iter().flatten() {
+            if successor == dominator || seen[successor] {
+                continue;
+            }
+            if successor == node {
+                return false;
+            }
+            seen[successor] = true;
+            queue.push_back(successor);
+        }
+    }
+    true
 }
 
 fn analyze_rank2_buffer_items(
@@ -3573,17 +3638,18 @@ fn last_writer(
         })
 }
 
-fn trace_move_base(
+fn trace_dominating_move_base(
     code: &CodeObject,
     start: usize,
     mut before: usize,
     mut register: u16,
+    node: usize,
 ) -> Option<u16> {
     for _ in 0..=code.registers {
         let Some((pc, writer)) = last_writer(code, start, before, register) else {
             return Some(register);
         };
-        if Op::try_from(writer.opcode) != Ok(Op::Move) {
+        if Op::try_from(writer.opcode) != Ok(Op::Move) || !instruction_dominates(code, pc, node) {
             return None;
         }
         register = writer.b;
@@ -3592,14 +3658,18 @@ fn trace_move_base(
     None
 }
 
-fn resolve_integer_constant(
+fn resolve_dominating_integer_constant(
     code: &CodeObject,
     start: usize,
     mut before: usize,
     mut register: u16,
+    node: usize,
 ) -> Option<i64> {
     for _ in 0..=code.registers {
         let (pc, writer) = last_writer(code, start, before, register)?;
+        if !instruction_dominates(code, pc, node) {
+            return None;
+        }
         match Op::try_from(writer.opcode) {
             Ok(Op::Move) => {
                 register = writer.b;
@@ -3617,39 +3687,47 @@ fn resolve_integer_constant(
     None
 }
 
-fn resolve_induction_offset(
+fn resolve_dominating_induction_offset(
     code: &CodeObject,
     start: usize,
     mut before: usize,
     mut register: u16,
     induction: u16,
+    node: usize,
 ) -> Option<i64> {
     for _ in 0..=code.registers {
         if register == induction {
             return Some(0);
         }
         let (pc, writer) = last_writer(code, start, before, register)?;
+        if !instruction_dominates(code, pc, node) {
+            return None;
+        }
         match Op::try_from(writer.opcode) {
             Ok(Op::Move) => {
                 register = writer.b;
                 before = pc;
             }
             Ok(Op::Add | Op::InplaceAdd) => {
-                let left_induction = trace_move_base(code, start, pc, writer.b) == Some(induction);
-                let right_induction = trace_move_base(code, start, pc, writer.c) == Some(induction);
+                let left_induction =
+                    trace_dominating_move_base(code, start, pc, writer.b, node) == Some(induction);
+                let right_induction =
+                    trace_dominating_move_base(code, start, pc, writer.c, node) == Some(induction);
                 if left_induction == right_induction {
                     return None;
                 }
                 let constant = if left_induction { writer.c } else { writer.b };
-                return resolve_integer_constant(code, start, pc, constant);
+                return resolve_dominating_integer_constant(code, start, pc, constant, node);
             }
             Ok(Op::Sub | Op::InplaceSub) => {
-                if trace_move_base(code, start, pc, writer.b) != Some(induction)
-                    || trace_move_base(code, start, pc, writer.c) == Some(induction)
+                if trace_dominating_move_base(code, start, pc, writer.b, node) != Some(induction)
+                    || trace_dominating_move_base(code, start, pc, writer.c, node)
+                        == Some(induction)
                 {
                     return None;
                 }
-                return resolve_integer_constant(code, start, pc, writer.c)?.checked_neg();
+                return resolve_dominating_integer_constant(code, start, pc, writer.c, node)?
+                    .checked_neg();
             }
             _ => return None,
         }
@@ -6854,6 +6932,98 @@ mod tests {
                 .run_with_runtime(&mut registers, &mut runtime)
                 .unwrap(),
             Outcome::Deopt { pc: 0 }
+        );
+
+        let nested_program = function(
+            "def total(values,rows,columns):\n    row=0\n    result=0.0\n    while row<rows:\n        column=0\n        while column<columns:\n            result=result+values[row,column]\n            column+=1\n        row+=1\n    return result",
+        );
+        let nested_code = &nested_program.program().code[1];
+        let nested_constants = nested_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        nested_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let nested_compiled = compile_with_execution_profile_and_types(
+            nested_code,
+            &[],
+            &nested_constants,
+            &[],
+            Some(&rank2_signature),
+        )
+        .unwrap();
+        assert_eq!(nested_compiled.metadata().f64_buffer_bounds_elided_sites, 2);
+        registers = vec![VALUE_UNBOUND; nested_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(2);
+        registers[2] = encode_i64(3);
+        runtime.boxed.clear();
+        assert!(matches!(
+            nested_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [21.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        registers[2] = encode_i64(3);
+        assert_eq!(
+            nested_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let conditional_start_program = function(
+            "def total(values,rows,columns,initialize):\n    if initialize:\n        start=0\n    row=start\n    result=0.0\n    while row<rows:\n        column=0\n        while column<columns:\n            result=result+values[row,column]\n            column+=1\n        row+=1\n    return result",
+        );
+        let conditional_start_code = &conditional_start_program.program().code[1];
+        let conditional_start_constants = conditional_start_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        conditional_start_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let conditional_start_signature = TypedSignature {
+            parameters: vec![
+                ScalarType::F64Buffer2,
+                ScalarType::Int,
+                ScalarType::Int,
+                ScalarType::Bool,
+            ],
+            result: ScalarType::Float,
+        };
+        let conditional_start_compiled = compile_with_execution_profile_and_types(
+            conditional_start_code,
+            &[],
+            &conditional_start_constants,
+            &[],
+            Some(&conditional_start_signature),
+        )
+        .unwrap();
+        assert_eq!(
+            conditional_start_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            1
         );
 
         registers = vec![VALUE_UNBOUND; rank2_compiled.metadata().root_count];

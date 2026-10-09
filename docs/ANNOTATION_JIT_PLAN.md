@@ -237,8 +237,15 @@ sütun bounds kontrolü atlanır; row ekseni checked kalır ve arbitrary-PC resu
 iki ekseni de yeniden denetler. Fazla count girişte deopt edip generic
 `IndexError` yolunu korur; karar
 [ADR 0134](adr/0134-rank2-column-range-proof.md) içindedir. Çok eksenli/nested
-range ve shape kanıtı, rank-N veya dış stride lowering, writable native store,
-mutation/version guard'ı ve alias/escape materialization açık iştir.
+range kanıtı da rank-2 kanonik matris taramasına genişletilmiştir. Analiz bütün
+uygun geri kenarları dener; başlangıç atamasının loop header'ını ve induction
+güncellemesinin seçilen backedge'i CFG üzerinde domine etmesini zorunlu tutar.
+Bu sayede dış row ve iç column eksenleri ayrı ayrı `shape0/shape1` guard'larına
+bağlanır; normal girişte iki bounds kontrolü de kalkar. Koşullu initialization
+ve yanlış nested backedge proof üretmez. Karar
+[ADR 0135](adr/0135-nested-rank2-range-proof.md) içindedir. Rank-N veya dış
+stride lowering, writable native store, mutation/version guard'ı ve alias/escape
+materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

@@ -212,6 +212,15 @@ kontrolü atlanırken row ekseni checked kalır. Fazla count PC 0'da generic yol
 deopt eder ve gözlenebilir `IndexError` sonucunu stress-GC altında korur; metadata
 ve VM sayacı tek elided ekseni raporlar.
 
+Nested rank-2 range testi dış `row < rows` ve iç `column < columns` döngülerini
+aynı `2×3` buffer üzerinde çalıştırır. CFG dominance analizi başlangıç ve update
+noktalarını doğru geri kenarla eşler; native giriş `rows <= shape0` ile
+`columns <= shape1` guard'larını kurar ve metadata iki elided eksen raporlar.
+Tam matris taraması `21.0` üretir, fazla row generic `IndexError` olur. Koşullu
+bir sabitten unconditional `row` atamasına uzanan başlangıç zinciri negatif
+vakası, zincirin tamamı header'ı domine etmediği için row proof'unu reddederken
+bağımsız güvenli column proof'unu korur.
+
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
 host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`

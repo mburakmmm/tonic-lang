@@ -474,9 +474,12 @@ sonra alınır.
     - [x] Rank-2 kanonik iç eksen döngüsünde verified induction/range kanıtı:
       `index=0; index<count; index+=1`, `count <= columns` giriş guard'ı ve normal
       girişte sütun bounds-check elimination; arbitrary-PC resume checked kalır.
-    - [ ] Çok eksenli/nested dinamik range/shape kanıtı ve rank-N/strided
-      lowering; writable native store, mutation/version guard'ı ve alias/escape
-      materialization.
+    - [x] Rank-2 kanonik nested satır/sütun döngüsünde CFG dominance tabanlı iki
+      eksenli range kanıtı; `rows <= shape0` ve `columns <= shape1` giriş
+      guard'ları, normal girişte iki bounds check'in kaldırılması ve koşullu
+      initialization için güvenli proof rejection.
+    - [ ] Rank-N/arbitrary-stride lowering; writable native store,
+      mutation/version guard'ı ve alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.
