@@ -47,4 +47,5 @@ or steps, nested control flow and loop-local buffer/bound writes remain checked.
 Exception regions and suspended functions remain checked as well.
 
 General range analysis, shape extents, multidimensional stride proofs and loop
-versioning remain future work.
+versioning remain future work. ADR 0130 generalizes the constant induction start
+and step while preserving this entry-guard model.

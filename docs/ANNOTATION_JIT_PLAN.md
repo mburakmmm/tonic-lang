@@ -211,8 +211,11 @@ Offset index, farklı başlangıç/artış, iç control flow veya loop içinde b
 bound rebinding kanıtı reddeder; exception region ve suspended function da bu
 ilk kanonik analiz kapsamının dışındadır. Karar
 [ADR 0129](adr/0129-buffer-loop-bounds-hoisting.md) içindedir. Genelleştirilmiş
-range/shape kanıtı, çok boyutlu stride lowering'i, writable store ve alias/escape
-materialization açık iştir.
+sabit induction dilimi negatif olmayan başlangıç ve pozitif sabit adımı da kabul
+eder; `bound <= len(buffer)` aynı güvenlik kanıtını korur, integer taşması
+exact-PC deopt eder. Karar [ADR 0130](adr/0130-strided-buffer-range-proof.md)
+içindedir. Affine offset/dinamik range ve shape kanıtı, çok boyutlu stride
+lowering'i, writable store ve alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

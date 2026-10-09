@@ -459,8 +459,12 @@ sonra alınır.
     - [x] Canonical `i=0; while i<count; i+=1` döngüsü için doğrulanmış induction
       analizi, `count <= len(buffer)` giriş guard'ı ve normal-entry yolunda
       per-item bounds-check elimination; arbitrary-PC resume checked kalır.
-    - [ ] Genelleştirilmiş range/shape kanıtı, çok boyutlu stride lowering'i,
-      writable store, mutation/version guard'ı ve alias/escape materialization.
+    - [x] Aynı doğrudan indeksli `< bound` biçimi için sabit negatif-olmayan
+      başlangıç ve sabit pozitif adım; taşma exact-PC deopt'a gider, negatif
+      başlangıç ve dinamik/sıfır/negatif adım checked kalır.
+    - [ ] Affine offset/dinamik range ve shape kanıtı, çok boyutlu stride
+      lowering'i, writable store, mutation/version guard'ı ve alias/escape
+      materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

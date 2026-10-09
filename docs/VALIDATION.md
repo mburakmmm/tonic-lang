@@ -179,6 +179,12 @@ entegrasyonu aynı fazla-count
 çağrısının generic `IndexError` sonucunu stress-GC altında koruduğunu ve normal
 döngüde side-exit olmadığını doğrular.
 
+Strided buffer-loop testi aynı kanıtı `index=1`, `index+=2` biçimine genişletir;
+geçerli aralık yalnız indeks 1'i bounds checksiz yükler ve generic integer helper
+çağırmaz. Negatif başlangıç varyantı proof üretmez. Pozitif sabit adımın integer
+taşması mevcut typed arithmetic guard'ında exact-PC deopt ettiği için unchecked
+bir sonraki `ITEM` erişimine ulaşamaz.
+
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
 host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`

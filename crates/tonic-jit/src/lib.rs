@@ -3298,9 +3298,12 @@ fn analyze_buffer_bounds(
         let Some(bound_parameter) = trace_move_base(code, header, compare_pc, compare.c) else {
             continue;
         };
+        let Some(start) = resolve_integer_constant(code, 0, header, induction) else {
+            continue;
+        };
         if usize::from(bound_parameter) >= signature.parameters.len()
             || signature.parameters[bound_parameter as usize] != ScalarType::Int
-            || resolve_integer_constant(code, 0, header, induction) != Some(0)
+            || start < 0
         {
             continue;
         }
@@ -3334,11 +3337,14 @@ fn analyze_buffer_bounds(
         let left_induction = trace_move_base(code, branch_pc + 1, add_pc, add.b) == Some(induction);
         let right_induction =
             trace_move_base(code, branch_pc + 1, add_pc, add.c) == Some(induction);
-        let increments_by_one = left_induction
-            && resolve_integer_constant(code, branch_pc + 1, add_pc, add.c) == Some(1)
-            || right_induction
-                && resolve_integer_constant(code, branch_pc + 1, add_pc, add.b) == Some(1);
-        if !increments_by_one
+        let step = if left_induction {
+            resolve_integer_constant(code, branch_pc + 1, add_pc, add.c)
+        } else if right_induction {
+            resolve_integer_constant(code, branch_pc + 1, add_pc, add.b)
+        } else {
+            None
+        };
+        if step.is_none_or(|step| step <= 0)
             || code.instructions[header..backedge_pc]
                 .iter()
                 .copied()
@@ -6177,6 +6183,48 @@ mod tests {
             Outcome::Deopt { pc: 0 }
         );
 
+        let strided_program = function(
+            "def total(values,count):\n    index=1\n    result=0.0\n    while index<count:\n        result=result+values[index]\n        index+=2\n    return result",
+        );
+        let strided_code = &strided_program.program().code[1];
+        let strided_constants = strided_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        strided_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let strided_compiled = compile_with_execution_profile_and_types(
+            strided_code,
+            &[],
+            &strided_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(
+            strided_compiled.metadata().f64_buffer_bounds_elided_sites,
+            1
+        );
+        registers = vec![VALUE_UNBOUND; strided_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        runtime.boxed.clear();
+        assert!(matches!(
+            strided_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [2.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
         let offset_program = function(
             "def total(values,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[index+1]\n        index+=1\n    return result",
         );
@@ -6203,6 +6251,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(offset_compiled.metadata().f64_buffer_bounds_elided_sites, 0);
+
+        let negative_start_program = function(
+            "def total(values,count):\n    index=-1\n    result=0.0\n    while index<count:\n        result=result+values[index]\n        index+=1\n    return result",
+        );
+        let negative_start_code = &negative_start_program.program().code[1];
+        let negative_start_constants = negative_start_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        negative_start_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let negative_start_compiled = compile_with_execution_profile_and_types(
+            negative_start_code,
+            &[],
+            &negative_start_constants,
+            &[],
+            Some(&signature),
+        )
+        .unwrap();
+        assert_eq!(
+            negative_start_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            0
+        );
     }
 
     #[test]
