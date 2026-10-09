@@ -3,7 +3,7 @@ use tonic_core::diagnostic::Result;
 use tonic_runtime::{Context, ExecutionMode, Handle, Vm};
 
 fn make_rank_two_read_only(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
-    context.from_f64_buffer(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false)
+    context.from_f64_buffer(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false)
 }
 
 #[test]
@@ -271,8 +271,19 @@ fn annotated_rank_two_buffer_tuple_index_loads_f64_in_native_code() {
             "import matrix\n",
             "def load(values:fastmath.Buffer[float,2,False], row:int, column:int)->float:\n",
             "    return values[row,column]\n",
+            "def total(values:fastmath.Buffer[float,2,False], row:int, count:int)->float:\n",
+            "    index=0\n",
+            "    result=0.0\n",
+            "    while index<count:\n",
+            "        result=result+values[row,index]\n",
+            "        index+=1\n",
+            "    return result\n",
             "values=matrix.make()\n",
-            "print(load(values,0,1),load(values,-1,-1))\n",
+            "print(load(values,0,1),load(values,-1,-1),total(values,1,3))\n",
+            "try:\n",
+            "    total(values,0,4)\n",
+            "except IndexError:\n",
+            "    print('range')\n",
             "try:\n",
             "    load(values,2,0)\n",
             "except IndexError:\n",
@@ -288,11 +299,12 @@ fn annotated_rank_two_buffer_tuple_index_loads_f64_in_native_code() {
     vm.gc_interval = Some(1);
     let mut output = Vec::new();
     vm.run(&program, &mut output).unwrap();
-    assert_eq!(output, b"2.0 4.0\nbounds\n");
-    assert_eq!(vm.stats.jit_annotation_compiled, 1);
-    assert_eq!(vm.stats.jit_f64_buffer_parameters, 1);
-    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 1);
-    assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 1);
-    assert!(vm.stats.jit_deopts >= 1);
+    assert_eq!(output, b"2.0 6.0 15.0\nrange\nbounds\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 1);
+    assert!(vm.stats.jit_deopts >= 2);
     assert!(vm.stats.gc_collections > 0);
 }

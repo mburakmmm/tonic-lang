@@ -230,7 +230,14 @@ generic yolun tuple register'ını kurabilmesi için `TUPLE` PC'sine deopt eder.
 Owner precise root olarak kalır, shape metadata'sı yalnız çağrı ömürlü native
 stack slotundadır ve yüklenen `f64` dönüşe kadar unboxed taşınır. Karar
 [ADR 0133](adr/0133-native-rank2-f64-buffer-load.md) içindedir. Dinamik range/
-shape kanıtı, rank-N veya dış stride lowering, writable native store,
+shape kanıtının ilk dilimi de rank-2 kanonik iç eksen döngüsünü kapsar. Verified
+`index=0; while index<count; index+=1` induction'ı tuple'ın sütun bileşenini
+besliyorsa `count <= columns` guard'ı native girişe kaldırılır. Normal girişte
+sütun bounds kontrolü atlanır; row ekseni checked kalır ve arbitrary-PC resume
+iki ekseni de yeniden denetler. Fazla count girişte deopt edip generic
+`IndexError` yolunu korur; karar
+[ADR 0134](adr/0134-rank2-column-range-proof.md) içindedir. Çok eksenli/nested
+range ve shape kanıtı, rank-N veya dış stride lowering, writable native store,
 mutation/version guard'ı ve alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,

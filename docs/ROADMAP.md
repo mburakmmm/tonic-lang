@@ -471,8 +471,11 @@ sonra alınır.
     - [x] Exact rank-2/read-only C-contiguous `f64` annotation için allocation-free
       tuple-index lowering: eksen başına negatif indeks/bounds guard'ı, row-major
       adres hesabı, unboxed yükleme ve tuple-materialization PC'sine güvenli deopt.
-    - [ ] JIT dinamik range/shape kanıtı ve rank-N/strided çok boyutlu lowering;
-      writable native store, mutation/version guard'ı ve alias/escape
+    - [x] Rank-2 kanonik iç eksen döngüsünde verified induction/range kanıtı:
+      `index=0; index<count; index+=1`, `count <= columns` giriş guard'ı ve normal
+      girişte sütun bounds-check elimination; arbitrary-PC resume checked kalır.
+    - [ ] Çok eksenli/nested dinamik range/shape kanıtı ve rank-N/strided
+      lowering; writable native store, mutation/version guard'ı ve alias/escape
       materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation

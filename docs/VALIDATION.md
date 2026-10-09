@@ -205,6 +205,13 @@ dönüşe kadar unboxed kalır. Eksen taşması tuple üretim PC'sine deopt edip
 root'unu allocation-stress GC altında korur. Public metadata ile VM istatistiği
 rank-2 site'ını ayrıca sayar.
 
+Rank-2 sütun-range testi `index=0; while index<count; index+=1` döngüsünde
+induction değerinin tuple'ın sütun bileşenine aktığını kanıtlar. Native giriş
+`count <= columns` guard'ını bir kez çalıştırır; geçerli döngüde sütun bounds
+kontrolü atlanırken row ekseni checked kalır. Fazla count PC 0'da generic yola
+deopt eder ve gözlenebilir `IndexError` sonucunu stress-GC altında korur; metadata
+ve VM sayacı tek elided ekseni raporlar.
+
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde
 host-side tekrar guard'ının atlandığını sayaçla gösterir. Yalan `-> int`

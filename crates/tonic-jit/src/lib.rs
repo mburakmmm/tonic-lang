@@ -453,6 +453,7 @@ struct BufferBoundsProof {
     buffer_parameter: u16,
     bound_parameter: u16,
     index_offset: i64,
+    dimension_offset: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2044,6 +2045,12 @@ pub fn compile_with_execution_profile_types_and_call_results(
                             .expect("rank-2 buffer item requires typed scalar state");
                         let rows = builder.ins().stack_load(types::I64, slot, 16);
                         let columns = builder.ins().stack_load(types::I64, slot, 24);
+                        let row_bounds_elided = buffer_bounds_proofs
+                            .iter()
+                            .any(|proof| proof.item_pc == pc && proof.dimension_offset == 16);
+                        let column_bounds_elided = buffer_bounds_proofs
+                            .iter()
+                            .any(|proof| proof.item_pc == pc && proof.dimension_offset == 24);
                         let raw_row = load(&mut builder, registers, site.row);
                         let (registers, row) = emit_checked_buffer_index(
                             &mut builder,
@@ -2051,7 +2058,9 @@ pub fn compile_with_execution_profile_types_and_call_results(
                             raw_row,
                             scalar_state[site.row as usize],
                             rows,
+                            start_pc,
                             site.tuple_pc,
+                            row_bounds_elided,
                             pointer_type,
                         );
                         let raw_column = load(&mut builder, registers, site.column);
@@ -2061,7 +2070,9 @@ pub fn compile_with_execution_profile_types_and_call_results(
                             raw_column,
                             scalar_state[site.column as usize],
                             columns,
+                            start_pc,
                             site.tuple_pc,
+                            column_bounds_elided,
                             pointer_type,
                         );
                         let row_offset = builder.ins().imul(row, columns);
@@ -3357,134 +3368,140 @@ fn analyze_buffer_bounds(
         let Some(buffer_parameter) = buffer_parameter else {
             continue;
         };
-        if signature.parameters.get(buffer_parameter as usize) != Some(&ScalarType::F64Buffer) {
-            continue;
-        }
-        let Some((backedge_pc, header)) = code.instructions[item_pc + 1..]
-            .iter()
-            .copied()
-            .enumerate()
-            .find_map(|(offset, instruction)| {
-                (Op::try_from(instruction.opcode) == Ok(Op::Jump)
-                    && usize::from(instruction.a) <= item_pc)
-                    .then_some((item_pc + 1 + offset, usize::from(instruction.a)))
-            })
-        else {
-            continue;
+        let indices = match signature.parameters.get(buffer_parameter as usize) {
+            Some(ScalarType::F64Buffer) => vec![(code.instructions[item_pc].c, 8)],
+            Some(ScalarType::F64Buffer2) => {
+                rank2_index_tuple(code, item_pc, code.instructions[item_pc].c)
+                    .map(|(_, row, column)| vec![(row, 16), (column, 24)])
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
         };
-        let Some((branch_pc, branch)) = code.instructions[header..item_pc]
-            .iter()
-            .copied()
-            .enumerate()
-            .rev()
-            .find_map(|(offset, instruction)| {
-                (Op::try_from(instruction.opcode) == Ok(Op::JumpFalse))
-                    .then_some((header + offset, instruction))
-            })
-        else {
-            continue;
-        };
-        if code.instructions[..header]
+        proofs.extend(indices.into_iter().filter_map(|(index, dimension_offset)| {
+            analyze_buffer_axis_bounds(
+                code,
+                signature,
+                item_pc,
+                buffer_parameter,
+                index,
+                dimension_offset,
+            )
+        }));
+    }
+    proofs
+}
+
+fn analyze_buffer_axis_bounds(
+    code: &CodeObject,
+    signature: &TypedSignature,
+    item_pc: usize,
+    buffer_parameter: u16,
+    index_register: u16,
+    dimension_offset: i32,
+) -> Option<BufferBoundsProof> {
+    let (backedge_pc, header) = code.instructions[item_pc + 1..]
+        .iter()
+        .copied()
+        .enumerate()
+        .find_map(|(offset, instruction)| {
+            (Op::try_from(instruction.opcode) == Ok(Op::Jump)
+                && usize::from(instruction.a) <= item_pc)
+                .then_some((item_pc + 1 + offset, usize::from(instruction.a)))
+        })?;
+    let (branch_pc, branch) = code.instructions[header..item_pc]
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find_map(|(offset, instruction)| {
+            (Op::try_from(instruction.opcode) == Ok(Op::JumpFalse))
+                .then_some((header + offset, instruction))
+        })?;
+    if code.instructions[..header]
+        .iter()
+        .copied()
+        .any(prevents_straight_line_range_proof)
+        || code.instructions[header..branch_pc]
             .iter()
             .copied()
             .any(prevents_straight_line_range_proof)
-            || code.instructions[header..branch_pc]
-                .iter()
-                .copied()
-                .any(prevents_straight_line_range_proof)
-            || usize::from(branch.b) != backedge_pc + 1
-            || code.instructions[branch_pc + 1..backedge_pc]
-                .iter()
-                .copied()
-                .any(prevents_straight_line_range_proof)
-        {
-            continue;
-        }
-        let Some((compare_pc, compare)) = last_writer(code, header, branch_pc, branch.a) else {
-            continue;
-        };
-        if Op::try_from(compare.opcode) != Ok(Op::Lt) {
-            continue;
-        }
-        let Some(induction) = trace_move_base(code, header, compare_pc, compare.b) else {
-            continue;
-        };
-        let Some(bound_parameter) = trace_move_base(code, header, compare_pc, compare.c) else {
-            continue;
-        };
-        let Some(start) = resolve_integer_constant(code, 0, header, induction) else {
-            continue;
-        };
-        if usize::from(bound_parameter) >= signature.parameters.len()
-            || signature.parameters[bound_parameter as usize] != ScalarType::Int
-            || start < 0
-        {
-            continue;
-        }
-        let item = code.instructions[item_pc];
-        let Some(index_offset) =
-            resolve_induction_offset(code, branch_pc + 1, item_pc, item.c, induction)
-        else {
-            continue;
-        };
-        if start
-            .checked_add(index_offset)
-            .is_none_or(|index| index < 0)
-        {
-            continue;
-        }
-        let induction_writes = code.instructions[branch_pc + 1..backedge_pc]
+        || usize::from(branch.b) != backedge_pc + 1
+        || code.instructions[branch_pc + 1..backedge_pc]
             .iter()
             .copied()
-            .enumerate()
-            .filter_map(|(offset, instruction)| {
-                let pc = branch_pc + 1 + offset;
-                instruction_writes_a(instruction)
-                    .then_some((pc, instruction))
-                    .filter(|(_, instruction)| instruction.a == induction)
-            })
-            .collect::<Vec<_>>();
-        let [(update_pc, update)] = induction_writes.as_slice() else {
-            continue;
-        };
-        if *update_pc <= item_pc || Op::try_from(update.opcode) != Ok(Op::Move) {
-            continue;
-        }
-        let Some((add_pc, add)) = last_writer(code, branch_pc + 1, *update_pc, update.b) else {
-            continue;
-        };
-        if !matches!(Op::try_from(add.opcode), Ok(Op::Add | Op::InplaceAdd)) {
-            continue;
-        }
-        let left_induction = trace_move_base(code, branch_pc + 1, add_pc, add.b) == Some(induction);
-        let right_induction =
-            trace_move_base(code, branch_pc + 1, add_pc, add.c) == Some(induction);
-        let step = if left_induction {
-            resolve_integer_constant(code, branch_pc + 1, add_pc, add.c)
-        } else if right_induction {
-            resolve_integer_constant(code, branch_pc + 1, add_pc, add.b)
-        } else {
-            None
-        };
-        if step.is_none_or(|step| step <= 0)
-            || code.instructions[header..backedge_pc]
-                .iter()
-                .copied()
-                .any(|instruction| {
-                    instruction_writes_a(instruction)
-                        && (instruction.a == bound_parameter || instruction.a == buffer_parameter)
-                })
-        {
-            continue;
-        }
-        proofs.push(BufferBoundsProof {
-            item_pc,
-            buffer_parameter,
-            bound_parameter,
-            index_offset,
-        });
+            .any(prevents_straight_line_range_proof)
+    {
+        return None;
     }
-    proofs
+    let (compare_pc, compare) = last_writer(code, header, branch_pc, branch.a)?;
+    if Op::try_from(compare.opcode) != Ok(Op::Lt) {
+        return None;
+    }
+    let induction = trace_move_base(code, header, compare_pc, compare.b)?;
+    let bound_parameter = trace_move_base(code, header, compare_pc, compare.c)?;
+    let start = resolve_integer_constant(code, 0, header, induction)?;
+    if usize::from(bound_parameter) >= signature.parameters.len()
+        || signature.parameters[bound_parameter as usize] != ScalarType::Int
+        || start < 0
+    {
+        return None;
+    }
+    let index_offset =
+        resolve_induction_offset(code, branch_pc + 1, item_pc, index_register, induction)?;
+    if start
+        .checked_add(index_offset)
+        .is_none_or(|index| index < 0)
+    {
+        return None;
+    }
+    let induction_writes = code.instructions[branch_pc + 1..backedge_pc]
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(offset, instruction)| {
+            let pc = branch_pc + 1 + offset;
+            instruction_writes_a(instruction)
+                .then_some((pc, instruction))
+                .filter(|(_, instruction)| instruction.a == induction)
+        })
+        .collect::<Vec<_>>();
+    let [(update_pc, update)] = induction_writes.as_slice() else {
+        return None;
+    };
+    if *update_pc <= item_pc || Op::try_from(update.opcode) != Ok(Op::Move) {
+        return None;
+    }
+    let (add_pc, add) = last_writer(code, branch_pc + 1, *update_pc, update.b)?;
+    if !matches!(Op::try_from(add.opcode), Ok(Op::Add | Op::InplaceAdd)) {
+        return None;
+    }
+    let left_induction = trace_move_base(code, branch_pc + 1, add_pc, add.b) == Some(induction);
+    let right_induction = trace_move_base(code, branch_pc + 1, add_pc, add.c) == Some(induction);
+    let step = if left_induction {
+        resolve_integer_constant(code, branch_pc + 1, add_pc, add.c)
+    } else if right_induction {
+        resolve_integer_constant(code, branch_pc + 1, add_pc, add.b)
+    } else {
+        None
+    };
+    if step.is_none_or(|step| step <= 0)
+        || code.instructions[header..backedge_pc]
+            .iter()
+            .copied()
+            .any(|instruction| {
+                instruction_writes_a(instruction)
+                    && (instruction.a == bound_parameter || instruction.a == buffer_parameter)
+            })
+    {
+        return None;
+    }
+    Some(BufferBoundsProof {
+        item_pc,
+        buffer_parameter,
+        bound_parameter,
+        index_offset,
+        dimension_offset,
+    })
 }
 
 fn analyze_rank2_buffer_items(
@@ -4172,26 +4189,77 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn emit_checked_buffer_index(
     builder: &mut FunctionBuilder<'_>,
     registers: Value,
     raw: Value,
     fact: ScalarFact,
     dimension: Value,
-    pc: usize,
+    start_pc: Value,
+    deopt_pc: usize,
+    bounds_elided: bool,
     pointer_type: cranelift_codegen::ir::Type,
 ) -> (Value, Value) {
     let registers = if fact.is_integer_like() {
         registers
     } else {
         let integer = exact_int(builder, raw);
-        guard(builder, integer, registers, pc, pointer_type)
+        guard(builder, integer, registers, deopt_pc, pointer_type)
     };
     let index = if fact.is_integer_like() {
         decode_known_integer(builder, raw, fact)
     } else {
         decode_int(builder, raw)
     };
+    if bounds_elided {
+        let direct = builder.create_block();
+        builder.append_block_param(direct, pointer_type);
+        builder.append_block_param(direct, types::I64);
+        let checked = builder.create_block();
+        builder.append_block_param(checked, pointer_type);
+        builder.append_block_param(checked, types::I64);
+        let normal_entry = builder.ins().icmp_imm(IntCC::Equal, start_pc, 0);
+        builder.ins().brif(
+            normal_entry,
+            direct,
+            &[registers, index],
+            checked,
+            &[registers, index],
+        );
+
+        builder.switch_to_block(checked);
+        let checked_registers = builder.block_params(checked)[0];
+        let checked_index = builder.block_params(checked)[1];
+        let (checked_registers, checked_index) = emit_normalized_buffer_index(
+            builder,
+            checked_registers,
+            checked_index,
+            dimension,
+            deopt_pc,
+            pointer_type,
+        );
+        builder
+            .ins()
+            .jump(direct, &[checked_registers, checked_index]);
+
+        builder.switch_to_block(direct);
+        return (
+            builder.block_params(direct)[0],
+            builder.block_params(direct)[1],
+        );
+    }
+    emit_normalized_buffer_index(builder, registers, index, dimension, deopt_pc, pointer_type)
+}
+
+fn emit_normalized_buffer_index(
+    builder: &mut FunctionBuilder<'_>,
+    registers: Value,
+    index: Value,
+    dimension: Value,
+    deopt_pc: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> (Value, Value) {
     let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
     let from_end = builder.ins().iadd(index, dimension);
     let index = builder.ins().select(negative, from_end, index);
@@ -4203,7 +4271,7 @@ fn emit_checked_buffer_index(
         .icmp(IntCC::UnsignedLessThan, index, dimension);
     let in_bounds = builder.ins().band(nonnegative, below_dimension);
     (
-        guard(builder, in_bounds, registers, pc, pointer_type),
+        guard(builder, in_bounds, registers, deopt_pc, pointer_type),
         index,
     )
 }
@@ -4651,6 +4719,7 @@ fn emit_buffer_bounds_entry_guards(
             proof.buffer_parameter,
             proof.bound_parameter,
             proof.index_offset,
+            proof.dimension_offset,
         );
         if guarded.contains(&key) {
             continue;
@@ -4665,7 +4734,9 @@ fn emit_buffer_bounds_entry_guards(
         registers =
             runtime_guard_dynamic_pc(builder, exact, registers, start_pc, pointer_type, false);
         let bound = decode_int(builder, raw_bound);
-        let len = builder.ins().stack_load(types::I64, slot, 8);
+        let len = builder
+            .ins()
+            .stack_load(types::I64, slot, proof.dimension_offset);
         let max_bound = match proof.index_offset.cmp(&0) {
             std::cmp::Ordering::Greater => {
                 let accommodates_offset = builder.ins().icmp_imm(
@@ -6711,10 +6782,10 @@ mod tests {
             .iter()
             .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Tuple))
             .unwrap();
-        runtime.values = vec![1.0, 2.0, 3.0, 4.0];
+        runtime.values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         runtime.rank = 2;
         runtime.shape0 = 2;
-        runtime.shape1 = 2;
+        runtime.shape1 = 3;
         runtime.boxed.clear();
         registers = vec![VALUE_UNBOUND; rank2_compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -6726,10 +6797,66 @@ mod tests {
                 .unwrap(),
             Outcome::Returned { value: 0x200, .. }
         ));
-        assert_eq!(runtime.boxed, [4.0]);
+        assert_eq!(runtime.boxed, [6.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
+        let rank2_loop_program = function(
+            "def total(values,row,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[row,index]\n        index+=1\n    return result",
+        );
+        let rank2_loop_code = &rank2_loop_program.program().code[1];
+        let rank2_loop_constants = rank2_loop_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        rank2_loop_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let rank2_loop_compiled = compile_with_execution_profile_and_types(
+            rank2_loop_code,
+            &[],
+            &rank2_loop_constants,
+            &[],
+            Some(&rank2_signature),
+        )
+        .unwrap();
+        assert_eq!(
+            rank2_loop_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            1
+        );
+        registers = vec![VALUE_UNBOUND; rank2_loop_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(1);
+        registers[2] = encode_i64(3);
+        runtime.boxed.clear();
+        assert!(matches!(
+            rank2_loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [15.0]);
         assert_eq!(runtime.binary_calls, 0);
 
         registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(0);
+        registers[2] = encode_i64(4);
+        assert_eq!(
+            rank2_loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        registers = vec![VALUE_UNBOUND; rank2_compiled.metadata().root_count];
         registers[0] = 0x100;
         registers[1] = encode_i64(2);
         registers[2] = encode_i64(0);
@@ -6741,7 +6868,7 @@ mod tests {
         );
 
         runtime.rank = 1;
-        runtime.shape0 = 4;
+        runtime.shape0 = 6;
         runtime.shape1 = 0;
         registers.fill(VALUE_UNBOUND);
         registers[0] = 0x100;
