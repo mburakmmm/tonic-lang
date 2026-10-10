@@ -6,6 +6,16 @@ fn make_rank_two_read_only(context: &mut Context<'_>, _: &[Handle]) -> Result<Ha
     context.from_f64_buffer(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false)
 }
 
+fn make_rank_three_read_only(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
+    context.from_f64_buffer(
+        &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+        &[2, 2, 3],
+        false,
+    )
+}
+
 #[test]
 fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
     let mut vm = Vm::new().unwrap();
@@ -320,5 +330,58 @@ fn annotated_rank_two_buffer_tuple_index_loads_f64_in_native_code() {
     assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 3);
     assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 3);
     assert!(vm.stats.jit_deopts >= 3);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn annotated_rank_three_buffer_and_nested_ranges_run_in_native_code() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "import tensor\n",
+            "def load(values:fastmath.Buffer[float,3,False], first:int, second:int, third:int)->float:\n",
+            "    return values[first,second,third]\n",
+            "def tensor_total(values:fastmath.Buffer[float,3,False], firsts:int, seconds:int, thirds:int)->float:\n",
+            "    first=0\n",
+            "    result=0.0\n",
+            "    while first<firsts:\n",
+            "        second=0\n",
+            "        while second<seconds:\n",
+            "            third=0\n",
+            "            while third<thirds:\n",
+            "                result=result+values[first,second,third]\n",
+            "                third+=1\n",
+            "            second+=1\n",
+            "        first+=1\n",
+            "    return result\n",
+            "values=tensor.make()\n",
+            "print(load(values,1,0,2),load(values,-1,-1,-1),tensor_total(values,2,2,3))\n",
+            "try:\n",
+            "    load(values,0,2,0)\n",
+            "except IndexError:\n",
+            "    print('bounds')\n",
+            "try:\n",
+            "    tensor_total(values,2,2,4)\n",
+            "except IndexError:\n",
+            "    print('shape')\n",
+        ),
+        "buffer-rank-three-native-load",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.register_native("tensor", "make", 0, make_rank_three_read_only)
+        .unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"9.0 12.0 78.0\nbounds\nshape\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 0);
+    assert_eq!(vm.stats.jit_f64_buffer_nd_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 3);
+    assert!(vm.stats.jit_deopts >= 2);
     assert!(vm.stats.gc_collections > 0);
 }

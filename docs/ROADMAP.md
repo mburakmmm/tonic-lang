@@ -478,8 +478,13 @@ sonra alınır.
       eksenli range kanıtı; `rows <= shape0` ve `columns <= shape1` giriş
       guard'ları, normal girişte iki bounds check'in kaldırılması ve koşullu
       initialization için güvenli proof rejection.
-    - [ ] Rank-N/arbitrary-stride lowering; writable native store,
-      mutation/version guard'ı ve alias/escape materialization.
+    - [x] Exact read-only C-contiguous rank-N `f64` annotation için genel tuple
+      lowering: çağrı ömürlü shape descriptor'ı, eksen başına guard, genel
+      row-major adres fold'u ve kanonik N-level nested loop için eksen başına
+      entry guard/bounds-check elimination. Rank-3 gerçek VM ve direct-JIT
+      testleri negatif indeks, shape/rank miss ve üç dinamik sınırı kapsar.
+    - [ ] Arbitrary-stride lowering; writable native store, mutation/version
+      guard'ı ve alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

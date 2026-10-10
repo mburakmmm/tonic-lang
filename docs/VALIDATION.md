@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 27,
-direct bytecode VM 4, buffer 9, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 10, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 444 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 445 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -220,6 +220,17 @@ Tam matris taraması `21.0` üretir, fazla row generic `IndexError` olur. Koşul
 bir sabitten unconditional `row` atamasına uzanan başlangıç zinciri negatif
 vakası, zincirin tamamı header'ı domine etmediği için row proof'unu reddederken
 bağımsız güvenli column proof'unu korur.
+
+Rank-N native buffer testi descriptor'ı sabit rank-2 shape alanlarından çağrı
+ömürlü genel shape pointer/rank biçimine taşır. Exact read-only C-contiguous
+`Buffer[float,3,False]` için üçlü tuple başarılı native yolda materialize
+edilmez; her eksen Python negatif indeks semantiğini korur ve row-major fold
+doğrudan `f64` yükler. Üç seviyeli kanonik nested loop `shape[0..3]` için üç
+entry guard üretip normal girişte üç bounds kontrolünü de kaldırır. Direct-JIT
+ve gerçek VM testleri `2×2×3` buffer üzerinde tek yükleri, `78.0` tam toplamı,
+eksen taşması, fazla dinamik bound ve rank mismatch deopt'unu stress-GC altında
+doğrular. Metadata rank-2 uyumluluk sayacını korurken bütün tuple-rank sitelerini
+ayrı rank-N sayacında raporlar.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

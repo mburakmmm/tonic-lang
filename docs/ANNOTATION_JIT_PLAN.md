@@ -243,8 +243,14 @@ güncellemesinin seçilen backedge'i CFG üzerinde domine etmesini zorunlu tutar
 Bu sayede dış row ve iç column eksenleri ayrı ayrı `shape0/shape1` guard'larına
 bağlanır; normal girişte iki bounds kontrolü de kalkar. Koşullu initialization
 ve yanlış nested backedge proof üretmez. Karar
-[ADR 0135](adr/0135-nested-rank2-range-proof.md) içindedir. Rank-N veya dış
-stride lowering, writable native store, mutation/version guard'ı ve alias/escape
+[ADR 0135](adr/0135-nested-rank2-range-proof.md) içindedir. Bu descriptor ve
+kanıt artık exact read-only C-contiguous rank-N buffer'a genellenmiştir. Native
+giriş data/length yanında shape pointer ve rank taşır; tuple bileşenlerini bütün
+eksenlerde guard edip row-major fold ile tek flat offset üretir. Kanonik N-level
+nested loop'ta her induction bağımsız `bound <= shape[axis]` giriş guard'ına
+dönüşür ve normal girişte bütün kanıtlı eksen kontrolleri kalkar. Karar
+[ADR 0136](adr/0136-native-rankn-f64-buffer-load.md) içindedir. Dış stride
+lowering, writable native store, mutation/version guard'ı ve alias/escape
 materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,

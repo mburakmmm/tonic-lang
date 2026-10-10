@@ -89,9 +89,8 @@ pub struct MethodLookup {
 pub struct F64BufferView {
     pub data: usize,
     pub len: usize,
-    pub rank: u8,
-    pub shape0: usize,
-    pub shape1: usize,
+    pub rank: u32,
+    pub shape: usize,
 }
 impl RuntimeFailure {
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
@@ -309,6 +308,8 @@ pub struct Metadata {
     pub f64_buffer_bounds_elided_sites: usize,
     /// Rank-2 tuple ITEM sites lowered to guarded row-major f64 loads.
     pub f64_buffer_rank2_item_sites: usize,
+    /// Rank-N tuple ITEM sites lowered to guarded row-major f64 loads.
+    pub f64_buffer_nd_item_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,13 +333,12 @@ pub enum ScalarType {
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
-    /// Exact native C-contiguous rank-1 f64 buffer. The logical handle stays in
-    /// the precise root array; a runtime helper supplies ephemeral data/length
-    /// metadata for direct indexed loads.
-    F64Buffer,
-    /// Exact native C-contiguous rank-2 read-only f64 buffer. Tuple indices are
-    /// lowered to guarded row-major address calculations.
-    F64Buffer2,
+    /// Exact native read-only C-contiguous rank-N f64 buffer. The logical handle
+    /// stays in the precise root array; a runtime helper supplies ephemeral
+    /// data/length/shape metadata for direct indexed loads.
+    F64Buffer {
+        rank: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,15 +453,20 @@ struct BufferBoundsProof {
     buffer_parameter: u16,
     bound_parameter: u16,
     index_offset: i64,
-    dimension_offset: i32,
+    dimension: BufferDimension,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Rank2BufferItem {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum BufferDimension {
+    FlatLength,
+    Axis(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BufferTupleItem {
     tuple_pc: usize,
     item_pc: usize,
-    row: u16,
-    column: u16,
+    indices: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -474,8 +479,7 @@ enum ScalarFact {
     IntOrNone,
     BoolOrNone,
     IntOrBool,
-    F64Buffer,
-    F64Buffer2,
+    F64Buffer { rank: u32 },
 }
 
 impl ScalarFact {
@@ -489,8 +493,7 @@ impl ScalarFact {
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
             ScalarType::IntOrBool => Self::IntOrBool,
-            ScalarType::F64Buffer => Self::F64Buffer,
-            ScalarType::F64Buffer2 => Self::F64Buffer2,
+            ScalarType::F64Buffer { rank } => Self::F64Buffer { rank },
         }
     }
 
@@ -853,10 +856,8 @@ extern "C" fn runtime_helper<R: Runtime>(
                         output.add(1).write(view.map_or(0, |view| view.len as u64));
                         output
                             .add(2)
-                            .write(view.map_or(0, |view| view.shape0 as u64));
-                        output
-                            .add(3)
-                            .write(view.map_or(0, |view| view.shape1 as u64));
+                            .write(view.map_or(0, |view| view.shape as u64));
+                        output.add(3).write(view.map_or(0, |view| view.rank as u64));
                     }
                     0
                 }
@@ -1198,8 +1199,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 .iter()
                 .enumerate()
                 .filter_map(|(register, kind)| match kind {
-                    ScalarType::F64Buffer => Some((register as u16, 1u8)),
-                    ScalarType::F64Buffer2 => Some((register as u16, 2u8)),
+                    ScalarType::F64Buffer { rank } => Some((register as u16, *rank)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1219,17 +1219,17 @@ pub fn compile_with_execution_profile_types_and_call_results(
         .map_or_else(Vec::new, |(signature, analysis)| {
             analyze_buffer_bounds(code, signature, analysis)
         });
-    let rank2_buffer_items = typed_signature
+    let buffer_tuple_items = typed_signature
         .zip(float_analysis.as_ref())
         .map_or_else(Vec::new, |(signature, analysis)| {
-            analyze_rank2_buffer_items(code, signature, analysis)
+            analyze_buffer_tuple_items(code, signature, analysis)
         });
     validate_supported(
         code,
         direct_calls,
         materialized_constants,
         call_results,
-        &rank2_buffer_items,
+        &buffer_tuple_items,
     )?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
@@ -2022,7 +2022,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     }
                 }
                 Op::Tuple => {
-                    if rank2_buffer_items.iter().any(|site| site.tuple_pc == pc) {
+                    if buffer_tuple_items.iter().any(|site| site.tuple_pc == pc) {
                         fallthrough(&mut builder, &blocks, pc, registers);
                     } else {
                         side_exit(&mut builder, registers, pc);
@@ -2040,43 +2040,50 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         .iter()
                         .find_map(|(register, _, slot)| (*register == source).then_some(*slot))
                         .expect("analyzed buffer source has an entry descriptor");
-                    if let Some(site) = rank2_buffer_items.iter().find(|site| site.item_pc == pc) {
+                    if let Some(site) = buffer_tuple_items.iter().find(|site| site.item_pc == pc) {
                         let scalar_state = typed_scalar_state
-                            .expect("rank-2 buffer item requires typed scalar state");
-                        let rows = builder.ins().stack_load(types::I64, slot, 16);
-                        let columns = builder.ins().stack_load(types::I64, slot, 24);
-                        let row_bounds_elided = buffer_bounds_proofs
-                            .iter()
-                            .any(|proof| proof.item_pc == pc && proof.dimension_offset == 16);
-                        let column_bounds_elided = buffer_bounds_proofs
-                            .iter()
-                            .any(|proof| proof.item_pc == pc && proof.dimension_offset == 24);
-                        let raw_row = load(&mut builder, registers, site.row);
-                        let (registers, row) = emit_checked_buffer_index(
-                            &mut builder,
-                            registers,
-                            raw_row,
-                            scalar_state[site.row as usize],
-                            rows,
-                            start_pc,
-                            site.tuple_pc,
-                            row_bounds_elided,
-                            pointer_type,
-                        );
-                        let raw_column = load(&mut builder, registers, site.column);
-                        let (registers, column) = emit_checked_buffer_index(
-                            &mut builder,
-                            registers,
-                            raw_column,
-                            scalar_state[site.column as usize],
-                            columns,
-                            start_pc,
-                            site.tuple_pc,
-                            column_bounds_elided,
-                            pointer_type,
-                        );
-                        let row_offset = builder.ins().imul(row, columns);
-                        let index = builder.ins().iadd(row_offset, column);
+                            .expect("rank-N buffer item requires typed scalar state");
+                        let shape = builder.ins().stack_load(pointer_type, slot, 16);
+                        let mut current_registers = registers;
+                        let mut flat_index = None;
+                        for (axis, register) in site.indices.iter().copied().enumerate() {
+                            let axis_offset = i32::try_from(
+                                axis.checked_mul(mem::size_of::<usize>())
+                                    .expect("verified tuple rank offset"),
+                            )
+                            .expect("verified tuple rank fits Cranelift displacement");
+                            let dimension = builder.ins().load(
+                                types::I64,
+                                MemFlags::trusted(),
+                                shape,
+                                axis_offset,
+                            );
+                            let bounds_elided = buffer_bounds_proofs.iter().any(|proof| {
+                                proof.item_pc == pc
+                                    && proof.dimension == BufferDimension::Axis(axis as u32)
+                            });
+                            let raw = load(&mut builder, current_registers, register);
+                            let (guarded_registers, index) = emit_checked_buffer_index(
+                                &mut builder,
+                                current_registers,
+                                raw,
+                                scalar_state[register as usize],
+                                dimension,
+                                start_pc,
+                                site.tuple_pc,
+                                bounds_elided,
+                                pointer_type,
+                            );
+                            current_registers = guarded_registers;
+                            flat_index = Some(match flat_index {
+                                None => index,
+                                Some(prefix) => {
+                                    let scaled = builder.ins().imul(prefix, dimension);
+                                    builder.ins().iadd(scaled, index)
+                                }
+                            });
+                        }
+                        let index = flat_index.expect("rank-N tuple has at least two axes");
                         let data = builder.ins().stack_load(pointer_type, slot, 0);
                         let byte_offset = builder.ins().imul_imm(index, 8);
                         let address = builder.ins().iadd(data, byte_offset);
@@ -2086,10 +2093,10 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         builder.ins().stack_store(
                             value,
                             float_slots[instruction.a as usize]
-                                .expect("analyzed rank-2 buffer item float slot"),
+                                .expect("analyzed rank-N buffer item float slot"),
                             0,
                         );
-                        fallthrough(&mut builder, &blocks, pc, registers);
+                        fallthrough(&mut builder, &blocks, pc, current_registers);
                         continue;
                     }
                     let raw = load(&mut builder, registers, instruction.c);
@@ -2441,7 +2448,11 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 analysis.buffer_source.iter().flatten().count()
             }),
             f64_buffer_bounds_elided_sites: buffer_bounds_proofs.len(),
-            f64_buffer_rank2_item_sites: rank2_buffer_items.len(),
+            f64_buffer_rank2_item_sites: buffer_tuple_items
+                .iter()
+                .filter(|site| site.indices.len() == 2)
+                .count(),
+            f64_buffer_nd_item_sites: buffer_tuple_items.len(),
         },
     })
 }
@@ -3369,23 +3380,24 @@ fn analyze_buffer_bounds(
             continue;
         };
         let indices = match signature.parameters.get(buffer_parameter as usize) {
-            Some(ScalarType::F64Buffer) => vec![(code.instructions[item_pc].c, 8)],
-            Some(ScalarType::F64Buffer2) => {
-                rank2_index_tuple(code, item_pc, code.instructions[item_pc].c)
-                    .map(|(_, row, column)| vec![(row, 16), (column, 24)])
+            Some(ScalarType::F64Buffer { rank: 1 }) => {
+                vec![(code.instructions[item_pc].c, BufferDimension::FlatLength)]
+            }
+            Some(ScalarType::F64Buffer { rank }) if *rank >= 2 => {
+                buffer_index_tuple(code, item_pc, code.instructions[item_pc].c, *rank)
+                    .map(|(_, indices)| {
+                        indices
+                            .into_iter()
+                            .enumerate()
+                            .map(|(axis, register)| (register, BufferDimension::Axis(axis as u32)))
+                            .collect()
+                    })
                     .unwrap_or_default()
             }
             _ => Vec::new(),
         };
-        proofs.extend(indices.into_iter().filter_map(|(index, dimension_offset)| {
-            analyze_buffer_axis_bounds(
-                code,
-                signature,
-                item_pc,
-                buffer_parameter,
-                index,
-                dimension_offset,
-            )
+        proofs.extend(indices.into_iter().filter_map(|(index, dimension)| {
+            analyze_buffer_axis_bounds(code, signature, item_pc, buffer_parameter, index, dimension)
         }));
     }
     proofs
@@ -3397,7 +3409,7 @@ fn analyze_buffer_axis_bounds(
     item_pc: usize,
     buffer_parameter: u16,
     index_register: u16,
-    dimension_offset: i32,
+    dimension: BufferDimension,
 ) -> Option<BufferBoundsProof> {
     code.instructions[item_pc + 1..]
         .iter()
@@ -3415,7 +3427,7 @@ fn analyze_buffer_axis_bounds(
                 item_pc,
                 buffer_parameter,
                 index_register,
-                dimension_offset,
+                dimension,
                 backedge_pc,
                 header,
             )
@@ -3429,7 +3441,7 @@ fn analyze_buffer_axis_loop_bounds(
     item_pc: usize,
     buffer_parameter: u16,
     index_register: u16,
-    dimension_offset: i32,
+    dimension: BufferDimension,
     backedge_pc: usize,
     header: usize,
 ) -> Option<BufferBoundsProof> {
@@ -3531,7 +3543,7 @@ fn analyze_buffer_axis_loop_bounds(
         buffer_parameter,
         bound_parameter,
         index_offset,
-        dimension_offset,
+        dimension,
     })
 }
 
@@ -3569,11 +3581,11 @@ fn instruction_dominates(code: &CodeObject, dominator: usize, node: usize) -> bo
     true
 }
 
-fn analyze_rank2_buffer_items(
+fn analyze_buffer_tuple_items(
     code: &CodeObject,
     signature: &TypedSignature,
     floats: &FloatAnalysis,
-) -> Vec<Rank2BufferItem> {
+) -> Vec<BufferTupleItem> {
     floats
         .buffer_source
         .iter()
@@ -3581,29 +3593,37 @@ fn analyze_rank2_buffer_items(
         .enumerate()
         .filter_map(|(item_pc, source)| {
             let source = source?;
-            if signature.parameters.get(source as usize) != Some(&ScalarType::F64Buffer2) {
+            let Some(ScalarType::F64Buffer { rank }) = signature.parameters.get(source as usize)
+            else {
+                return None;
+            };
+            if *rank < 2 {
                 return None;
             }
             let item = code.instructions[item_pc];
-            let (tuple_pc, row, column) = rank2_index_tuple(code, item_pc, item.c)?;
-            Some(Rank2BufferItem {
+            let (tuple_pc, indices) = buffer_index_tuple(code, item_pc, item.c, *rank)?;
+            Some(BufferTupleItem {
                 tuple_pc,
                 item_pc,
-                row,
-                column,
+                indices,
             })
         })
         .collect()
 }
 
-fn rank2_index_tuple(
+fn buffer_index_tuple(
     code: &CodeObject,
     item_pc: usize,
     register: u16,
-) -> Option<(usize, u16, u16)> {
+    rank: u32,
+) -> Option<(usize, Vec<u16>)> {
+    let count = u16::try_from(rank).ok()?;
     let (tuple_pc, tuple) = last_writer(code, 0, item_pc, register)?;
-    (tuple_pc + 1 == item_pc && Op::try_from(tuple.opcode) == Ok(Op::Tuple) && tuple.c == 2)
-        .then_some((tuple_pc, tuple.b, tuple.b + 1))
+    if tuple_pc + 1 != item_pc || Op::try_from(tuple.opcode) != Ok(Op::Tuple) || tuple.c != count {
+        return None;
+    }
+    let end = tuple.b.checked_add(tuple.c)?;
+    Some((tuple_pc, (tuple.b..end).collect()))
 }
 
 fn prevents_straight_line_range_proof(instruction: tonic_core::bytecode::Instr) -> bool {
@@ -3832,8 +3852,7 @@ fn analyze_typed_scalar_execution(
                     | ScalarFact::None
                     | ScalarFact::IntOrNone
                     | ScalarFact::BoolOrNone
-                    | ScalarFact::F64Buffer
-                    | ScalarFact::F64Buffer2 => ScalarFact::Unknown,
+                    | ScalarFact::F64Buffer { .. } => ScalarFact::Unknown,
                 };
             }
             Op::Not => after[instruction.a as usize] = ScalarFact::Bool,
@@ -3852,15 +3871,20 @@ fn analyze_typed_scalar_execution(
                 after[instruction.a as usize] = ScalarFact::Unknown;
             }
             Op::Item => {
-                let rank1 = fact(instruction.b) == ScalarFact::F64Buffer
-                    && fact(instruction.c).is_integer_like();
-                let rank2 = fact(instruction.b) == ScalarFact::F64Buffer2
-                    && rank2_index_tuple(code, pc, instruction.c).is_some_and(
-                        |(_, row, column)| {
-                            fact(row).is_integer_like() && fact(column).is_integer_like()
-                        },
-                    );
-                after[instruction.a as usize] = if rank1 || rank2 {
+                let native = match fact(instruction.b) {
+                    ScalarFact::F64Buffer { rank: 1 } => fact(instruction.c).is_integer_like(),
+                    ScalarFact::F64Buffer { rank } if rank >= 2 => {
+                        buffer_index_tuple(code, pc, instruction.c, rank).is_some_and(
+                            |(_, indices)| {
+                                indices
+                                    .into_iter()
+                                    .all(|index| fact(index).is_integer_like())
+                            },
+                        )
+                    }
+                    _ => false,
+                };
+                after[instruction.a as usize] = if native {
                     ScalarFact::Float
                 } else {
                     ScalarFact::Unknown
@@ -4031,7 +4055,7 @@ fn validate_supported(
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
     call_results: &[GuardedCallResult],
-    rank2_buffer_items: &[Rank2BufferItem],
+    buffer_tuple_items: &[BufferTupleItem],
 ) -> Result<(), Error> {
     if code.class_body
         || code.generator
@@ -4049,7 +4073,7 @@ fn validate_supported(
         let op = Op::try_from(instruction.opcode).map_err(|error| {
             Error::Backend(format!("verified opcode could not be decoded: {error}"))
         })?;
-        if op == Op::Tuple && !rank2_buffer_items.iter().any(|site| site.tuple_pc == pc) {
+        if op == Op::Tuple && !buffer_tuple_items.iter().any(|site| site.tuple_pc == pc) {
             return Err(unsupported(
                 pc,
                 Some(op),
@@ -4261,8 +4285,7 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::None
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
-        | ScalarFact::F64Buffer
-        | ScalarFact::F64Buffer2 => {
+        | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached integer lowering")
         }
     }
@@ -4373,8 +4396,7 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::None
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
-        | ScalarFact::F64Buffer
-        | ScalarFact::F64Buffer2 => {
+        | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached truth lowering")
         }
     }
@@ -4602,10 +4624,9 @@ fn emit_typed_scalar_entry_guards(
                     let boolean = exact_bool(builder, raw);
                     builder.ins().bor(integer, boolean)
                 }
-                ScalarFact::Unknown
-                | ScalarFact::Float
-                | ScalarFact::F64Buffer
-                | ScalarFact::F64Buffer2 => unreachable!(),
+                ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {
+                    unreachable!()
+                }
             };
             let valid = builder.create_block();
             builder.append_block_param(valid, pointer_type);
@@ -4743,7 +4764,7 @@ fn emit_buffer_entry_initialization(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
-    slots: &[(u16, u8, StackSlot)],
+    slots: &[(u16, u32, StackSlot)],
     runtime_signature: cranelift_codegen::ir::SigRef,
     runtime_helper: Value,
     runtime_context: Value,
@@ -4787,7 +4808,7 @@ fn emit_buffer_bounds_entry_guards(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
-    buffer_slots: &[(u16, u8, StackSlot)],
+    buffer_slots: &[(u16, u32, StackSlot)],
     proofs: &[BufferBoundsProof],
     pointer_type: cranelift_codegen::ir::Type,
 ) -> Value {
@@ -4797,7 +4818,7 @@ fn emit_buffer_bounds_entry_guards(
             proof.buffer_parameter,
             proof.bound_parameter,
             proof.index_offset,
-            proof.dimension_offset,
+            proof.dimension,
         );
         if guarded.contains(&key) {
             continue;
@@ -4812,9 +4833,22 @@ fn emit_buffer_bounds_entry_guards(
         registers =
             runtime_guard_dynamic_pc(builder, exact, registers, start_pc, pointer_type, false);
         let bound = decode_int(builder, raw_bound);
-        let len = builder
-            .ins()
-            .stack_load(types::I64, slot, proof.dimension_offset);
+        let len = match proof.dimension {
+            BufferDimension::FlatLength => builder.ins().stack_load(types::I64, slot, 8),
+            BufferDimension::Axis(axis) => {
+                let shape = builder.ins().stack_load(pointer_type, slot, 16);
+                let offset = i32::try_from(
+                    usize::try_from(axis)
+                        .expect("buffer axis fits usize")
+                        .checked_mul(mem::size_of::<usize>())
+                        .expect("buffer axis offset does not overflow"),
+                )
+                .expect("buffer axis offset fits Cranelift displacement");
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), shape, offset)
+            }
+        };
         let max_bound = match proof.index_offset.cmp(&0) {
             std::cmp::Ordering::Greater => {
                 let accommodates_offset = builder.ins().icmp_imm(
@@ -6468,9 +6502,7 @@ mod tests {
             values: Vec<f64>,
             boxed: Vec<f64>,
             binary_calls: usize,
-            rank: u8,
-            shape0: usize,
-            shape1: usize,
+            shape: Vec<usize>,
         }
         impl Runtime for BufferRuntime {
             fn binary(
@@ -6514,9 +6546,8 @@ mod tests {
                 Ok((value == 0x100).then_some(F64BufferView {
                     data: self.values.as_ptr() as usize,
                     len: self.values.len(),
-                    rank: self.rank,
-                    shape0: self.shape0,
-                    shape1: self.shape1,
+                    rank: self.shape.len() as u32,
+                    shape: self.shape.as_ptr() as usize,
                 }))
             }
 
@@ -6533,7 +6564,7 @@ mod tests {
         let program = function("def load(values,index):\n    return values[index]");
         let code = &program.program().code[1];
         let signature = TypedSignature {
-            parameters: vec![ScalarType::F64Buffer, ScalarType::Int],
+            parameters: vec![ScalarType::F64Buffer { rank: 1 }, ScalarType::Int],
             result: ScalarType::Float,
         };
         assert!(typed_return_is_proven(code, &signature).unwrap());
@@ -6552,9 +6583,7 @@ mod tests {
             values: vec![1.0, 2.0, 3.0],
             boxed: Vec::new(),
             binary_calls: 0,
-            rank: 1,
-            shape0: 3,
-            shape1: 0,
+            shape: vec![3],
         };
         let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -6840,7 +6869,11 @@ mod tests {
         let rank2_program = function("def load(values,row,column):\n    return values[row,column]");
         let rank2_code = &rank2_program.program().code[1];
         let rank2_signature = TypedSignature {
-            parameters: vec![ScalarType::F64Buffer2, ScalarType::Int, ScalarType::Int],
+            parameters: vec![
+                ScalarType::F64Buffer { rank: 2 },
+                ScalarType::Int,
+                ScalarType::Int,
+            ],
             result: ScalarType::Float,
         };
         assert!(typed_return_is_proven(rank2_code, &rank2_signature).unwrap());
@@ -6861,9 +6894,7 @@ mod tests {
             .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Tuple))
             .unwrap();
         runtime.values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        runtime.rank = 2;
-        runtime.shape0 = 2;
-        runtime.shape1 = 3;
+        runtime.shape = vec![2, 3];
         runtime.boxed.clear();
         registers = vec![VALUE_UNBOUND; rank2_compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -7004,7 +7035,7 @@ mod tests {
             .collect::<Vec<_>>();
         let conditional_start_signature = TypedSignature {
             parameters: vec![
-                ScalarType::F64Buffer2,
+                ScalarType::F64Buffer { rank: 2 },
                 ScalarType::Int,
                 ScalarType::Int,
                 ScalarType::Bool,
@@ -7037,15 +7068,156 @@ mod tests {
             Outcome::Deopt { pc: rank2_tuple_pc }
         );
 
-        runtime.rank = 1;
-        runtime.shape0 = 6;
-        runtime.shape1 = 0;
+        runtime.shape = vec![6];
         registers.fill(VALUE_UNBOUND);
         registers[0] = 0x100;
         registers[1] = encode_i64(0);
         registers[2] = encode_i64(0);
         assert_eq!(
             rank2_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let rank3_program =
+            function("def load(values,first,second,third):\n    return values[first,second,third]");
+        let rank3_code = &rank3_program.program().code[1];
+        let rank3_signature = TypedSignature {
+            parameters: vec![
+                ScalarType::F64Buffer { rank: 3 },
+                ScalarType::Int,
+                ScalarType::Int,
+                ScalarType::Int,
+            ],
+            result: ScalarType::Float,
+        };
+        assert!(typed_return_is_proven(rank3_code, &rank3_signature).unwrap());
+        let rank3_compiled = compile_with_execution_profile_and_types(
+            rank3_code,
+            &[],
+            &[],
+            &[],
+            Some(&rank3_signature),
+        )
+        .unwrap();
+        assert_eq!(rank3_compiled.metadata().f64_buffer_parameters, 1);
+        assert_eq!(rank3_compiled.metadata().f64_buffer_item_sites, 1);
+        assert_eq!(rank3_compiled.metadata().f64_buffer_rank2_item_sites, 0);
+        assert_eq!(rank3_compiled.metadata().f64_buffer_nd_item_sites, 1);
+        let rank3_tuple_pc = rank3_code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Tuple))
+            .unwrap();
+        runtime.values = (1..=12).map(f64::from).collect();
+        runtime.shape = vec![2, 2, 3];
+        runtime.boxed.clear();
+        registers = vec![VALUE_UNBOUND; rank3_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(1);
+        registers[2] = encode_i64(0);
+        registers[3] = encode_i64(2);
+        assert!(matches!(
+            rank3_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [9.0]);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(-1);
+        registers[2] = encode_i64(-1);
+        registers[3] = encode_i64(-1);
+        runtime.boxed.clear();
+        assert!(matches!(
+            rank3_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [12.0]);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(0);
+        registers[2] = encode_i64(2);
+        registers[3] = encode_i64(0);
+        assert_eq!(
+            rank3_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: rank3_tuple_pc }
+        );
+
+        let rank3_loop_program = function(
+            "def total(values,firsts,seconds,thirds):\n    first=0\n    result=0.0\n    while first<firsts:\n        second=0\n        while second<seconds:\n            third=0\n            while third<thirds:\n                result=result+values[first,second,third]\n                third+=1\n            second+=1\n        first+=1\n    return result",
+        );
+        let rank3_loop_code = &rank3_loop_program.program().code[1];
+        let rank3_loop_constants = rank3_loop_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        rank3_loop_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let rank3_loop_compiled = compile_with_execution_profile_and_types(
+            rank3_loop_code,
+            &[],
+            &rank3_loop_constants,
+            &[],
+            Some(&rank3_signature),
+        )
+        .unwrap();
+        assert_eq!(
+            rank3_loop_compiled
+                .metadata()
+                .f64_buffer_bounds_elided_sites,
+            3
+        );
+        registers = vec![VALUE_UNBOUND; rank3_loop_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(2);
+        registers[2] = encode_i64(2);
+        registers[3] = encode_i64(3);
+        runtime.boxed.clear();
+        assert!(matches!(
+            rank3_loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [78.0]);
+        assert_eq!(runtime.binary_calls, 0);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(2);
+        registers[2] = encode_i64(2);
+        registers[3] = encode_i64(4);
+        assert_eq!(
+            rank3_loop_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        runtime.shape = vec![12];
+        registers = vec![VALUE_UNBOUND; rank3_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(0);
+        registers[2] = encode_i64(0);
+        registers[3] = encode_i64(0);
+        assert_eq!(
+            rank3_compiled
                 .run_with_runtime(&mut registers, &mut runtime)
                 .unwrap(),
             Outcome::Deopt { pc: 0 }
