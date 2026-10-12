@@ -519,6 +519,50 @@ fn make_writable(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
     context.from_f64_buffer(&[1.0, 2.0, 3.0], &[3], true)
 }
 
+fn make_strided(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
+    context.from_f64_strided_buffer(
+        &[1.0, 99.0, 2.0, 99.0, 3.0, 99.0, 4.0],
+        &[2, 2],
+        &[32, 16],
+        0,
+        false,
+    )
+}
+
+unsafe extern "C-unwind" fn sum_strided_descriptor(
+    context: *mut TonicContext,
+    arguments: *const TonicHandle,
+    _: usize,
+    output: *mut TonicHandle,
+) -> TonicStatus {
+    let api = negotiate_api(TONIC_ABI_VERSION, 0, CAP_BUFFER_V1).unwrap();
+    let mut descriptor = std::mem::MaybeUninit::<TonicBuffer>::uninit();
+    let status =
+        unsafe { (api.buffer_export)(context, arguments.read(), 0, descriptor.as_mut_ptr()) };
+    if status != TonicStatus::OK {
+        return status;
+    }
+    let mut descriptor = unsafe { descriptor.assume_init() };
+    assert_eq!(descriptor.flags & BUFFER_C_CONTIGUOUS, 0);
+    assert_eq!(descriptor.ndim, 2);
+    let shape = unsafe { std::slice::from_raw_parts(descriptor.shape, 2) };
+    let strides = unsafe { std::slice::from_raw_parts(descriptor.strides, 2) };
+    assert_eq!(shape, &[2, 2]);
+    assert_eq!(strides, &[32, 16]);
+    let mut total = 0.0;
+    for row in 0..shape[0] {
+        for column in 0..shape[1] {
+            let offset = row as isize * strides[0] + column as isize * strides[1];
+            total += unsafe { *descriptor.data.byte_offset(offset).cast::<f64>() };
+        }
+    }
+    let status = unsafe { (api.buffer_release)(context, &mut descriptor) };
+    if status != TonicStatus::OK {
+        return status;
+    }
+    unsafe { (api.float_from_f64)(context, total, output) }
+}
+
 unsafe extern "C-unwind" fn increment_buffer(
     context: *mut TonicContext,
     arguments: *const TonicHandle,
@@ -851,6 +895,51 @@ fn writable_export_mutates_nonmoving_storage_and_preserves_owner() {
     assert_eq!(output, b"9.0\n");
     assert_eq!(vm.stats.buffer_copies, 1);
     assert_eq!(vm.stats.buffer_exports, 3);
+    assert_eq!(vm.active_handles(), 0);
+}
+
+#[test]
+fn c_buffer_export_reports_actual_strides_and_rejects_contiguous_requirement() {
+    let mut vm = Vm::new().unwrap();
+    vm.register_native("native_buffer", "make_strided", 0, make_strided)
+        .unwrap();
+    vm.register_c_native(
+        "native_buffer",
+        "sum_strided",
+        1,
+        sum_strided_descriptor,
+        TONIC_ABI_VERSION,
+        CAP_BUFFER_V1,
+    )
+    .unwrap();
+    vm.register_c_native(
+        "native_buffer",
+        "sum_contiguous",
+        1,
+        c_sum,
+        TONIC_ABI_VERSION,
+        CAP_BUFFER_V1,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    let error = vm
+        .run(
+            &compile(
+                concat!(
+                    "import native_buffer\n",
+                    "values=native_buffer.make_strided()\n",
+                    "print(native_buffer.sum_strided(values))\n",
+                    "native_buffer.sum_contiguous(values)\n",
+                ),
+                "c-buffer-strided",
+            )
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap_err();
+    assert_eq!(output, b"10.0\n");
+    assert_eq!(error.kind, "BufferError");
+    assert_eq!(vm.stats.buffer_exports, 1);
     assert_eq!(vm.active_handles(), 0);
 }
 

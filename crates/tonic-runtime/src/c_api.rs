@@ -1128,10 +1128,16 @@ unsafe extern "C" fn buffer_export(
                 return Err(BoundaryError::Unsupported("unknown buffer request flags"));
             }
             let writable = requested_flags & BUFFER_WRITABLE != 0;
-            let (owner, parts) = state
-                .context
-                .export_f64_buffer(buffer.into_internal(), writable)?;
-            let mut flags = BUFFER_C_CONTIGUOUS;
+            let require_c_contiguous = requested_flags & BUFFER_C_CONTIGUOUS != 0;
+            let (owner, parts) = state.context.export_f64_buffer(
+                buffer.into_internal(),
+                writable,
+                require_c_contiguous,
+            )?;
+            let mut flags = 0;
+            if parts.c_contiguous {
+                flags |= BUFFER_C_CONTIGUOUS;
+            }
             if parts.writable {
                 flags |= BUFFER_WRITABLE;
             }

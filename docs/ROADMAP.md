@@ -488,7 +488,10 @@ sonra alınır.
       canlı unboxed float state rekonstrüksiyonu, non-moving mutation epoch,
       external writable-export lifetime takibi ve active alias'ta fail-closed
       giriş guard'ı. Generic/native store aynı epoch sözleşmesini paylaşır.
-    - [ ] Arbitrary-stride lowering ve genel container alias/escape
+    - [x] Sahipli arbitrary signed byte-stride runtime temeli: logical origin/
+      length, reachable-range doğrulaması, negative/zero stride, generic rank-N
+      read/write, logical sum ve gerçek C descriptor contiguity sözleşmesi.
+    - [ ] Arbitrary-stride JIT lowering ve genel container alias/escape
       materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation

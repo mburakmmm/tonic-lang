@@ -589,6 +589,22 @@ impl<'a> Context<'a> {
         let value = self.vm.heap.alloc(Object::Buffer(buffer))?;
         self.local(value)
     }
+    /// Copies an owned f64 backing allocation into a logical strided buffer.
+    /// `origin` is an element index into `values`; strides are measured in
+    /// bytes and may be negative or zero when the reachable range is valid.
+    pub fn from_f64_strided_buffer(
+        &mut self,
+        values: &[f64],
+        shape: &[usize],
+        strides: &[isize],
+        origin: usize,
+        writable: bool,
+    ) -> Result<Handle> {
+        let buffer = Buffer::f64_strided(values, shape, strides, origin, writable)?;
+        self.vm.heap.buffer_copies += 1;
+        let value = self.vm.heap.alloc(Object::Buffer(buffer))?;
+        self.local(value)
+    }
     pub fn f64_buffer_from_sequence(&mut self, sequence: Handle) -> Result<Handle> {
         let sequence = self.resolve(sequence)?;
         let values = match self.vm.heap.get(sequence)? {
@@ -666,15 +682,21 @@ impl<'a> Context<'a> {
         &mut self,
         buffer: Handle,
         writable: bool,
+        require_c_contiguous: bool,
     ) -> Result<(Handle, ExportParts)> {
         let value = self.resolve(buffer)?;
-        let Object::Buffer(buffer) = self.vm.heap.get(value)? else {
-            return Err(Diagnostic::new("TypeError", "expected f64 buffer"));
+        let mut parts = {
+            let Object::Buffer(buffer) = self.vm.heap.get_mut(value)? else {
+                return Err(Diagnostic::new("TypeError", "expected f64 buffer"));
+            };
+            if writable && !buffer.view().is_writable() {
+                return Err(Diagnostic::new("BufferError", "buffer is read-only"));
+            }
+            if require_c_contiguous && !buffer.is_c_contiguous() {
+                return Err(Diagnostic::new("BufferError", "buffer is not C-contiguous"));
+            }
+            buffer.export()
         };
-        if writable && !buffer.view().is_writable() {
-            return Err(Diagnostic::new("BufferError", "buffer is read-only"));
-        }
-        let mut parts = buffer.export();
         // Mutability is a granted capability, not merely a property of the
         // backing allocation. A read-only request must not advertise writes.
         parts.writable = writable;
@@ -720,7 +742,7 @@ impl<'a> Context<'a> {
             let Object::Buffer(buffer) = self.vm.heap.get(value)? else {
                 unreachable!("type checked above")
             };
-            return Ok(buffer.view().as_slice().iter().sum());
+            return Ok(buffer.logical_sum());
         }
         match self.vm.heap.get(value)? {
             Object::List(values) | Object::Tuple(values) => values

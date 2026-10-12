@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 28,
-direct bytecode VM 4, buffer 11, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 30,
+direct bytecode VM 4, buffer 13, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 447 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 452 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -243,6 +243,16 @@ canlı unboxed float register'ları generic `IndexError` yürütmesi için yenid
 kutulanır. Runtime testi valid/negative/rank-2 store, tam `2×3` fill ve bounds
 fallback sonucunu stress-GC altında doğrular; buffer unit testi writable export
 lifetime'ının epoch'u konservatif artırdığını kapsar.
+
+Arbitrary-stride runtime testi owned backing üzerinde logical origin/count ve
+signed byte stride doğrulamasını kapsar. Padded rank-2 görünüm tuple ve flat
+indekslerde backing padding'ini atlar; writable generic assignment doğru hücreyi
+ve mutation epoch'unu günceller, `len` ile `fastmath.sum` yalnız dört logical
+elemanı gözler. Unit vakaları negative stride ile ters görünümü, zero-stride
+broadcast toplamını, hizasız stride, rank uyuşmazlığı, invalid origin ve backing
+dışına kaçan reachable range reddini çalıştırır. C ABI testi flagsiz export'ta
+gerçek `[32,16]` stride descriptor'ını tüketir; aynı görünüm için
+`BUFFER_C_CONTIGUOUS` isteği owner sızdırmadan `BufferError` üretir.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

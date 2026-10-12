@@ -20,6 +20,16 @@ fn make_rank_two_writable(context: &mut Context<'_>, _: &[Handle]) -> Result<Han
     context.from_f64_buffer(&[0.0; 6], &[2, 3], true)
 }
 
+fn make_rank_two_strided(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
+    context.from_f64_strided_buffer(
+        &[1.0, 99.0, 2.0, 99.0, 3.0, 99.0, 4.0],
+        &[2, 2],
+        &[32, 16],
+        0,
+        true,
+    )
+}
+
 #[test]
 fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
     let mut vm = Vm::new().unwrap();
@@ -107,12 +117,64 @@ fn multidimensional_buffer_indices_and_writable_assignment_preserve_fallback_sem
 }
 
 #[test]
+fn arbitrary_strides_preserve_logical_index_assignment_len_and_sum() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "import strided\n",
+            "values=strided.make()\n",
+            "print(len(values),values[0,1],values[1,0],values[-1])\n",
+            "values[0,1]=8.0\n",
+            "print(values[0,1],fastmath.sum(values))\n",
+        ),
+        "buffer-strided-fallback",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.gc_interval = Some(1);
+    vm.register_native("strided", "make", 0, make_rank_two_strided)
+        .unwrap();
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"4 2.0 3.0 4.0\n8.0 16.0\n");
+    assert!(vm.stats.gc_collections > 0);
+    assert_eq!(vm.active_handles(), 0);
+}
+
+#[test]
+fn strided_constructor_rejects_invalid_reachable_ranges() {
+    let mut vm = Vm::new().unwrap();
+    let mut context = vm.context().unwrap();
+    assert_eq!(
+        context
+            .from_f64_strided_buffer(&[1.0, 2.0], &[3], &[-8], 1, false)
+            .unwrap_err()
+            .kind,
+        "BufferError"
+    );
+    assert_eq!(
+        context
+            .from_f64_strided_buffer(&[1.0], &[1], &[4], 0, false)
+            .unwrap_err()
+            .kind,
+        "BufferError"
+    );
+}
+
+#[test]
 fn shape_product_and_sequence_elements_are_validated() {
     let mut vm = Vm::new().unwrap();
     let mut context = vm.context().unwrap();
     assert_eq!(
         context
             .from_f64_buffer(&[1.0, 2.0], &[3], false)
+            .unwrap_err()
+            .kind,
+        "BufferError"
+    );
+    assert_eq!(
+        context
+            .from_f64_buffer(&[1.0, 2.0, 3.0], &[2], false)
             .unwrap_err()
             .kind,
         "BufferError"

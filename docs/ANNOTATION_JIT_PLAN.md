@@ -257,7 +257,13 @@ closed davranır; release epoch'u konservatif artırır. Native `SET_ITEM` büt�
 rank/index/version guard'larını store'dan önce tamamlar ve bounds deopt'unda
 canlı unboxed float register'larını generic resume için yeniden kutular. Karar
 [ADR 0137](adr/0137-native-writable-f64-buffer-store.md) içindedir. Dış stride
-lowering ve genel container alias/escape materialization açık iştir.
+lowering'den önce runtime buffer modeli logical origin/length ile signed byte
+stride'ları taşır; reachable backing aralığını constructor'da doğrular ve generic
+rank-N read/write, logical sum ile C descriptor export'unda negative/zero/padded
+layout'ları korur. C-contiguous istek gerçek olmayan layout'ta fail-closed olur.
+Karar [ADR 0138](adr/0138-owned-arbitrary-stride-buffer-runtime.md) içindedir.
+Arbitrary-stride JIT adres lowering'i ve genel alias/escape materialization açık
+iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

@@ -119,6 +119,13 @@ sürdürür.
 `Box<[f64]>` tahsisine kopyalar. Küçük GC nesnesi dtype/shape/stride ve backing
 allocation sahipliğini taşır; collector bu nesneyi sıkıştırsa da data, shape ve
 stride pointer'ları değişmez. Safe Rust `f64_buffer` görünümü context'i ödünç alır.
+`Context::from_f64_strided_buffer(values, shape, strides, origin, writable)` aynı
+sahipliği arbitrary signed byte-stride görünümlere açar. `origin` backing içindeki
+eleman indeksidir; negatif ve zero stride yalnız bütün erişilebilir adresler
+backing içinde kaldığında kabul edilir. Logical `len`, düz indeksleme ve
+`fastmath.sum` padding/reverse/broadcast backing hücrelerini logical sıra dışında
+saymaz. `F64BufferView::as_slice` tüm owned backing'i döndürür; strided logical
+erişim için `origin`, `shape` ve `strides` metadata'sı kullanılmalıdır.
 
 C tablosundaki `buffer_export` `TonicBuffer` descriptor'ı doldurur: byte pointer ve
 uzunluk, dtype, item size, rank, shape, byte strides, contiguity/mutability flags ve
@@ -126,10 +133,15 @@ ayrı owner handle. Export edilen owner ilgili buffer'ı call scope'unda kökler
 `buffer_release` yalnız `BufferOwner` sınıfındaki handle'ı erken bırakabilir ve
 descriptor'ı temizler. Double release ve başka local handle'ı owner gibi kullanma
 `HandleError`dır. Read-only buffer için writable export `BufferError` üretir.
+Descriptor C-contiguous bayrağını yalnız gerçek layout için taşır. Çağıran
+`BUFFER_C_CONTIGUOUS` isterse non-contiguous görünüm owner oluşturmadan
+`BufferError` ile reddedilir; bayrak istenmezse signed stride metadata'sı ve
+logical origin data pointer'ı doğrudan export edilir.
 
 `fastmath.array([1.0, ...])` boxed sequence'i bir kez f64 buffer'a dönüştürür.
-`fastmath.sum(buffer)` daha sonra `&[f64]` üzerinde copy ve element unboxing olmadan
-çalışır. Stats `buffer_copies` ile `buffer_exports` sayaçlarını ayrı gösterir.
+`fastmath.sum(buffer)` daha sonra backing'i kopyalamadan ve element unboxing
+yapmadan logical stride sırasını gezer. Stats `buffer_copies` ile
+`buffer_exports` sayaçlarını ayrı gösterir.
 
 Writable export, backing allocation'ın özelliğinden ayrı bir capability olarak
 verilir. Read-only istek writable bir buffer için bile descriptor'da writable

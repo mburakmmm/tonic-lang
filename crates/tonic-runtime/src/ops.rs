@@ -762,7 +762,7 @@ impl Heap {
                     ),
                 ));
             }
-            let mut offset = 0usize;
+            let mut normalized_indices = Vec::with_capacity(indices.len());
             for (value, dimension) in indices.iter().zip(shape) {
                 let raw = self
                     .integer(*value)?
@@ -773,12 +773,14 @@ impl Heap {
                 if normalized < 0 || normalized >= dimension {
                     return Err(Diagnostic::new("IndexError", "buffer index out of range"));
                 }
-                offset = offset
-                    .checked_mul(dimension as usize)
-                    .and_then(|offset| offset.checked_add(normalized as usize))
-                    .ok_or_else(|| Diagnostic::new("IndexError", "buffer index out of range"))?;
+                normalized_indices.push(normalized as usize);
             }
-            return Ok(offset);
+            return buffer.storage_index(&normalized_indices).ok_or_else(|| {
+                Diagnostic::new(
+                    "RuntimeError",
+                    "validated buffer layout produced an invalid index",
+                )
+            });
         }
         let raw = self
             .integer(index)?
@@ -789,7 +791,14 @@ impl Heap {
         if normalized < 0 || normalized >= len {
             return Err(Diagnostic::new("IndexError", "buffer index out of range"));
         }
-        Ok(normalized as usize)
+        buffer
+            .flat_storage_index(normalized as usize)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "RuntimeError",
+                    "validated buffer layout produced an invalid index",
+                )
+            })
     }
     fn slice(&mut self, source: Value, components: [Value; 3]) -> Result<Value> {
         let source = self.native_value(source);

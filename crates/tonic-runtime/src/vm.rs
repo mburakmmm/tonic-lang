@@ -497,18 +497,11 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
         };
         let (len, rank, shape, writable) = {
             let view = buffer.view();
-            let mut expected_stride = std::mem::size_of::<f64>();
-            for (dimension, stride) in view.shape().iter().zip(view.strides()).rev() {
-                if isize::try_from(expected_stride).ok() != Some(*stride) {
-                    return Ok(None);
-                }
-                let Some(next) = expected_stride.checked_mul(*dimension) else {
-                    return Ok(None);
-                };
-                expected_stride = next;
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
             }
             (
-                view.as_slice().len(),
+                view.len(),
                 view.shape().len() as u32,
                 view.shape().as_ptr() as usize,
                 view.is_writable(),
