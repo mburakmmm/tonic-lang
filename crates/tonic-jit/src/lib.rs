@@ -82,7 +82,7 @@ pub struct MethodLookup {
     pub receiver: u64,
 }
 
-/// Raw contiguous storage exposed only for the duration of one compiled call.
+/// Raw strided storage exposed only for the duration of one compiled call.
 /// The embedding runtime must keep `data` valid while the originating guest
 /// value remains rooted and generated code is executing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,7 @@ pub struct F64BufferView {
     pub len: usize,
     pub rank: u32,
     pub shape: usize,
+    pub strides: usize,
     pub mutation_version: usize,
     pub writable: bool,
     pub active_writable_exports: bool,
@@ -213,13 +214,17 @@ pub trait Runtime {
         ))
     }
 
-    /// Resolve an exact C-contiguous rank-N f64 buffer. `None` is a guard miss
-    /// and deoptimizes to the generic item operation.
+    /// Resolve an exact rank-N f64 buffer. `None` is a guard miss and
+    /// deoptimizes to the generic item operation.
     ///
     /// # Safety
     ///
-    /// A returned non-null `data` pointer must address `len` initialized f64
-    /// elements. `shape` must address `rank` initialized `usize` dimensions.
+    /// A returned non-null `data` pointer must address the logical origin;
+    /// `len` is the number of logical f64 elements and does not imply
+    /// contiguous storage. `shape` must address `rank` initialized `usize`
+    /// dimensions and `strides` must address `rank` initialized signed byte
+    /// strides. Every indexed address described by this metadata must remain
+    /// within the live backing allocation.
     /// For a writable view, `mutation_version` must address an initialized,
     /// uniquely runtime-owned `u64` epoch and the data pointer must permit
     /// writes. These pointers must remain valid while the guest value is rooted
@@ -345,8 +350,8 @@ pub enum ScalarType {
     IntOrBool,
     /// Exact native C-contiguous rank-N f64 buffer with an exact mutability
     /// contract. The logical handle stays in the precise root array; a runtime
-    /// helper supplies ephemeral data/length/shape/mutation metadata for direct
-    /// indexed loads and guarded writable stores.
+    /// helper supplies ephemeral data/length/shape/stride/mutation metadata for
+    /// direct indexed loads and guarded writable stores.
     F64Buffer {
         rank: u32,
         writable: bool,
@@ -870,7 +875,7 @@ extern "C" fn runtime_helper<R: Runtime>(
                             && (!expected_writable || view.mutation_version != 0)
                     });
                     // SAFETY: generated F64Buffer calls pass a writable
-                    // five-word stack slot. These words are native metadata,
+                    // six-word stack slot. These words are native metadata,
                     // never entries in the precise managed-root array.
                     unsafe {
                         output.write(view.map_or(0, |view| view.data as u64));
@@ -882,6 +887,9 @@ extern "C" fn runtime_helper<R: Runtime>(
                         output
                             .add(4)
                             .write(view.map_or(0, |view| view.mutation_version as u64));
+                        output
+                            .add(5)
+                            .write(view.map_or(0, |view| view.strides as u64));
                     }
                     0
                 }
@@ -1371,7 +1379,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                     *writable,
                     builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        40,
+                        48,
                         3,
                     )),
                 )
@@ -2067,9 +2075,11 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         side_exit(&mut builder, registers, pc);
                         continue;
                     };
-                    let slot = buffer_slots
+                    let (rank, slot) = buffer_slots
                         .iter()
-                        .find_map(|(register, _, _, slot)| (*register == source).then_some(*slot))
+                        .find_map(|(register, rank, _, slot)| {
+                            (*register == source).then_some((*rank, *slot))
+                        })
                         .expect("analyzed buffer source has an entry descriptor");
                     let deopt = float_state.map(|state| FloatDeoptContext {
                         state,
@@ -2088,6 +2098,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         start_pc,
                         pc,
                         instruction.c,
+                        rank,
                         slot,
                         tuple,
                         typed_scalar_state.map(Vec::as_slice),
@@ -2111,9 +2122,11 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         .as_ref()
                         .and_then(|analysis| analysis.buffer_store_source[pc])
                         .expect("validated native buffer store source");
-                    let slot = buffer_slots
+                    let (rank, slot) = buffer_slots
                         .iter()
-                        .find_map(|(register, _, _, slot)| (*register == source).then_some(*slot))
+                        .find_map(|(register, rank, _, slot)| {
+                            (*register == source).then_some((*rank, *slot))
+                        })
                         .expect("analyzed buffer store has an entry descriptor");
                     let deopt = float_state.map(|state| FloatDeoptContext {
                         state,
@@ -2132,6 +2145,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                         start_pc,
                         pc,
                         instruction.b,
+                        rank,
                         slot,
                         tuple,
                         typed_scalar_state.map(Vec::as_slice),
@@ -4470,6 +4484,7 @@ fn emit_buffer_address(
     start_pc: Value,
     pc: usize,
     key: u16,
+    rank: u32,
     slot: StackSlot,
     tuple: Option<&BufferTupleItem>,
     scalar_state: Option<&[ScalarFact]>,
@@ -4477,11 +4492,12 @@ fn emit_buffer_address(
     pointer_type: cranelift_codegen::ir::Type,
     deopt: Option<FloatDeoptContext<'_>>,
 ) -> (Value, Value) {
-    let (registers, index) = if let Some(site) = tuple {
+    let shape = builder.ins().stack_load(pointer_type, slot, 16);
+    let strides = builder.ins().stack_load(pointer_type, slot, 40);
+    let (registers, byte_offset) = if let Some(site) = tuple {
         let scalar_state = scalar_state.expect("rank-N buffer access requires typed scalar state");
-        let shape = builder.ins().stack_load(pointer_type, slot, 16);
         let mut current_registers = registers;
-        let mut flat_index = None;
+        let mut byte_offset = builder.ins().iconst(types::I64, 0);
         for (axis, register) in site.indices.iter().copied().enumerate() {
             let axis_offset = i32::try_from(
                 axis.checked_mul(mem::size_of::<usize>())
@@ -4508,18 +4524,13 @@ fn emit_buffer_address(
                 deopt,
             );
             current_registers = guarded_registers;
-            flat_index = Some(match flat_index {
-                None => index,
-                Some(prefix) => {
-                    let scaled = builder.ins().imul(prefix, dimension);
-                    builder.ins().iadd(scaled, index)
-                }
-            });
+            let stride = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), strides, axis_offset);
+            let axis_offset = builder.ins().imul(index, stride);
+            byte_offset = builder.ins().iadd(byte_offset, axis_offset);
         }
-        (
-            current_registers,
-            flat_index.expect("rank-N tuple has at least two axes"),
-        )
+        (current_registers, byte_offset)
     } else {
         let raw = load(builder, registers, key);
         let fact = scalar_state
@@ -4527,7 +4538,7 @@ fn emit_buffer_address(
             .filter(|fact| fact.is_integer_like())
             .unwrap_or(ScalarFact::Unknown);
         let len = builder.ins().stack_load(types::I64, slot, 8);
-        emit_checked_buffer_index(
+        let (registers, index) = emit_checked_buffer_index(
             builder,
             registers,
             raw,
@@ -4538,10 +4549,29 @@ fn emit_buffer_address(
             bounds_proofs.iter().any(|proof| proof.item_pc == pc),
             pointer_type,
             deopt,
-        )
+        );
+        let mut remaining = index;
+        let mut byte_offset = builder.ins().iconst(types::I64, 0);
+        for axis in (0..rank as usize).rev() {
+            let axis_offset = i32::try_from(
+                axis.checked_mul(mem::size_of::<usize>())
+                    .expect("verified scalar rank offset"),
+            )
+            .expect("verified scalar rank fits Cranelift displacement");
+            let dimension = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), shape, axis_offset);
+            let coordinate = builder.ins().urem(remaining, dimension);
+            remaining = builder.ins().udiv(remaining, dimension);
+            let stride = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), strides, axis_offset);
+            let axis_offset = builder.ins().imul(coordinate, stride);
+            byte_offset = builder.ins().iadd(byte_offset, axis_offset);
+        }
+        (registers, byte_offset)
     };
     let data = builder.ins().stack_load(pointer_type, slot, 0);
-    let byte_offset = builder.ins().imul_imm(index, 8);
     (registers, builder.ins().iadd(data, byte_offset))
 }
 fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: ScalarFact) -> Value {
@@ -6674,6 +6704,8 @@ mod tests {
             boxed: Vec<f64>,
             binary_calls: usize,
             shape: Vec<usize>,
+            strides: Vec<isize>,
+            origin: usize,
             mutation_version: Box<u64>,
             writable: bool,
             active_writable_exports: bool,
@@ -6718,10 +6750,11 @@ mod tests {
                 _registers: &[u64],
             ) -> Result<Option<F64BufferView>, RuntimeFailure> {
                 Ok((value == 0x100).then_some(F64BufferView {
-                    data: self.values.as_mut_ptr() as usize,
-                    len: self.values.len(),
+                    data: self.values.as_mut_ptr().wrapping_add(self.origin) as usize,
+                    len: self.shape.iter().product(),
                     rank: self.shape.len() as u32,
                     shape: self.shape.as_ptr() as usize,
+                    strides: self.strides.as_ptr() as usize,
                     mutation_version: self.mutation_version.as_mut() as *mut u64 as usize,
                     writable: self.writable,
                     active_writable_exports: self.active_writable_exports,
@@ -6767,6 +6800,8 @@ mod tests {
             boxed: Vec::new(),
             binary_calls: 0,
             shape: vec![3],
+            strides: vec![8],
+            origin: 0,
             mutation_version: Box::new(0),
             writable: false,
             active_writable_exports: false,
@@ -6781,6 +6816,22 @@ mod tests {
             Outcome::Returned { value: 0x200, .. }
         ));
         assert_eq!(runtime.boxed, [3.0]);
+
+        runtime.strides = vec![-8];
+        runtime.origin = 2;
+        runtime.boxed.clear();
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(0);
+        assert!(matches!(
+            compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [3.0]);
+        runtime.strides = vec![8];
+        runtime.origin = 0;
 
         registers.fill(VALUE_UNBOUND);
         registers[0] = 0x100;
@@ -7084,6 +7135,7 @@ mod tests {
             .unwrap();
         runtime.values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         runtime.shape = vec![2, 3];
+        runtime.strides = vec![24, 8];
         runtime.boxed.clear();
         registers = vec![VALUE_UNBOUND; rank2_compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -7097,6 +7149,26 @@ mod tests {
         ));
         assert_eq!(runtime.boxed, [6.0]);
         assert_eq!(runtime.binary_calls, 0);
+
+        runtime.values = vec![1.0, 99.0, 2.0, 99.0, 3.0, 99.0, 4.0];
+        runtime.shape = vec![2, 2];
+        runtime.strides = vec![32, 16];
+        runtime.boxed.clear();
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(1);
+        registers[2] = encode_i64(1);
+        assert!(matches!(
+            rank2_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.boxed, [4.0]);
+
+        runtime.values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        runtime.shape = vec![2, 3];
+        runtime.strides = vec![24, 8];
 
         let rank2_loop_program = function(
             "def total(values,row,count):\n    index=0\n    result=0.0\n    while index<count:\n        result=result+values[row,index]\n        index+=1\n    return result",
@@ -7261,6 +7333,7 @@ mod tests {
         );
 
         runtime.shape = vec![6];
+        runtime.strides = vec![8];
         registers.fill(VALUE_UNBOUND);
         registers[0] = 0x100;
         registers[1] = encode_i64(0);
@@ -7307,6 +7380,7 @@ mod tests {
             .unwrap();
         runtime.values = (1..=12).map(f64::from).collect();
         runtime.shape = vec![2, 2, 3];
+        runtime.strides = vec![48, 24, 8];
         runtime.boxed.clear();
         registers = vec![VALUE_UNBOUND; rank3_compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -7406,6 +7480,7 @@ mod tests {
         );
 
         runtime.shape = vec![12];
+        runtime.strides = vec![8];
         registers = vec![VALUE_UNBOUND; rank3_compiled.metadata().root_count];
         registers[0] = 0x100;
         registers[1] = encode_i64(0);
@@ -7488,6 +7563,7 @@ mod tests {
         let stored_value_register = store_code.instructions[set_item_pc].c;
         runtime.values = vec![1.0, 2.0, 3.0];
         runtime.shape = vec![3];
+        runtime.strides = vec![8];
         runtime.writable = true;
         runtime.active_writable_exports = false;
         *runtime.mutation_version = 0;
@@ -7540,6 +7616,24 @@ mod tests {
                 .unwrap(),
             Outcome::Deopt { pc: 0 }
         );
+
+        runtime.values = vec![1.0, 99.0, 2.0];
+        runtime.shape = vec![2];
+        runtime.strides = vec![16];
+        runtime.origin = 0;
+        runtime.writable = true;
+        *runtime.mutation_version = 0;
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(1);
+        assert!(matches!(
+            store_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { .. }
+        ));
+        assert_eq!(runtime.values, [1.0, 99.0, 1.25]);
+        assert_eq!(*runtime.mutation_version, 1);
     }
 
     #[test]

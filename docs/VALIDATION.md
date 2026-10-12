@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 30,
-direct bytecode VM 4, buffer 13, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 452 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 453 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -253,6 +253,16 @@ broadcast toplamını, hizasız stride, rank uyuşmazlığı, invalid origin ve 
 dışına kaçan reachable range reddini çalıştırır. C ABI testi flagsiz export'ta
 gerçek `[32,16]` stride descriptor'ını tüketir; aynı görünüm için
 `BUFFER_C_CONTIGUOUS` isteği owner sızdırmadan `BufferError` üretir.
+
+Arbitrary-stride JIT testi altı word descriptor'daki stable stride pointer'ını
+doğrudan Cranelift adres hesabında kullanır. Public JIT vakası rank-1 `-8` byte
+stride ile logical origin'den geriye native load'u, padded rank-2 `[32,16]`
+stride ile tuple load'u ve `16` byte stride üzerinde padding'i bozmayan native
+store'u doğrular. Gerçek VM testi exact writable rank-2 annotation üzerinde
+negative tuple load, logical flat load, padded store ve iki eksenli kanıtlanmış
+nested loop'u annotation first-call JIT + allocation-stress moving GC altında
+çalıştırır; geçerli girdide dört fonksiyon toplamında deopt ve per-item helper
+oluşmaz.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

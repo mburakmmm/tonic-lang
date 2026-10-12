@@ -142,6 +142,53 @@ fn arbitrary_strides_preserve_logical_index_assignment_len_and_sum() {
 }
 
 #[test]
+fn annotated_arbitrary_stride_loads_stores_and_loops_run_in_native_code() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "import strided\n",
+            "def load(values:fastmath.Buffer[float,2,True], row:int, column:int)->float:\n",
+            "    return values[row,column]\n",
+            "def flat(values:fastmath.Buffer[float,2,True], index:int)->float:\n",
+            "    return values[index]\n",
+            "def store(values:fastmath.Buffer[float,2,True], row:int, column:int, value:float)->float:\n",
+            "    values[row,column]=value\n",
+            "    return values[row,column]\n",
+            "def total(values:fastmath.Buffer[float,2,True], rows:int, columns:int)->float:\n",
+            "    row=0\n",
+            "    result=0.0\n",
+            "    while row<rows:\n",
+            "        column=0\n",
+            "        while column<columns:\n",
+            "            result=result+values[row,column]\n",
+            "            column+=1\n",
+            "        row+=1\n",
+            "    return result\n",
+            "values=strided.make()\n",
+            "print(load(values,-1,-1),flat(values,2),store(values,0,1,8.0),total(values,2,2))\n",
+        ),
+        "buffer-strided-native",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    vm.register_native("strided", "make", 0, make_rank_two_strided)
+        .unwrap();
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"4.0 3.0 8.0 16.0\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 4);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 4);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 4);
+    assert_eq!(vm.stats.jit_f64_buffer_store_sites, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 2);
+    assert_eq!(vm.stats.jit_deopts, 0);
+    assert!(vm.stats.gc_collections > 0);
+    assert_eq!(vm.active_handles(), 0);
+}
+
+#[test]
 fn strided_constructor_rejects_invalid_reachable_ranges() {
     let mut vm = Vm::new().unwrap();
     let mut context = vm.context().unwrap();

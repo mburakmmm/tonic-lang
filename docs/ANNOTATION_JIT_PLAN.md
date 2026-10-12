@@ -262,8 +262,14 @@ stride'ları taşır; reachable backing aralığını constructor'da doğrular v
 rank-N read/write, logical sum ile C descriptor export'unda negative/zero/padded
 layout'ları korur. C-contiguous istek gerçek olmayan layout'ta fail-closed olur.
 Karar [ADR 0138](adr/0138-owned-arbitrary-stride-buffer-runtime.md) içindedir.
-Arbitrary-stride JIT adres lowering'i ve genel alias/escape materialization açık
-iştir.
+Cranelift descriptor'ı stride pointer'ını da çağrı ömrü boyunca taşır. Rank-N
+tuple yolu adresi eksen başına `index * signed_byte_stride` toplamıyla; logical
+flat yol ise indeksi C-order koordinatlarına ayırıp aynı toplamla üretir. Bounds
+kanıtları shape üzerinde kaldığından negative/zero/padded stride yeni bir
+per-item guard veya helper gerektirmez; writable store mutation epoch ve alias
+kapısını aynen korur. Karar
+[ADR 0139](adr/0139-native-arbitrary-stride-buffer-addressing.md) içindedir.
+Genel container alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

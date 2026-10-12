@@ -491,8 +491,10 @@ sonra alınır.
     - [x] Sahipli arbitrary signed byte-stride runtime temeli: logical origin/
       length, reachable-range doğrulaması, negative/zero stride, generic rank-N
       read/write, logical sum ve gerçek C descriptor contiguity sözleşmesi.
-    - [ ] Arbitrary-stride JIT lowering ve genel container alias/escape
-      materialization.
+    - [x] Arbitrary signed byte-stride JIT lowering: call-lifetime stride
+      descriptor'ı, rank-N tuple adres toplamı, rank-N logical flat indeks
+      ayrıştırması ve native negative/zero/padded load/store.
+    - [ ] Genel container alias/escape materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

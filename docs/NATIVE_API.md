@@ -152,6 +152,13 @@ load/store arasında gizli alias varsayımı kurulmasını önler.
 Metadata pointer'ı yalnız aktif ödünç boyunca kullanılabilir; bu borrow bırakılmadan
 callback/reentry veya başka bir safepoint işlemi yapılmamalıdır.
 
+Annotation-JIT buffer view'ı data ve logical length yanında shape ile signed byte
+stride pointer'larını çağrı ömürlü private descriptor'a alır. Tuple indeksleri
+eksen stride toplamına, flat indeksler önce logical C-order koordinatlarına
+lower edilir. Böylece padded, reversed ve zero-stride owned görünümler native
+load/store yolunu kullanır; descriptor metadata'sı extension ABI'sindeki owner
+ve pointer ömrü kurallarını değiştirmez.
+
 ## Thread, callback ve shutdown
 
 `Vm::new` runtime'ı current OS thread'e attach eder. Yalnız attached thread run,

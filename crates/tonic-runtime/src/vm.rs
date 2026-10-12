@@ -478,9 +478,11 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
         Ok(value.raw())
     }
 
-    // SAFETY: Buffer owns an immutable boxed f64 slice. Moving the guest
-    // object moves only the Box handle, and no runtime operation can replace
-    // its backing allocation during a compiled invocation.
+    // SAFETY: Buffer owns boxed f64 data plus boxed shape/stride metadata.
+    // Moving the guest object moves only those Box handles, and no runtime
+    // operation can replace their allocations during a compiled invocation.
+    // Construction proves every address reachable from the logical-origin
+    // data pointer and signed strides remains inside initialized backing data.
     #[allow(unsafe_code)]
     unsafe fn f64_buffer(
         &mut self,
@@ -495,15 +497,13 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
         let Object::Buffer(buffer) = object else {
             return Ok(None);
         };
-        let (len, rank, shape, writable) = {
+        let (len, rank, shape, strides, writable) = {
             let view = buffer.view();
-            if !buffer.is_c_contiguous() {
-                return Ok(None);
-            }
             (
                 view.len(),
                 view.shape().len() as u32,
                 view.shape().as_ptr() as usize,
+                view.strides().as_ptr() as usize,
                 view.is_writable(),
             )
         };
@@ -516,6 +516,7 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
             len,
             rank,
             shape,
+            strides,
             mutation_version,
             writable,
             active_writable_exports,
