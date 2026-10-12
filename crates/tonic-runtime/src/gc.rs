@@ -286,6 +286,7 @@ mod tests {
             .alloc(Object::Function {
                 code: 1,
                 execution: 1,
+                jit_compile_requested: false,
                 captures: vec![cell],
                 defaults: vec![default],
                 annotations: None,

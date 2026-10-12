@@ -529,6 +529,32 @@ impl<'a> Context<'a> {
             .special_method_call(value, "__call__")?
             .is_some())
     }
+    pub(crate) fn request_jit_compile(&mut self, handle: Handle) -> Result<Handle> {
+        let value = self.resolve(handle)?;
+        let function = match self.vm.heap.get(value)? {
+            Object::Function { .. } => value,
+            Object::StaticMethod(function) | Object::ClassMethod(function)
+                if matches!(self.vm.heap.get(*function), Ok(Object::Function { .. })) =>
+            {
+                *function
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "TypeError",
+                    "tonic.compile expects a Tonic function",
+                ));
+            }
+        };
+        let Object::Function {
+            jit_compile_requested,
+            ..
+        } = self.vm.heap.get_mut(function)?
+        else {
+            unreachable!("compile target was checked as a Tonic function");
+        };
+        *jit_compile_requested = true;
+        self.local(value)
+    }
     fn call_values(&mut self, callable: Value, arguments: &[Value]) -> Result<Value> {
         let program = self.program.ok_or_else(|| {
             Diagnostic::new(
@@ -1029,4 +1055,8 @@ pub(crate) fn fastmath_array(ctx: &mut Context<'_>, args: &[Handle]) -> Result<H
 pub(crate) fn fastmath_sum(ctx: &mut Context<'_>, args: &[Handle]) -> Result<Handle> {
     let total = ctx.sum_f64_values(args[0])?;
     ctx.from_f64(total)
+}
+
+pub(crate) fn tonic_compile(ctx: &mut Context<'_>, args: &[Handle]) -> Result<Handle> {
+    ctx.request_jit_compile(args[0])
 }

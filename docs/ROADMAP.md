@@ -434,8 +434,11 @@ sonra alınır.
     - [x] `int | None`/`bool | None` immediate union imzaları için first-call
       Cranelift seçimi; iki tag'i kabul eden giriş guard'ı, optional dönüş kanıtı
       ve annotation uyuşmazlığında generic Python yürütmesi.
-    - [ ] `@tonic.compile`, modül warmup politikası ve import-time code-budget
-      planlaması.
+    - [x] Identity-preserving `@tonic.compile` opt-in: exact Tonic function/
+      staticmethod/classmethod marker'ı, profitability/hotness beklemeden
+      first-call denemesi, advisory fallback, global code-budget ve explicit
+      candidate/compiled/rejection sayaçları.
+    - [ ] Modül warmup politikası ve import-time code-budget planlaması.
     - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code
       budget ve guard-instability için deterministic kayıt ve CLI açıklaması.
   - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için

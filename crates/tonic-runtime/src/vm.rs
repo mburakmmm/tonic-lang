@@ -7,8 +7,8 @@ use crate::{
         Object, SuspendedGenerator, TracebackEntry, TypeParameterKind, TypingFormKind,
     },
     native::{
-        fastmath_add, fastmath_array, fastmath_sum, Context, HandleTable, NativeCallable,
-        NativeDef, NativeFn, PersistentHandle,
+        fastmath_add, fastmath_array, fastmath_sum, tonic_compile, Context, HandleTable,
+        NativeCallable, NativeDef, NativeFn, PersistentHandle,
     },
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
@@ -110,6 +110,9 @@ pub struct Stats {
     pub jit_annotation_compiled: u64,
     pub jit_annotation_guard_misses: u64,
     pub jit_annotation_invalidations: u64,
+    pub jit_explicit_candidates: u64,
+    pub jit_explicit_compiled: u64,
+    pub jit_explicit_rejections: u64,
     pub jit_typed_int_guard_elisions: u64,
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
@@ -2535,6 +2538,7 @@ impl Vm {
         vm.register_native("fastmath", "add", 2, fastmath_add)?;
         vm.register_native("fastmath", "array", 1, fastmath_array)?;
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
+        vm.register_native("tonic", "compile", 1, tonic_compile)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
         let object_init = vm.heap.alloc(Object::Builtin(Builtin::ObjectInit))?;
         let object_hash = vm.heap.alloc(Object::Builtin(Builtin::ObjectHash))?;
@@ -6243,6 +6247,7 @@ impl Vm {
                         let function = self.heap.alloc(Object::Function {
                             code: site.code,
                             execution: self.execution,
+                            jit_compile_requested: false,
                             captures,
                             defaults: site
                                 .defaults
@@ -9937,6 +9942,17 @@ impl Vm {
         let base = frame.base;
         let start_pc = frame.ip;
         let callable = frame.callable;
+        let explicit_compile = callable.is_some_and(|function| {
+            matches!(
+                self.heap.get(function),
+                Ok(Object::Function {
+                    code,
+                    execution,
+                    jit_compile_requested: true,
+                    ..
+                }) if usize::from(*code) == code_id && *execution == self.execution
+            )
+        });
         let osr_entry = resuming && matches!(self.jit_cache[code_id], JitEntry::Untried);
         if resuming && !osr_entry {
             self.stats.jit_resumes += 1;
@@ -9974,6 +9990,9 @@ impl Vm {
             }
         }
         if matches!(self.jit_cache[code_id], JitEntry::Untried) {
+            if explicit_compile && !resuming {
+                self.stats.jit_explicit_candidates += 1;
+            }
             let mut annotation = if resuming {
                 None
             } else {
@@ -9994,7 +10013,7 @@ impl Vm {
                 && self.registers[base..base + program.code[code_id].params as usize]
                     .iter()
                     .all(|value| matches!(self.heap.get(*value), Ok(Object::Float(_))));
-            if annotation.is_none() && float_leaf {
+            if annotation.is_none() && !explicit_compile && float_leaf {
                 self.stats.jit_unprofitable += 1;
                 self.record_jit_rejection(
                     program,
@@ -10015,6 +10034,7 @@ impl Vm {
                     .saturating_add(runtime_calls.saturating_mul(4))
             };
             if annotation.is_none()
+                && !explicit_compile
                 && !loop_candidate
                 && program.code[code_id].instructions.len() < profitable_size
             {
@@ -10033,7 +10053,7 @@ impl Vm {
                 self.jit_cache[code_id] = JitEntry::Unsupported;
                 return Ok(false);
             }
-            if annotation.is_none() && !osr_entry {
+            if annotation.is_none() && !explicit_compile && !osr_entry {
                 self.jit_hotness[code_id] = self.jit_hotness[code_id].saturating_add(1);
                 let threshold = if loop_candidate {
                     self.jit_osr_threshold.max(1)
@@ -10151,6 +10171,7 @@ impl Vm {
                         .filter(|total| *total <= self.jit_max_code_bytes)
                     else {
                         self.stats.jit_code_budget_rejections += 1;
+                        self.stats.jit_explicit_rejections += u64::from(explicit_compile);
                         self.stats.jit_fallbacks += 1;
                         self.record_jit_rejection(
                             program,
@@ -10171,6 +10192,7 @@ impl Vm {
                     self.jit_code_budget_used = next_code_bytes;
                     self.stats.jit_compiled += 1;
                     self.stats.jit_annotation_compiled += u64::from(annotation.is_some());
+                    self.stats.jit_explicit_compiled += u64::from(explicit_compile);
                     self.stats.jit_compile_ns += metadata.compile_time.as_nanos();
                     self.stats.jit_code_bytes += metadata.code_bytes;
                     self.stats.jit_direct_call_sites += metadata.direct_call_sites as u64;
@@ -10204,6 +10226,7 @@ impl Vm {
                 }
                 Err(tonic_jit::Error::Unsupported(unsupported)) => {
                     self.stats.jit_fallbacks += 1;
+                    self.stats.jit_explicit_rejections += u64::from(explicit_compile);
                     self.record_jit_rejection(
                         program,
                         code_id,

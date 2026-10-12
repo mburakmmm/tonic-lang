@@ -121,9 +121,15 @@ yer alır; managed değer gibi taranmaz.
 Annotation tek başına “her şeyi import sırasında derle” anlamına gelmez.
 Desteklenen planı olan fonksiyon first call'da typed baseline'a girebilir; küçük
 veya kârsız fonksiyonlar ölçümlü cost model ile adaptive tier'da kalabilir.
-`@tonic.compile` veya module policy, deploy/startup senaryoları için import-time
-warmup ister. Hata halinde import başarısız olmaz; generic giriş korunur ve
-sebep diagnostics/statistics yüzeyinde görünür.
+`@tonic.compile` fonksiyon identity'sini koruyan açık bir first-call compile
+isteğidir. Hotness ve küçük-fonksiyon profitability bekleyişini atlar; mevcut
+annotation TypePlan varsa typed guard'ları aynen kullanır, yoksa desteklenen
+generic/profiled JIT subset'ini dener. Yanlış annotation girdisi veya unsupported
+bytecode program semantiğini değiştirmez: generic giriş korunur. Global native
+code budget yine zorunludur. `jit_explicit_candidates`,
+`jit_explicit_compiled` ve `jit_explicit_rejections` sayaçları sonucu ayırır;
+karar [ADR 0140](adr/0140-explicit-first-call-jit-decorator.md) içindedir.
+Module policy ile import-time warmup sonraki iştir.
 
 Disk cache anahtarı source/bytecode hash, canonical `TypePlan`, dependency
 versions, Tonic/bytecode/Cranelift sürümü, target triple ve gerekli CPU

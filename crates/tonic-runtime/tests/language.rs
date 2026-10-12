@@ -3075,6 +3075,90 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
 }
 
 #[test]
+fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
+    let source = concat!(
+        "import tonic\n",
+        "@tonic.compile\n",
+        "def add(left,right):\n",
+        "    value=left+right\n",
+        "    return value\n",
+        "print(add(20,22))\n",
+    );
+    let program = compile(source, "explicit-jit-decorator").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = u32::MAX;
+    vm.jit_min_instructions = usize::MAX;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\n");
+    assert_eq!(vm.stats.jit_explicit_candidates, 1);
+    assert_eq!(vm.stats.jit_explicit_compiled, 1);
+    assert_eq!(vm.stats.jit_explicit_rejections, 0);
+    assert_eq!(vm.stats.jit_compile_attempts, 1);
+    assert_eq!(vm.stats.jit_compiled, 1);
+    assert_eq!(vm.stats.jit_calls, 1);
+    assert_eq!(vm.stats.jit_deferred, 0);
+    assert_eq!(vm.stats.jit_unprofitable, 0);
+    assert_eq!(vm.stats.jit_annotation_candidates, 0);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn tonic_compile_rejection_falls_back_and_non_functions_are_rejected() {
+    let source = concat!(
+        "import tonic\n",
+        "@tonic.compile\n",
+        "def build(value):\n",
+        "    return [value]\n",
+        "print(build(7))\n",
+    );
+    let program = compile(source, "explicit-jit-rejection").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"[7]\n");
+    assert_eq!(vm.stats.jit_explicit_candidates, 1);
+    assert_eq!(vm.stats.jit_explicit_compiled, 0);
+    assert_eq!(vm.stats.jit_explicit_rejections, 1);
+    let rejection = vm.jit_rejections().next().expect("explicit rejection");
+    assert_eq!(rejection.function, "build");
+    assert_eq!(rejection.kind, JitRejectionKind::UnsupportedBytecode);
+
+    assert_eq!(error("import tonic\ntonic.compile(1)").kind, "TypeError");
+}
+
+#[test]
+fn tonic_compile_supports_both_static_and_class_method_decorator_orders() {
+    let source = concat!(
+        "import tonic\n",
+        "class Math:\n",
+        "    @tonic.compile\n",
+        "    @staticmethod\n",
+        "    def add(left,right):\n",
+        "        return left+right\n",
+        "    @classmethod\n",
+        "    @tonic.compile\n",
+        "    def increment(cls,value):\n",
+        "        return value+1\n",
+        "print(Math.add(20,22),Math.increment(41))\n",
+    );
+    let program = compile(source, "explicit-jit-descriptors").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = u32::MAX;
+    vm.jit_min_instructions = usize::MAX;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42 42\n");
+    assert_eq!(vm.stats.jit_explicit_candidates, 2);
+    assert_eq!(vm.stats.jit_explicit_compiled, 2);
+    assert_eq!(vm.stats.jit_explicit_rejections, 0);
+}
+
+#[test]
 fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
     let source = concat!(
         "def choose(flag:bool,value:int)->int:\n",

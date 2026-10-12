@@ -286,6 +286,7 @@ pub(crate) enum Object {
     Function {
         code: u16,
         execution: u64,
+        jit_compile_requested: bool,
         captures: Vec<Value>,
         defaults: Vec<Value>,
         annotations: Option<Value>,

@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 453 test.
+native handles 5, language/runtime 152, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 456 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -55,6 +55,17 @@ replacement `TypeError`'ı; class dependency version yenilemesi ve yanlış dön
 GC altında da aynı çıktıyı ve sayaçları verir. Ayrı vakalar eager global alias
 rebinding kararını ve user-class dependency değişiminin canlı native entry'yi
 invalid etmesini doğrular.
+
+Explicit JIT testi `@tonic.compile` işaretli, annotation'sız küçük fonksiyonun
+`jit_threshold=u32::MAX` ve `jit_min_instructions=usize::MAX` altında bile ilk
+çağrıda derlendiğini; identity-preserving decorator'ın çıktıyı değiştirmediğini
+ve stress GC altında candidate/compiled sayaçlarını doğrular. Ayrı unsupported
+list-literal gövdesi deterministic `UnsupportedBytecode` kaydıyla interpreter'a
+düşer ve normal `[7]` sonucunu üretir; fonksiyon olmayan decorator girdisi
+`TypeError` olur.
+Descriptor-order testi `@tonic.compile` işaretini hem `staticmethod` wrapper'ının
+dışında hem `classmethod` üretiminden önce uygular; iki durumda da descriptor
+binding ve sonuç korunurken underlying function first-call JIT'e girer.
 
 Typed integer overlay testi verified loop bytecode'unda parametre/sabit/local,
 branch merge ve loop fixed-point sonucunun redundant tag guard'larını gerçekten
