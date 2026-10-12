@@ -483,8 +483,13 @@ sonra alınır.
       row-major adres fold'u ve kanonik N-level nested loop için eksen başına
       entry guard/bounds-check elimination. Rank-3 gerçek VM ve direct-JIT
       testleri negatif indeks, shape/rank miss ve üç dinamik sınırı kapsar.
-    - [ ] Arbitrary-stride lowering; writable native store, mutation/version
-      guard'ı ve alias/escape materialization.
+    - [x] Exact writable C-contiguous rank-N `f64` annotation için native
+      `SET_ITEM`: bütün guard'lar öncesinde side-effect yok, bounds deopt'unda
+      canlı unboxed float state rekonstrüksiyonu, non-moving mutation epoch,
+      external writable-export lifetime takibi ve active alias'ta fail-closed
+      giriş guard'ı. Generic/native store aynı epoch sözleşmesini paylaşır.
+    - [ ] Arbitrary-stride lowering ve genel container alias/escape
+      materialization.
   - [ ] Typed direct-call graph: annotated callee/return planı, recursion,
     monomorphic method/class/shape guard'ları, inline bütçesi ve ayrı compilation
     unit/code-size sınırı.

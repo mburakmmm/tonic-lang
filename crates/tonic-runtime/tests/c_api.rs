@@ -526,6 +526,28 @@ unsafe extern "C-unwind" fn increment_buffer(
     output: *mut TonicHandle,
 ) -> TonicStatus {
     let api = negotiate_api(TONIC_ABI_VERSION, 0, CAP_BUFFER_V1).unwrap();
+    let mut read_only = std::mem::MaybeUninit::<TonicBuffer>::uninit();
+    // SAFETY: VM supplies one live buffer handle and descriptor output storage.
+    let status = unsafe {
+        (api.buffer_export)(
+            context,
+            arguments.read(),
+            BUFFER_C_CONTIGUOUS,
+            read_only.as_mut_ptr(),
+        )
+    };
+    if status != TonicStatus::OK {
+        return status;
+    }
+    // SAFETY: successful export initialized the descriptor.
+    let mut read_only = unsafe { read_only.assume_init() };
+    assert_eq!(read_only.flags & BUFFER_WRITABLE, 0);
+    // SAFETY: descriptor belongs to this context.
+    let status = unsafe { (api.buffer_release)(context, &mut read_only) };
+    if status != TonicStatus::OK {
+        return status;
+    }
+
     let mut descriptor = std::mem::MaybeUninit::<TonicBuffer>::uninit();
     // SAFETY: VM supplies one live buffer handle and descriptor output storage.
     let status = unsafe {
@@ -828,7 +850,7 @@ fn writable_export_mutates_nonmoving_storage_and_preserves_owner() {
     .unwrap();
     assert_eq!(output, b"9.0\n");
     assert_eq!(vm.stats.buffer_copies, 1);
-    assert_eq!(vm.stats.buffer_exports, 2);
+    assert_eq!(vm.stats.buffer_exports, 3);
     assert_eq!(vm.active_handles(), 0);
 }
 

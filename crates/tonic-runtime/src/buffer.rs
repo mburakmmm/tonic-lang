@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use tonic_core::diagnostic::{Diagnostic, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,14 @@ pub(crate) struct Buffer {
     shape: Box<[usize]>,
     strides: Box<[isize]>,
     writable: bool,
+    mutation: Box<BufferMutationState>,
+}
+
+#[derive(Debug)]
+struct BufferMutationState {
+    version: Cell<u64>,
+    writable_exports: Cell<u32>,
+    native_access_disabled: Cell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +105,11 @@ impl Buffer {
             shape: shape.to_vec().into_boxed_slice(),
             strides: strides.into_boxed_slice(),
             writable,
+            mutation: Box::new(BufferMutationState {
+                version: Cell::new(0),
+                writable_exports: Cell::new(0),
+                native_access_disabled: Cell::new(false),
+            }),
         })
     }
     pub fn view(&self) -> F64BufferView<'_> {
@@ -119,19 +133,101 @@ impl Buffer {
     pub fn len(&self) -> usize {
         self.data.len()
     }
+    pub(crate) fn data_mut_ptr(&mut self) -> *mut f64 {
+        self.data.as_mut_ptr()
+    }
+    pub(crate) fn mutation_version_ptr(&self) -> *mut u64 {
+        self.mutation.version.as_ptr()
+    }
+    #[cfg(test)]
+    fn mutation_version(&self) -> u64 {
+        self.mutation.version.get()
+    }
+    pub(crate) fn has_active_writable_exports(&self) -> bool {
+        self.mutation.writable_exports.get() != 0
+    }
+    pub(crate) fn native_access_disabled(&self) -> bool {
+        self.mutation.native_access_disabled.get()
+    }
+    pub(crate) fn begin_export(&self, writable: bool) -> Result<()> {
+        if !writable {
+            return Ok(());
+        }
+        let exports = self
+            .mutation
+            .writable_exports
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::new("BufferError", "writable export count exhausted"))?;
+        self.mutation.writable_exports.set(exports);
+        Ok(())
+    }
+    pub(crate) fn end_export(&self, writable: bool) {
+        if !writable {
+            return;
+        }
+        let exports = self.mutation.writable_exports.get();
+        debug_assert!(exports > 0, "writable buffer export underflow");
+        self.mutation
+            .writable_exports
+            .set(exports.saturating_sub(1));
+        if let Some(version) = self.mutation.version.get().checked_add(1) {
+            self.mutation.version.set(version);
+        } else {
+            // An external writer may already have changed storage. Future
+            // native access must fail closed when its epoch cannot advance.
+            self.mutation.native_access_disabled.set(true);
+        }
+    }
+    fn advance_mutation(&self) -> Result<()> {
+        let version =
+            self.mutation.version.get().checked_add(1).ok_or_else(|| {
+                Diagnostic::new("RuntimeError", "buffer mutation version exhausted")
+            })?;
+        self.mutation.version.set(version);
+        Ok(())
+    }
     pub fn set_f64(&mut self, index: usize, value: f64) -> Result<()> {
         if !self.writable {
             return Err(Diagnostic::new("TypeError", "buffer is read-only"));
         }
-        let Some(slot) = self.data.get_mut(index) else {
+        if index >= self.data.len() {
             return Err(Diagnostic::new("IndexError", "buffer index out of range"));
-        };
-        *slot = value;
+        }
+        self.advance_mutation()?;
+        self.data[index] = value;
         Ok(())
     }
     pub fn estimated_bytes(&self) -> usize {
         self.data.len() * std::mem::size_of::<f64>()
             + self.shape.len() * std::mem::size_of::<usize>()
             + self.strides.len() * std::mem::size_of::<isize>()
+            + std::mem::size_of::<BufferMutationState>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Buffer;
+
+    #[test]
+    fn mutation_epoch_and_writable_export_lifetime_are_explicit() {
+        let mut buffer = Buffer::f64(&[1.0, 2.0], &[2], true).unwrap();
+        assert_eq!(buffer.mutation_version(), 0);
+        assert!(!buffer.has_active_writable_exports());
+
+        buffer.begin_export(true).unwrap();
+        assert!(buffer.has_active_writable_exports());
+        buffer.end_export(true);
+        assert!(!buffer.has_active_writable_exports());
+        assert_eq!(buffer.mutation_version(), 1);
+
+        buffer.set_f64(0, 3.0).unwrap();
+        assert_eq!(buffer.mutation_version(), 2);
+        assert_eq!(buffer.view().as_slice(), &[3.0, 2.0]);
+
+        buffer.begin_export(false).unwrap();
+        buffer.end_export(false);
+        assert_eq!(buffer.mutation_version(), 2);
     }
 }

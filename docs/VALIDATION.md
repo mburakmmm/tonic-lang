@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-9 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+12 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 27,
-direct bytecode VM 4, buffer 10, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
+Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 28,
+direct bytecode VM 4, buffer 11, C ABI integration 17, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 149, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 445 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 447 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -231,6 +231,18 @@ ve gerçek VM testleri `2×2×3` buffer üzerinde tek yükleri, `78.0` tam topla
 eksen taşması, fazla dinamik bound ve rank mismatch deopt'unu stress-GC altında
 doğrular. Metadata rank-2 uyumluluk sayacını korurken bütün tuple-rank sitelerini
 ayrı rank-N sayacında raporlar.
+
+Writable native buffer testi exact `Buffer[float,2,True]` imzasını first-call
+JIT'e alır. Tek store ve iki seviyeli doldurma döngüsü tuple materialization,
+element boxing ve per-store runtime helper olmadan backing `f64` storage'ı
+günceller; döngünün iki axis bounds kontrolü entry guard'larına kaldırılır.
+Her native store non-moving mutation epoch'unu artırır. Read-only annotation
+aynı `SET_ITEM` lowering'ini alamaz; active foreign writable export ve mutability
+uyuşmazlığı entry deopt'udur. Bounds miss store'dan önce tuple PC'sine döner ve
+canlı unboxed float register'ları generic `IndexError` yürütmesi için yeniden
+kutulanır. Runtime testi valid/negative/rank-2 store, tam `2×3` fill ve bounds
+fallback sonucunu stress-GC altında doğrular; buffer unit testi writable export
+lifetime'ının epoch'u konservatif artırdığını kapsar.
 
 Typed return proof aynı annotation-JIT vakalarında bütün erişilebilir `RETURN`
 değerlerini result planına karşı doğrular ve kanıtlı int/float/bool dönüşlerde

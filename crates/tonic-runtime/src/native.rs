@@ -45,7 +45,7 @@ struct Entry {
 enum HandleKind {
     Local,
     Persistent,
-    BufferOwner,
+    BufferOwner { writable: bool },
     ForeignReference,
 }
 #[derive(Default)]
@@ -674,14 +674,44 @@ impl<'a> Context<'a> {
         if writable && !buffer.view().is_writable() {
             return Err(Diagnostic::new("BufferError", "buffer is read-only"));
         }
-        let parts = buffer.export();
-        let owner = self.vm.handles.insert(value, HandleKind::BufferOwner)?;
+        let mut parts = buffer.export();
+        // Mutability is a granted capability, not merely a property of the
+        // backing allocation. A read-only request must not advertise writes.
+        parts.writable = writable;
+        let owner = self
+            .vm
+            .handles
+            .insert(value, HandleKind::BufferOwner { writable })?;
+        let begin = match self.vm.heap.get(value)? {
+            Object::Buffer(buffer) => buffer.begin_export(writable),
+            _ => unreachable!("buffer type checked above"),
+        };
+        if let Err(error) = begin {
+            self.vm
+                .handles
+                .release(owner, HandleKind::BufferOwner { writable })?;
+            return Err(error);
+        }
         self.locals.push(owner);
         self.vm.heap.buffer_exports += 1;
         Ok((owner, parts))
     }
     pub(crate) fn release_buffer_owner(&mut self, handle: Handle) -> Result<()> {
-        self.vm.handles.release(handle, HandleKind::BufferOwner)
+        let entry = self.vm.handles.entry(handle)?;
+        let HandleKind::BufferOwner { writable } = entry.kind else {
+            return Err(invalid());
+        };
+        let value = entry.value.ok_or_else(invalid)?;
+        let Object::Buffer(buffer) = self.vm.heap.get(value)? else {
+            return Err(Diagnostic::new(
+                "RuntimeError",
+                "buffer owner no longer refers to a buffer",
+            ));
+        };
+        buffer.end_export(writable);
+        self.vm
+            .handles
+            .release(handle, HandleKind::BufferOwner { writable })
     }
     fn sum_f64_values(&mut self, value: Handle) -> Result<f64> {
         let value = self.resolve(value)?;
@@ -913,10 +943,16 @@ impl<'a> Context<'a> {
 }
 impl Drop for Context<'_> {
     fn drop(&mut self) {
-        for h in self.locals.drain(..) {
+        for h in std::mem::take(&mut self.locals) {
             let kind = self.vm.handles.entry(h).map(|entry| entry.kind);
-            if let Ok(kind @ (HandleKind::Local | HandleKind::BufferOwner)) = kind {
-                let _ = self.vm.handles.release(h, kind);
+            match kind {
+                Ok(HandleKind::Local) => {
+                    let _ = self.vm.handles.release(h, HandleKind::Local);
+                }
+                Ok(HandleKind::BufferOwner { .. }) => {
+                    let _ = self.release_buffer_owner(h);
+                }
+                _ => {}
             }
         }
     }

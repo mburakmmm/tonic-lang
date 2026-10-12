@@ -250,8 +250,14 @@ eksenlerde guard edip row-major fold ile tek flat offset üretir. Kanonik N-leve
 nested loop'ta her induction bağımsız `bound <= shape[axis]` giriş guard'ına
 dönüşür ve normal girişte bütün kanıtlı eksen kontrolleri kalkar. Karar
 [ADR 0136](adr/0136-native-rankn-f64-buffer-load.md) içindedir. Dış stride
-lowering, writable native store, mutation/version guard'ı ve alias/escape
-materialization açık iştir.
+lowering'den önce exact writable C-contiguous rank-N store yolu da eklenmiştir.
+Buffer'ın ayrı non-moving mutation epoch'u generic ve native her store'da
+ilerler. Writable C export owner handle'ı açıkken buffer native girişte fail
+closed davranır; release epoch'u konservatif artırır. Native `SET_ITEM` bütün
+rank/index/version guard'larını store'dan önce tamamlar ve bounds deopt'unda
+canlı unboxed float register'larını generic resume için yeniden kutular. Karar
+[ADR 0137](adr/0137-native-writable-f64-buffer-store.md) içindedir. Dış stride
+lowering ve genel container alias/escape materialization açık iştir.
 PEP 604 runtime nesnesi; `types.UnionType`,
 GenericAlias üyeleri, sıra-bağımsız equality/hash, `__args__/__origin__`,
 `isinstance`/`issubclass`, GC tracing ve metaclass operator önceliğiyle birlikte

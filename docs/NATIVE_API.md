@@ -130,6 +130,13 @@ descriptor'ı temizler. Double release ve başka local handle'ı owner gibi kull
 `fastmath.array([1.0, ...])` boxed sequence'i bir kez f64 buffer'a dönüştürür.
 `fastmath.sum(buffer)` daha sonra `&[f64]` üzerinde copy ve element unboxing olmadan
 çalışır. Stats `buffer_copies` ile `buffer_exports` sayaçlarını ayrı gösterir.
+
+Writable export, backing allocation'ın özelliğinden ayrı bir capability olarak
+verilir. Read-only istek writable bir buffer için bile descriptor'da writable
+flag üretmez. Her açık writable owner runtime'da sayılır; release olası external
+mutation nedeniyle buffer epoch'unu konservatif artırır. Böyle bir owner açıkken
+annotation-JIT buffer girişini reddeder. Bu kural escaped pointer ile native
+load/store arasında gizli alias varsayımı kurulmasını önler.
 Metadata pointer'ı yalnız aktif ödünç boyunca kullanılabilir; bu borrow bırakılmadan
 callback/reentry veya başka bir safepoint işlemi yapılmamalıdır.
 

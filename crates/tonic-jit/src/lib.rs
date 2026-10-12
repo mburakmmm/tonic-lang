@@ -91,6 +91,9 @@ pub struct F64BufferView {
     pub len: usize,
     pub rank: u32,
     pub shape: usize,
+    pub mutation_version: usize,
+    pub writable: bool,
+    pub active_writable_exports: bool,
 }
 impl RuntimeFailure {
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
@@ -210,14 +213,19 @@ pub trait Runtime {
         ))
     }
 
-    /// Resolve an exact, C-contiguous rank-1 f64 buffer. `None` is a guard miss
-    /// and deoptimizes to the generic ITEM operation.
+    /// Resolve an exact C-contiguous rank-N f64 buffer. `None` is a guard miss
+    /// and deoptimizes to the generic item operation.
     ///
     /// # Safety
     ///
     /// A returned non-null `data` pointer must address `len` initialized f64
-    /// elements and remain valid while the guest value is rooted and the
-    /// current compiled invocation is executing.
+    /// elements. `shape` must address `rank` initialized `usize` dimensions.
+    /// For a writable view, `mutation_version` must address an initialized,
+    /// uniquely runtime-owned `u64` epoch and the data pointer must permit
+    /// writes. These pointers must remain valid while the guest value is rooted
+    /// and the current compiled invocation is executing. The implementation
+    /// must report an active writable foreign alias so generated code can fail
+    /// closed before touching the storage.
     unsafe fn f64_buffer(
         &mut self,
         _value: u64,
@@ -310,6 +318,8 @@ pub struct Metadata {
     pub f64_buffer_rank2_item_sites: usize,
     /// Rank-N tuple ITEM sites lowered to guarded row-major f64 loads.
     pub f64_buffer_nd_item_sites: usize,
+    /// SET_ITEM sites lowered to guarded native f64 stores.
+    pub f64_buffer_store_sites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,11 +343,13 @@ pub enum ScalarType {
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
-    /// Exact native read-only C-contiguous rank-N f64 buffer. The logical handle
-    /// stays in the precise root array; a runtime helper supplies ephemeral
-    /// data/length/shape metadata for direct indexed loads.
+    /// Exact native C-contiguous rank-N f64 buffer with an exact mutability
+    /// contract. The logical handle stays in the precise root array; a runtime
+    /// helper supplies ephemeral data/length/shape/mutation metadata for direct
+    /// indexed loads and guarded writable stores.
     F64Buffer {
         rank: u32,
+        writable: bool,
     },
 }
 
@@ -444,7 +456,8 @@ struct FloatAnalysis {
     before: Vec<Option<Vec<bool>>>,
     slots: Vec<bool>,
     deopt_maps: Vec<DeoptMap>,
-    buffer_source: Vec<Option<u16>>,
+    buffer_load_source: Vec<Option<u16>>,
+    buffer_store_source: Vec<Option<u16>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -467,6 +480,7 @@ struct BufferTupleItem {
     tuple_pc: usize,
     item_pc: usize,
     indices: Vec<u16>,
+    store: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -479,7 +493,7 @@ enum ScalarFact {
     IntOrNone,
     BoolOrNone,
     IntOrBool,
-    F64Buffer { rank: u32 },
+    F64Buffer { rank: u32, writable: bool },
 }
 
 impl ScalarFact {
@@ -493,7 +507,7 @@ impl ScalarFact {
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
             ScalarType::IntOrBool => Self::IntOrBool,
-            ScalarType::F64Buffer { rank } => Self::F64Buffer { rank },
+            ScalarType::F64Buffer { rank, writable } => Self::F64Buffer { rank, writable },
         }
     }
 
@@ -847,9 +861,16 @@ extern "C" fn runtime_helper<R: Runtime>(
             // and documents the backing-storage stability invariant.
             return match unsafe { state.runtime.f64_buffer(left, roots) } {
                 Ok(view) => {
-                    let view = view.filter(|view| u64::from(view.rank) == right);
+                    let expected_rank = right >> 1;
+                    let expected_writable = right & 1 != 0;
+                    let view = view.filter(|view| {
+                        u64::from(view.rank) == expected_rank
+                            && view.writable == expected_writable
+                            && !view.active_writable_exports
+                            && (!expected_writable || view.mutation_version != 0)
+                    });
                     // SAFETY: generated F64Buffer calls pass a writable
-                    // four-word stack slot. These words are native metadata,
+                    // five-word stack slot. These words are native metadata,
                     // never entries in the precise managed-root array.
                     unsafe {
                         output.write(view.map_or(0, |view| view.data as u64));
@@ -858,6 +879,9 @@ extern "C" fn runtime_helper<R: Runtime>(
                             .add(2)
                             .write(view.map_or(0, |view| view.shape as u64));
                         output.add(3).write(view.map_or(0, |view| view.rank as u64));
+                        output
+                            .add(4)
+                            .write(view.map_or(0, |view| view.mutation_version as u64));
                     }
                     0
                 }
@@ -1199,7 +1223,9 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 .iter()
                 .enumerate()
                 .filter_map(|(register, kind)| match kind {
-                    ScalarType::F64Buffer { rank } => Some((register as u16, *rank)),
+                    ScalarType::F64Buffer { rank, writable } => {
+                        Some((register as u16, *rank, *writable))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1210,7 +1236,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
     validate_materialized_constants(code, materialized_constants)?;
     let exact_f64_buffer_registers = exact_f64_buffer_parameters
         .iter()
-        .map(|(register, _)| *register)
+        .map(|(register, _, _)| *register)
         .collect::<Vec<_>>();
     let float_analysis =
         analyze_float_execution(code, exact_float_parameters, &exact_f64_buffer_registers)?;
@@ -1230,6 +1256,10 @@ pub fn compile_with_execution_profile_types_and_call_results(
         materialized_constants,
         call_results,
         &buffer_tuple_items,
+        float_analysis
+            .as_ref()
+            .map_or(&[][..], |analysis| &analysis.buffer_store_source),
+        typed_signature,
     )?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
@@ -1269,7 +1299,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
     let resumable = code.instructions.iter().any(|instruction| {
         matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::Call | Op::Attr | Op::BeginArgs | Op::CallExpanded | Op::Item)
+            Ok(Op::Call | Op::Attr | Op::BeginArgs | Op::CallExpanded | Op::Item | Op::SetItem)
         )
     }) || backedges > 0;
     let started = std::time::Instant::now();
@@ -1334,13 +1364,14 @@ pub fn compile_with_execution_profile_types_and_call_results(
         });
         let buffer_slots = exact_f64_buffer_parameters
             .iter()
-            .map(|(register, rank)| {
+            .map(|(register, rank, writable)| {
                 (
                     *register,
                     *rank,
+                    *writable,
                     builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        32,
+                        40,
                         3,
                     )),
                 )
@@ -2031,157 +2062,39 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 Op::Item => {
                     let source = float_analysis
                         .as_ref()
-                        .and_then(|analysis| analysis.buffer_source[pc]);
+                        .and_then(|analysis| analysis.buffer_load_source[pc]);
                     let Some(source) = source else {
                         side_exit(&mut builder, registers, pc);
                         continue;
                     };
                     let slot = buffer_slots
                         .iter()
-                        .find_map(|(register, _, slot)| (*register == source).then_some(*slot))
+                        .find_map(|(register, _, _, slot)| (*register == source).then_some(*slot))
                         .expect("analyzed buffer source has an entry descriptor");
-                    if let Some(site) = buffer_tuple_items.iter().find(|site| site.item_pc == pc) {
-                        let scalar_state = typed_scalar_state
-                            .expect("rank-N buffer item requires typed scalar state");
-                        let shape = builder.ins().stack_load(pointer_type, slot, 16);
-                        let mut current_registers = registers;
-                        let mut flat_index = None;
-                        for (axis, register) in site.indices.iter().copied().enumerate() {
-                            let axis_offset = i32::try_from(
-                                axis.checked_mul(mem::size_of::<usize>())
-                                    .expect("verified tuple rank offset"),
-                            )
-                            .expect("verified tuple rank fits Cranelift displacement");
-                            let dimension = builder.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                shape,
-                                axis_offset,
-                            );
-                            let bounds_elided = buffer_bounds_proofs.iter().any(|proof| {
-                                proof.item_pc == pc
-                                    && proof.dimension == BufferDimension::Axis(axis as u32)
-                            });
-                            let raw = load(&mut builder, current_registers, register);
-                            let (guarded_registers, index) = emit_checked_buffer_index(
-                                &mut builder,
-                                current_registers,
-                                raw,
-                                scalar_state[register as usize],
-                                dimension,
-                                start_pc,
-                                site.tuple_pc,
-                                bounds_elided,
-                                pointer_type,
-                            );
-                            current_registers = guarded_registers;
-                            flat_index = Some(match flat_index {
-                                None => index,
-                                Some(prefix) => {
-                                    let scaled = builder.ins().imul(prefix, dimension);
-                                    builder.ins().iadd(scaled, index)
-                                }
-                            });
-                        }
-                        let index = flat_index.expect("rank-N tuple has at least two axes");
-                        let data = builder.ins().stack_load(pointer_type, slot, 0);
-                        let byte_offset = builder.ins().imul_imm(index, 8);
-                        let address = builder.ins().iadd(data, byte_offset);
-                        let value = builder
-                            .ins()
-                            .load(types::F64, MemFlags::trusted(), address, 0);
-                        builder.ins().stack_store(
-                            value,
-                            float_slots[instruction.a as usize]
-                                .expect("analyzed rank-N buffer item float slot"),
-                            0,
-                        );
-                        fallthrough(&mut builder, &blocks, pc, current_registers);
-                        continue;
-                    }
-                    let raw = load(&mut builder, registers, instruction.c);
-                    let typed_index = typed_scalar_state
-                        .map(|state| state[instruction.c as usize])
-                        .filter(|fact| fact.is_integer_like());
-                    let registers = if typed_index.is_some() {
-                        registers
-                    } else {
-                        let integer = exact_int(&mut builder, raw);
-                        guard(&mut builder, integer, registers, pc, pointer_type)
-                    };
-                    let index = if let Some(fact) = typed_index {
-                        decode_known_integer(&mut builder, raw, fact)
-                    } else {
-                        decode_int(&mut builder, raw)
-                    };
-                    let bounds_elided =
-                        buffer_bounds_proofs.iter().any(|proof| proof.item_pc == pc);
-                    let (registers, index) = if bounds_elided {
-                        let direct = builder.create_block();
-                        builder.append_block_param(direct, pointer_type);
-                        builder.append_block_param(direct, types::I64);
-                        let checked = builder.create_block();
-                        builder.append_block_param(checked, pointer_type);
-                        builder.append_block_param(checked, types::I64);
-                        let normal_entry = builder.ins().icmp_imm(IntCC::Equal, start_pc, 0);
-                        builder.ins().brif(
-                            normal_entry,
-                            direct,
-                            &[registers, index],
-                            checked,
-                            &[registers, index],
-                        );
-
-                        builder.switch_to_block(checked);
-                        let checked_registers = builder.block_params(checked)[0];
-                        let checked_index = builder.block_params(checked)[1];
-                        let len = builder.ins().stack_load(types::I64, slot, 8);
-                        let negative =
-                            builder
-                                .ins()
-                                .icmp_imm(IntCC::SignedLessThan, checked_index, 0);
-                        let from_end = builder.ins().iadd(checked_index, len);
-                        let checked_index = builder.ins().select(negative, from_end, checked_index);
-                        let nonnegative = builder.ins().icmp_imm(
-                            IntCC::SignedGreaterThanOrEqual,
-                            checked_index,
-                            0,
-                        );
-                        let below_len =
-                            builder
-                                .ins()
-                                .icmp(IntCC::UnsignedLessThan, checked_index, len);
-                        let in_bounds = builder.ins().band(nonnegative, below_len);
-                        let checked_registers =
-                            guard(&mut builder, in_bounds, checked_registers, pc, pointer_type);
-                        builder
-                            .ins()
-                            .jump(direct, &[checked_registers, checked_index]);
-
-                        builder.switch_to_block(direct);
-                        (
-                            builder.block_params(direct)[0],
-                            builder.block_params(direct)[1],
-                        )
-                    } else {
-                        let len = builder.ins().stack_load(types::I64, slot, 8);
-                        let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
-                        let from_end = builder.ins().iadd(index, len);
-                        let index = builder.ins().select(negative, from_end, index);
-                        let nonnegative =
-                            builder
-                                .ins()
-                                .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
-                        let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
-                        let in_bounds = builder.ins().band(nonnegative, below_len);
-                        (
-                            guard(&mut builder, in_bounds, registers, pc, pointer_type),
-                            index,
-                        )
-                    };
-                    let data = builder.ins().stack_load(pointer_type, slot, 0);
-                    let byte_offset = builder.ins().imul_imm(index, 8);
-                    let address = builder.ins().iadd(data, byte_offset);
+                    let deopt = float_state.map(|state| FloatDeoptContext {
+                        state,
+                        slots: &float_slots,
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                    });
+                    let tuple = buffer_tuple_items
+                        .iter()
+                        .find(|site| site.item_pc == pc && !site.store);
+                    let (registers, address) = emit_buffer_address(
+                        &mut builder,
+                        registers,
+                        start_pc,
+                        pc,
+                        instruction.c,
+                        slot,
+                        tuple,
+                        typed_scalar_state.map(Vec::as_slice),
+                        &buffer_bounds_proofs,
+                        pointer_type,
+                        deopt,
+                    );
                     let value = builder
                         .ins()
                         .load(types::F64, MemFlags::trusted(), address, 0);
@@ -2191,6 +2104,66 @@ pub fn compile_with_execution_profile_types_and_call_results(
                             .expect("analyzed buffer item float slot"),
                         0,
                     );
+                    fallthrough(&mut builder, &blocks, pc, registers);
+                }
+                Op::SetItem => {
+                    let source = float_analysis
+                        .as_ref()
+                        .and_then(|analysis| analysis.buffer_store_source[pc])
+                        .expect("validated native buffer store source");
+                    let slot = buffer_slots
+                        .iter()
+                        .find_map(|(register, _, _, slot)| (*register == source).then_some(*slot))
+                        .expect("analyzed buffer store has an entry descriptor");
+                    let deopt = float_state.map(|state| FloatDeoptContext {
+                        state,
+                        slots: &float_slots,
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                    });
+                    let tuple = buffer_tuple_items
+                        .iter()
+                        .find(|site| site.item_pc == pc && site.store);
+                    let (registers, address) = emit_buffer_address(
+                        &mut builder,
+                        registers,
+                        start_pc,
+                        pc,
+                        instruction.b,
+                        slot,
+                        tuple,
+                        typed_scalar_state.map(Vec::as_slice),
+                        &buffer_bounds_proofs,
+                        pointer_type,
+                        deopt,
+                    );
+                    let version_address = builder.ins().stack_load(pointer_type, slot, 32);
+                    let version =
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlags::trusted(), version_address, 0);
+                    let can_advance = builder.ins().icmp_imm(IntCC::NotEqual, version, -1);
+                    let registers = guard_with_float_deopt(
+                        &mut builder,
+                        can_advance,
+                        registers,
+                        pc,
+                        pointer_type,
+                        deopt,
+                    );
+                    let value = builder.ins().stack_load(
+                        types::F64,
+                        float_slots[instruction.c as usize]
+                            .expect("analyzed native buffer store float slot"),
+                        0,
+                    );
+                    builder.ins().store(MemFlags::trusted(), value, address, 0);
+                    let next_version = builder.ins().iadd_imm(version, 1);
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), next_version, version_address, 0);
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::Call | Op::CallExpanded => {
@@ -2445,14 +2418,17 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 + call_results.len(),
             f64_buffer_parameters: exact_f64_buffer_parameters.len(),
             f64_buffer_item_sites: float_analysis.as_ref().map_or(0, |analysis| {
-                analysis.buffer_source.iter().flatten().count()
+                analysis.buffer_load_source.iter().flatten().count()
             }),
             f64_buffer_bounds_elided_sites: buffer_bounds_proofs.len(),
             f64_buffer_rank2_item_sites: buffer_tuple_items
                 .iter()
-                .filter(|site| site.indices.len() == 2)
+                .filter(|site| !site.store && site.indices.len() == 2)
                 .count(),
-            f64_buffer_nd_item_sites: buffer_tuple_items.len(),
+            f64_buffer_nd_item_sites: buffer_tuple_items.iter().filter(|site| !site.store).count(),
+            f64_buffer_store_sites: float_analysis.as_ref().map_or(0, |analysis| {
+                analysis.buffer_store_source.iter().flatten().count()
+            }),
         },
     })
 }
@@ -3131,7 +3107,6 @@ fn analyze_float_execution(
     before[0] = Some(initial);
     let mut queue = VecDeque::from([0usize]);
     let mut float_ops = 0usize;
-    let mut float_return = false;
     while let Some(pc) = queue.pop_front() {
         let mut after = before[pc].clone().expect("queued state exists");
         let instruction = code.instructions[pc];
@@ -3202,9 +3177,19 @@ fn analyze_float_execution(
                 after[instruction.a as usize] = true;
                 float_ops += 1;
             }
-            Op::Return => {
-                float_return |= is_float(instruction.a);
+            Op::SetItem => {
+                if is_float(instruction.b)
+                    || !is_float(instruction.c)
+                    || buffer_before[pc]
+                        .as_ref()
+                        .and_then(|state| state[instruction.a as usize])
+                        .is_none()
+                {
+                    return Ok(None);
+                }
+                float_ops += 1;
             }
+            Op::Return => {}
             Op::Jump => {}
             Op::Call
             | Op::Attr
@@ -3247,7 +3232,7 @@ fn analyze_float_execution(
             }
         }
     }
-    if float_ops == 0 || !float_return {
+    if float_ops == 0 {
         return Ok(None);
     }
     let mut slots = vec![false; code.registers as usize];
@@ -3280,7 +3265,7 @@ fn analyze_float_execution(
         before,
         slots,
         deopt_maps,
-        buffer_source: buffer_before
+        buffer_load_source: buffer_before
             .iter()
             .enumerate()
             .map(|(pc, state)| {
@@ -3290,6 +3275,22 @@ fn analyze_float_execution(
                         state
                             .as_ref()?
                             .get(instruction.b as usize)
+                            .copied()
+                            .flatten()
+                    })
+                    .flatten()
+            })
+            .collect(),
+        buffer_store_source: buffer_before
+            .iter()
+            .enumerate()
+            .map(|(pc, state)| {
+                let instruction = code.instructions[pc];
+                (Op::try_from(instruction.opcode) == Ok(Op::SetItem))
+                    .then(|| {
+                        state
+                            .as_ref()?
+                            .get(instruction.a as usize)
                             .copied()
                             .flatten()
                     })
@@ -3325,6 +3326,7 @@ fn analyze_buffer_sources(
             | Op::JumpFalse
             | Op::JumpTrue
             | Op::Return
+            | Op::SetItem
             | Op::BeginArgs
             | Op::ArgPos
             | Op::ArgStar
@@ -3375,16 +3377,21 @@ fn analyze_buffer_bounds(
         return Vec::new();
     }
     let mut proofs = Vec::new();
-    for (item_pc, buffer_parameter) in floats.buffer_source.iter().copied().enumerate() {
-        let Some(buffer_parameter) = buffer_parameter else {
-            continue;
-        };
+    for item_pc in 0..code.instructions.len() {
+        let (buffer_parameter, key) =
+            if let Some(buffer_parameter) = floats.buffer_load_source[item_pc] {
+                (buffer_parameter, code.instructions[item_pc].c)
+            } else if let Some(buffer_parameter) = floats.buffer_store_source[item_pc] {
+                (buffer_parameter, code.instructions[item_pc].b)
+            } else {
+                continue;
+            };
         let indices = match signature.parameters.get(buffer_parameter as usize) {
-            Some(ScalarType::F64Buffer { rank: 1 }) => {
-                vec![(code.instructions[item_pc].c, BufferDimension::FlatLength)]
+            Some(ScalarType::F64Buffer { rank: 1, .. }) => {
+                vec![(key, BufferDimension::FlatLength)]
             }
-            Some(ScalarType::F64Buffer { rank }) if *rank >= 2 => {
-                buffer_index_tuple(code, item_pc, code.instructions[item_pc].c, *rank)
+            Some(ScalarType::F64Buffer { rank, .. }) if *rank >= 2 => {
+                buffer_index_tuple(code, item_pc, key, *rank)
                     .map(|(_, indices)| {
                         indices
                             .into_iter()
@@ -3586,26 +3593,29 @@ fn analyze_buffer_tuple_items(
     signature: &TypedSignature,
     floats: &FloatAnalysis,
 ) -> Vec<BufferTupleItem> {
-    floats
-        .buffer_source
-        .iter()
-        .copied()
-        .enumerate()
-        .filter_map(|(item_pc, source)| {
-            let source = source?;
-            let Some(ScalarType::F64Buffer { rank }) = signature.parameters.get(source as usize)
+    (0..code.instructions.len())
+        .filter_map(|item_pc| {
+            let (source, key, store) = if let Some(source) = floats.buffer_load_source[item_pc] {
+                (source, code.instructions[item_pc].c, false)
+            } else if let Some(source) = floats.buffer_store_source[item_pc] {
+                (source, code.instructions[item_pc].b, true)
+            } else {
+                return None;
+            };
+            let Some(ScalarType::F64Buffer { rank, writable }) =
+                signature.parameters.get(source as usize)
             else {
                 return None;
             };
-            if *rank < 2 {
+            if *rank < 2 || (store && !writable) {
                 return None;
             }
-            let item = code.instructions[item_pc];
-            let (tuple_pc, indices) = buffer_index_tuple(code, item_pc, item.c, *rank)?;
+            let (tuple_pc, indices) = buffer_index_tuple(code, item_pc, key, *rank)?;
             Some(BufferTupleItem {
                 tuple_pc,
                 item_pc,
                 indices,
+                store,
             })
         })
         .collect()
@@ -3762,6 +3772,7 @@ fn instruction_writes_a(instruction: tonic_core::bytecode::Instr) -> bool {
             | Op::JumpFalse
             | Op::JumpTrue
             | Op::Return
+            | Op::SetItem
             | Op::BeginArgs
             | Op::ArgPos
             | Op::ArgStar
@@ -3872,8 +3883,8 @@ fn analyze_typed_scalar_execution(
             }
             Op::Item => {
                 let native = match fact(instruction.b) {
-                    ScalarFact::F64Buffer { rank: 1 } => fact(instruction.c).is_integer_like(),
-                    ScalarFact::F64Buffer { rank } if rank >= 2 => {
+                    ScalarFact::F64Buffer { rank: 1, .. } => fact(instruction.c).is_integer_like(),
+                    ScalarFact::F64Buffer { rank, .. } if rank >= 2 => {
                         buffer_index_tuple(code, pc, instruction.c, rank).is_some_and(
                             |(_, indices)| {
                                 indices
@@ -3890,6 +3901,7 @@ fn analyze_typed_scalar_execution(
                     ScalarFact::Unknown
                 };
             }
+            Op::SetItem => {}
             Op::Call => {
                 after[instruction.a as usize] = call_results
                     .iter()
@@ -4056,6 +4068,8 @@ fn validate_supported(
     materialized_constants: &[MaterializedConstant],
     call_results: &[GuardedCallResult],
     buffer_tuple_items: &[BufferTupleItem],
+    buffer_store_source: &[Option<u16>],
+    typed_signature: Option<&TypedSignature>,
 ) -> Result<(), Error> {
     if code.class_body
         || code.generator
@@ -4116,6 +4130,7 @@ fn validate_supported(
                 | Op::CallExpanded
                 | Op::Tuple
                 | Op::Item
+                | Op::SetItem
                 | Op::Return
         ) {
             return Err(unsupported(
@@ -4123,6 +4138,23 @@ fn validate_supported(
                 Some(op),
                 "opcode needs the generic runtime",
             ));
+        }
+        if op == Op::SetItem {
+            let source = buffer_store_source.get(pc).copied().flatten();
+            let writable = source.is_some_and(|source| {
+                typed_signature
+                    .and_then(|signature| signature.parameters.get(source as usize))
+                    .is_some_and(|kind| {
+                        matches!(kind, ScalarType::F64Buffer { writable: true, .. })
+                    })
+            });
+            if !writable {
+                return Err(unsupported(
+                    pc,
+                    Some(op),
+                    "item assignment needs an exact writable f64 buffer and float value",
+                ));
+            }
         }
         if op == Op::Const
             && encode_constant(&code.constants[instruction.b as usize]).is_none()
@@ -4290,6 +4322,49 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         }
     }
 }
+
+#[derive(Clone, Copy)]
+struct FloatDeoptContext<'a> {
+    state: &'a [bool],
+    slots: &'a [Option<StackSlot>],
+    runtime_signature: cranelift_codegen::ir::SigRef,
+    runtime_helper: Value,
+    runtime_context: Value,
+    root_count: usize,
+}
+
+fn guard_with_float_deopt(
+    builder: &mut FunctionBuilder<'_>,
+    condition: Value,
+    registers: Value,
+    pc: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+    deopt: Option<FloatDeoptContext<'_>>,
+) -> Value {
+    let Some(deopt) = deopt.filter(|deopt| deopt.state.iter().any(|float| *float)) else {
+        return guard(builder, condition, registers, pc, pointer_type);
+    };
+    let pass = builder.create_block();
+    builder.append_block_param(pass, pointer_type);
+    let fail = builder.create_block();
+    builder.ins().brif(condition, pass, &[registers], fail, &[]);
+    builder.switch_to_block(fail);
+    emit_float_deopt(
+        builder,
+        registers,
+        pc,
+        deopt.state,
+        deopt.slots,
+        deopt.runtime_signature,
+        deopt.runtime_helper,
+        deopt.runtime_context,
+        deopt.root_count,
+        pointer_type,
+    );
+    builder.switch_to_block(pass);
+    builder.block_params(pass)[0]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_checked_buffer_index(
     builder: &mut FunctionBuilder<'_>,
@@ -4301,12 +4376,13 @@ fn emit_checked_buffer_index(
     deopt_pc: usize,
     bounds_elided: bool,
     pointer_type: cranelift_codegen::ir::Type,
+    deopt: Option<FloatDeoptContext<'_>>,
 ) -> (Value, Value) {
     let registers = if fact.is_integer_like() {
         registers
     } else {
         let integer = exact_int(builder, raw);
-        guard(builder, integer, registers, deopt_pc, pointer_type)
+        guard_with_float_deopt(builder, integer, registers, deopt_pc, pointer_type, deopt)
     };
     let index = if fact.is_integer_like() {
         decode_known_integer(builder, raw, fact)
@@ -4339,6 +4415,7 @@ fn emit_checked_buffer_index(
             dimension,
             deopt_pc,
             pointer_type,
+            deopt,
         );
         builder
             .ins()
@@ -4350,7 +4427,15 @@ fn emit_checked_buffer_index(
             builder.block_params(direct)[1],
         );
     }
-    emit_normalized_buffer_index(builder, registers, index, dimension, deopt_pc, pointer_type)
+    emit_normalized_buffer_index(
+        builder,
+        registers,
+        index,
+        dimension,
+        deopt_pc,
+        pointer_type,
+        deopt,
+    )
 }
 
 fn emit_normalized_buffer_index(
@@ -4360,6 +4445,7 @@ fn emit_normalized_buffer_index(
     dimension: Value,
     deopt_pc: usize,
     pointer_type: cranelift_codegen::ir::Type,
+    deopt: Option<FloatDeoptContext<'_>>,
 ) -> (Value, Value) {
     let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
     let from_end = builder.ins().iadd(index, dimension);
@@ -4372,9 +4458,91 @@ fn emit_normalized_buffer_index(
         .icmp(IntCC::UnsignedLessThan, index, dimension);
     let in_bounds = builder.ins().band(nonnegative, below_dimension);
     (
-        guard(builder, in_bounds, registers, deopt_pc, pointer_type),
+        guard_with_float_deopt(builder, in_bounds, registers, deopt_pc, pointer_type, deopt),
         index,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_buffer_address(
+    builder: &mut FunctionBuilder<'_>,
+    registers: Value,
+    start_pc: Value,
+    pc: usize,
+    key: u16,
+    slot: StackSlot,
+    tuple: Option<&BufferTupleItem>,
+    scalar_state: Option<&[ScalarFact]>,
+    bounds_proofs: &[BufferBoundsProof],
+    pointer_type: cranelift_codegen::ir::Type,
+    deopt: Option<FloatDeoptContext<'_>>,
+) -> (Value, Value) {
+    let (registers, index) = if let Some(site) = tuple {
+        let scalar_state = scalar_state.expect("rank-N buffer access requires typed scalar state");
+        let shape = builder.ins().stack_load(pointer_type, slot, 16);
+        let mut current_registers = registers;
+        let mut flat_index = None;
+        for (axis, register) in site.indices.iter().copied().enumerate() {
+            let axis_offset = i32::try_from(
+                axis.checked_mul(mem::size_of::<usize>())
+                    .expect("verified tuple rank offset"),
+            )
+            .expect("verified tuple rank fits Cranelift displacement");
+            let dimension = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), shape, axis_offset);
+            let bounds_elided = bounds_proofs.iter().any(|proof| {
+                proof.item_pc == pc && proof.dimension == BufferDimension::Axis(axis as u32)
+            });
+            let raw = load(builder, current_registers, register);
+            let (guarded_registers, index) = emit_checked_buffer_index(
+                builder,
+                current_registers,
+                raw,
+                scalar_state[register as usize],
+                dimension,
+                start_pc,
+                site.tuple_pc,
+                bounds_elided,
+                pointer_type,
+                deopt,
+            );
+            current_registers = guarded_registers;
+            flat_index = Some(match flat_index {
+                None => index,
+                Some(prefix) => {
+                    let scaled = builder.ins().imul(prefix, dimension);
+                    builder.ins().iadd(scaled, index)
+                }
+            });
+        }
+        (
+            current_registers,
+            flat_index.expect("rank-N tuple has at least two axes"),
+        )
+    } else {
+        let raw = load(builder, registers, key);
+        let fact = scalar_state
+            .map(|state| state[key as usize])
+            .filter(|fact| fact.is_integer_like())
+            .unwrap_or(ScalarFact::Unknown);
+        let len = builder.ins().stack_load(types::I64, slot, 8);
+        emit_checked_buffer_index(
+            builder,
+            registers,
+            raw,
+            fact,
+            len,
+            start_pc,
+            pc,
+            bounds_proofs.iter().any(|proof| proof.item_pc == pc),
+            pointer_type,
+            deopt,
+        )
+    };
+    let data = builder.ins().stack_load(pointer_type, slot, 0);
+    let byte_offset = builder.ins().imul_imm(index, 8);
+    (registers, builder.ins().iadd(data, byte_offset))
 }
 fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: ScalarFact) -> Value {
     match fact {
@@ -4764,7 +4932,7 @@ fn emit_buffer_entry_initialization(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
-    slots: &[(u16, u32, StackSlot)],
+    slots: &[(u16, u32, bool, StackSlot)],
     runtime_signature: cranelift_codegen::ir::SigRef,
     runtime_helper: Value,
     runtime_context: Value,
@@ -4775,10 +4943,11 @@ fn emit_buffer_entry_initialization(
     let operation = builder
         .ins()
         .iconst(types::I32, i64::from(RuntimeOp::F64Buffer as u32));
-    for (register, rank, slot) in slots {
+    for (register, rank, writable, slot) in slots {
         let owner = load(builder, registers, *register);
         let output = builder.ins().stack_addr(pointer_type, *slot, 0);
-        let expected_rank = builder.ins().iconst(types::I64, i64::from(*rank));
+        let descriptor = (u64::from(*rank) << 1) | u64::from(*writable);
+        let expected = builder.ins().iconst(types::I64, descriptor as i64);
         let call = builder.ins().call_indirect(
             runtime_signature,
             runtime_helper,
@@ -4788,7 +4957,7 @@ fn emit_buffer_entry_initialization(
                 count,
                 operation,
                 owner,
-                expected_rank,
+                expected,
                 output,
             ],
         );
@@ -4808,7 +4977,7 @@ fn emit_buffer_bounds_entry_guards(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
-    buffer_slots: &[(u16, u32, StackSlot)],
+    buffer_slots: &[(u16, u32, bool, StackSlot)],
     proofs: &[BufferBoundsProof],
     pointer_type: cranelift_codegen::ir::Type,
 ) -> Value {
@@ -4826,7 +4995,9 @@ fn emit_buffer_bounds_entry_guards(
         guarded.push(key);
         let slot = buffer_slots
             .iter()
-            .find_map(|(register, _, slot)| (*register == proof.buffer_parameter).then_some(*slot))
+            .find_map(|(register, _, _, slot)| {
+                (*register == proof.buffer_parameter).then_some(*slot)
+            })
             .expect("bounds proof buffer has an entry descriptor");
         let raw_bound = load(builder, registers, proof.bound_parameter);
         let exact = exact_int(builder, raw_bound);
@@ -6503,6 +6674,9 @@ mod tests {
             boxed: Vec<f64>,
             binary_calls: usize,
             shape: Vec<usize>,
+            mutation_version: Box<u64>,
+            writable: bool,
+            active_writable_exports: bool,
         }
         impl Runtime for BufferRuntime {
             fn binary(
@@ -6544,10 +6718,13 @@ mod tests {
                 _registers: &[u64],
             ) -> Result<Option<F64BufferView>, RuntimeFailure> {
                 Ok((value == 0x100).then_some(F64BufferView {
-                    data: self.values.as_ptr() as usize,
+                    data: self.values.as_mut_ptr() as usize,
                     len: self.values.len(),
                     rank: self.shape.len() as u32,
                     shape: self.shape.as_ptr() as usize,
+                    mutation_version: self.mutation_version.as_mut() as *mut u64 as usize,
+                    writable: self.writable,
+                    active_writable_exports: self.active_writable_exports,
                 }))
             }
 
@@ -6564,7 +6741,13 @@ mod tests {
         let program = function("def load(values,index):\n    return values[index]");
         let code = &program.program().code[1];
         let signature = TypedSignature {
-            parameters: vec![ScalarType::F64Buffer { rank: 1 }, ScalarType::Int],
+            parameters: vec![
+                ScalarType::F64Buffer {
+                    rank: 1,
+                    writable: false,
+                },
+                ScalarType::Int,
+            ],
             result: ScalarType::Float,
         };
         assert!(typed_return_is_proven(code, &signature).unwrap());
@@ -6584,6 +6767,9 @@ mod tests {
             boxed: Vec::new(),
             binary_calls: 0,
             shape: vec![3],
+            mutation_version: Box::new(0),
+            writable: false,
+            active_writable_exports: false,
         };
         let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
         registers[0] = 0x100;
@@ -6870,7 +7056,10 @@ mod tests {
         let rank2_code = &rank2_program.program().code[1];
         let rank2_signature = TypedSignature {
             parameters: vec![
-                ScalarType::F64Buffer { rank: 2 },
+                ScalarType::F64Buffer {
+                    rank: 2,
+                    writable: false,
+                },
                 ScalarType::Int,
                 ScalarType::Int,
             ],
@@ -7035,7 +7224,10 @@ mod tests {
             .collect::<Vec<_>>();
         let conditional_start_signature = TypedSignature {
             parameters: vec![
-                ScalarType::F64Buffer { rank: 2 },
+                ScalarType::F64Buffer {
+                    rank: 2,
+                    writable: false,
+                },
                 ScalarType::Int,
                 ScalarType::Int,
                 ScalarType::Bool,
@@ -7085,7 +7277,10 @@ mod tests {
         let rank3_code = &rank3_program.program().code[1];
         let rank3_signature = TypedSignature {
             parameters: vec![
-                ScalarType::F64Buffer { rank: 3 },
+                ScalarType::F64Buffer {
+                    rank: 3,
+                    writable: false,
+                },
                 ScalarType::Int,
                 ScalarType::Int,
                 ScalarType::Int,
@@ -7218,6 +7413,129 @@ mod tests {
         registers[3] = encode_i64(0);
         assert_eq!(
             rank3_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let store_program = function(
+            "def store(values,index):\n    value=1.25\n    values[index]=value\n    return value",
+        );
+        let store_code = &store_program.program().code[1];
+        let store_signature = TypedSignature {
+            parameters: vec![
+                ScalarType::F64Buffer {
+                    rank: 1,
+                    writable: true,
+                },
+                ScalarType::Int,
+            ],
+            result: ScalarType::Float,
+        };
+        let store_constants = store_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                (Op::try_from(instruction.opcode) == Ok(Op::Const)
+                    && matches!(
+                        store_code.constants[instruction.b as usize],
+                        Constant::Float(_)
+                    ))
+                .then_some(MaterializedConstant { pc, value: 0x300 })
+            })
+            .collect::<Vec<_>>();
+        let read_only_store_signature = TypedSignature {
+            parameters: vec![
+                ScalarType::F64Buffer {
+                    rank: 1,
+                    writable: false,
+                },
+                ScalarType::Int,
+            ],
+            result: ScalarType::Float,
+        };
+        assert!(matches!(
+            compile_with_execution_profile_and_types(
+                store_code,
+                &[],
+                &store_constants,
+                &[],
+                Some(&read_only_store_signature),
+            ),
+            Err(Error::Unsupported(Unsupported {
+                opcode: Some(Op::SetItem),
+                ..
+            }))
+        ));
+        assert!(typed_return_is_proven(store_code, &store_signature).unwrap());
+        let store_compiled = compile_with_execution_profile_and_types(
+            store_code,
+            &[],
+            &store_constants,
+            &[],
+            Some(&store_signature),
+        )
+        .unwrap();
+        assert_eq!(store_compiled.metadata().f64_buffer_parameters, 1);
+        assert_eq!(store_compiled.metadata().f64_buffer_item_sites, 0);
+        assert_eq!(store_compiled.metadata().f64_buffer_store_sites, 1);
+        let set_item_pc = store_code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::SetItem))
+            .unwrap();
+        let stored_value_register = store_code.instructions[set_item_pc].c;
+        runtime.values = vec![1.0, 2.0, 3.0];
+        runtime.shape = vec![3];
+        runtime.writable = true;
+        runtime.active_writable_exports = false;
+        *runtime.mutation_version = 0;
+        runtime.boxed.clear();
+        registers = vec![VALUE_UNBOUND; store_compiled.metadata().root_count];
+        registers[0] = 0x100;
+        registers[1] = encode_i64(-1);
+        assert!(matches!(
+            store_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Returned { value: 0x200, .. }
+        ));
+        assert_eq!(runtime.values, [1.0, 2.0, 1.25]);
+        assert_eq!(*runtime.mutation_version, 1);
+        assert_eq!(runtime.boxed, [1.25]);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(3);
+        runtime.boxed.clear();
+        assert_eq!(
+            store_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: set_item_pc }
+        );
+        assert_eq!(runtime.values, [1.0, 2.0, 1.25]);
+        assert_eq!(*runtime.mutation_version, 1);
+        assert!(!runtime.boxed.is_empty());
+        assert!(runtime.boxed.iter().all(|value| *value == 1.25));
+        assert_eq!(registers[stored_value_register as usize], 0x200);
+
+        runtime.active_writable_exports = true;
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        registers[1] = encode_i64(0);
+        assert_eq!(
+            store_compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        runtime.active_writable_exports = false;
+        runtime.writable = false;
+        assert_eq!(
+            store_compiled
                 .run_with_runtime(&mut registers, &mut runtime)
                 .unwrap(),
             Outcome::Deopt { pc: 0 }

@@ -16,6 +16,10 @@ fn make_rank_three_read_only(context: &mut Context<'_>, _: &[Handle]) -> Result<
     )
 }
 
+fn make_rank_two_writable(context: &mut Context<'_>, _: &[Handle]) -> Result<Handle> {
+    context.from_f64_buffer(&[0.0; 6], &[2, 3], true)
+}
+
 #[test]
 fn f64_backing_allocation_stays_stable_when_gc_moves_its_owner() {
     let mut vm = Vm::new().unwrap();
@@ -383,5 +387,55 @@ fn annotated_rank_three_buffer_and_nested_ranges_run_in_native_code() {
     assert_eq!(vm.stats.jit_f64_buffer_nd_item_sites, 2);
     assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 3);
     assert!(vm.stats.jit_deopts >= 2);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn annotated_writable_buffer_stores_and_range_proofs_run_in_native_code() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "import matrix\n",
+            "def store(values:fastmath.Buffer[float,2,True], row:int, column:int, value:float)->float:\n",
+            "    values[row,column]=value\n",
+            "    return values[row,column]\n",
+            "def fill(values:fastmath.Buffer[float,2,True], rows:int, columns:int)->float:\n",
+            "    row=0\n",
+            "    value=1.0\n",
+            "    while row<rows:\n",
+            "        column=0\n",
+            "        while column<columns:\n",
+            "            values[row,column]=value\n",
+            "            value=value+1.0\n",
+            "            column+=1\n",
+            "        row+=1\n",
+            "    return values[-1,-1]\n",
+            "values=matrix.make()\n",
+            "print(store(values,-1,-1,9.5),values[-1,-1])\n",
+            "print(fill(values,2,3),values[0,0],values[-1,-1])\n",
+            "try:\n",
+            "    store(values,2,0,7.0)\n",
+            "except IndexError:\n",
+            "    print('bounds')\n",
+        ),
+        "buffer-writable-native-store",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.register_native("matrix", "make", 0, make_rank_two_writable)
+        .unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"9.5 9.5\n6.0 1.0 6.0\nbounds\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_parameters, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_store_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_rank2_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_nd_item_sites, 2);
+    assert_eq!(vm.stats.jit_f64_buffer_bounds_elided_sites, 2);
+    assert!(vm.stats.jit_deopts >= 1);
     assert!(vm.stats.gc_collections > 0);
 }

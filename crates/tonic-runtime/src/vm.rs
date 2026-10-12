@@ -119,6 +119,7 @@ pub struct Stats {
     pub jit_f64_buffer_bounds_elided_sites: u64,
     pub jit_f64_buffer_rank2_item_sites: u64,
     pub jit_f64_buffer_nd_item_sites: u64,
+    pub jit_f64_buffer_store_sites: u64,
     pub quickened: u64,
     pub quickened_misses: u64,
     pub call_quickened: u64,
@@ -489,30 +490,42 @@ impl tonic_jit::Runtime for JitRuntime<'_> {
         self.stats.jit_helper_calls += 1;
         let object = self
             .heap
-            .get(Value::from_jit(value))
+            .get_mut(Value::from_jit(value))
             .map_err(runtime_failure)?;
         let Object::Buffer(buffer) = object else {
             return Ok(None);
         };
-        let view = buffer.view();
-        if view.is_writable() {
-            return Ok(None);
-        }
-        let mut expected_stride = std::mem::size_of::<f64>();
-        for (dimension, stride) in view.shape().iter().zip(view.strides()).rev() {
-            if isize::try_from(expected_stride).ok() != Some(*stride) {
-                return Ok(None);
+        let (len, rank, shape, writable) = {
+            let view = buffer.view();
+            let mut expected_stride = std::mem::size_of::<f64>();
+            for (dimension, stride) in view.shape().iter().zip(view.strides()).rev() {
+                if isize::try_from(expected_stride).ok() != Some(*stride) {
+                    return Ok(None);
+                }
+                let Some(next) = expected_stride.checked_mul(*dimension) else {
+                    return Ok(None);
+                };
+                expected_stride = next;
             }
-            let Some(next) = expected_stride.checked_mul(*dimension) else {
-                return Ok(None);
-            };
-            expected_stride = next;
-        }
+            (
+                view.as_slice().len(),
+                view.shape().len() as u32,
+                view.shape().as_ptr() as usize,
+                view.is_writable(),
+            )
+        };
+        let mutation_version = buffer.mutation_version_ptr() as usize;
+        let active_writable_exports =
+            buffer.has_active_writable_exports() || buffer.native_access_disabled();
+        let data = buffer.data_mut_ptr() as usize;
         Ok(Some(tonic_jit::F64BufferView {
-            data: view.as_slice().as_ptr() as usize,
-            len: view.as_slice().len(),
-            rank: view.shape().len() as u32,
-            shape: view.shape().as_ptr() as usize,
+            data,
+            len,
+            rank,
+            shape,
+            mutation_version,
+            writable,
+            active_writable_exports,
         }))
     }
 
@@ -9346,6 +9359,16 @@ impl Vm {
                 {
                     tonic_jit::ScalarType::F64Buffer {
                         rank: plan.rank.expect("guarded concrete buffer rank"),
+                        writable: false,
+                    }
+                }
+                AnnotationScalar::Buffer(plan)
+                    if plan.rank.is_some_and(|rank| rank > 0)
+                        && plan.mutability == BufferMutabilityPlan::Writable =>
+                {
+                    tonic_jit::ScalarType::F64Buffer {
+                        rank: plan.rank.expect("guarded concrete buffer rank"),
+                        writable: true,
                     }
                 }
                 AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
@@ -10082,6 +10105,16 @@ impl Vm {
                     {
                         tonic_jit::ScalarType::F64Buffer {
                             rank: plan.rank.expect("guarded concrete buffer rank"),
+                            writable: false,
+                        }
+                    }
+                    AnnotationScalar::Buffer(plan)
+                        if plan.rank.is_some_and(|rank| rank > 0)
+                            && plan.mutability == BufferMutabilityPlan::Writable =>
+                    {
+                        tonic_jit::ScalarType::F64Buffer {
+                            rank: plan.rank.expect("guarded concrete buffer rank"),
+                            writable: true,
                         }
                     }
                     AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
@@ -10164,6 +10197,7 @@ impl Vm {
                         metadata.f64_buffer_rank2_item_sites as u64;
                     self.stats.jit_f64_buffer_nd_item_sites +=
                         metadata.f64_buffer_nd_item_sites as u64;
+                    self.stats.jit_f64_buffer_store_sites += metadata.f64_buffer_store_sites as u64;
                     self.jit_rejections[code_id] = None;
                     self.jit_cache[code_id] = JitEntry::Compiled {
                         function: Box::new(compiled),
