@@ -129,7 +129,16 @@ bytecode program semantiğini değiştirmez: generic giriş korunur. Global nati
 code budget yine zorunludur. `jit_explicit_candidates`,
 `jit_explicit_compiled` ve `jit_explicit_rejections` sayaçları sonucu ayırır;
 karar [ADR 0140](adr/0140-explicit-first-call-jit-decorator.md) içindedir.
-Module policy ile import-time warmup sonraki iştir.
+Modül sonunda çağrılan `tonic.warmup()` o modülde o ana kadar tanımlanmış exact
+Tonic fonksiyonlarını deterministic symbol sırasıyla seçer;
+`tonic.warmup(f, g)` seçimi daraltır. Tam destekli annotation guard'ı bulunan
+fonksiyonlar import sırasında, gerçek argüman uydurmadan typed baseline'a
+derlenir. Dinamik fonksiyonlar identity-preserving explicit marker alıp ilk
+gerçek çağrıya ertelenir. Her warmup isteği varsayılan 16 MiB ve execution
+geneli 64 MiB native-code bütçesinin ikisine birden uyar. Unsupported/backend/
+budget reddi import semantiğini bozmaz; generic yol ve deterministic tanı
+korunur. Ayrı warmup sayaçları kararları görünür kılar. Karar
+[ADR 0141](adr/0141-module-import-jit-warmup.md) içindedir.
 
 Disk cache anahtarı source/bytecode hash, canonical `TypePlan`, dependency
 versions, Tonic/bytecode/Cranelift sürümü, target triple ve gerekli CPU

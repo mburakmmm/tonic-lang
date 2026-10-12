@@ -422,7 +422,7 @@ sonra alınır.
       - [x] Kullanıcıya açık deterministic rejection metadata'sı: function/code,
         kategori, bytecode PC/opcode ve sabit neden; public runtime accessor ve
         CLI `--stats` explain satırları.
-  - [ ] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
+  - [x] Annotation bulunan uygun fonksiyon için profil beklemeden first-call
     typed baseline compile; açık `@tonic.compile`/modül politikasıyla import-time
     warmup. Derleme hatası programı bozmaz ve generic tier'a kayıtlı nedenle döner.
     - [x] Tam `int`/`float` parametre ve dönüş planlı uygun leaf için first-call
@@ -438,7 +438,12 @@ sonra alınır.
       staticmethod/classmethod marker'ı, profitability/hotness beklemeden
       first-call denemesi, advisory fallback, global code-budget ve explicit
       candidate/compiled/rejection sayaçları.
-    - [ ] Modül warmup politikası ve import-time code-budget planlaması.
+    - [x] Modül-scope `tonic.warmup(*functions)` politikası: boş argümanda o
+      modülde tanımlı fonksiyonları deterministic sırada tarama, destekli typed
+      planı import sırasında derleme, dinamik planı explicit first-call'a
+      erteleme, 16 MiB istek/64 MiB execution bütçe sınırı ve ayrı
+      request/candidate/compiled/deferred/rejection sayaçları. Çoklu-modül
+      linker annotation/type-parameter symbol remapping'i de doğrulandı.
     - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code
       budget ve guard-instability için deterministic kayıt ve CLI açıklaması.
   - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için

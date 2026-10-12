@@ -74,7 +74,9 @@ The current implementation includes:
   branch refinement, guarded immediate-union call summaries, and exact-PC
   guarded recursive/SCC and non-inline method results with advisory fallback;
   `@tonic.compile` can explicitly request a first-call attempt while retaining
-  generic fallback and the global native-code budget;
+  generic fallback and the global native-code budget, while module-scope
+  `tonic.warmup()` compiles supported annotated functions during import and
+  defers dynamic functions to their first real call under a bounded budget;
 - a versioned opaque C ABI, persistent handles, callbacks, typed zero-copy buffers and foreign-object tracing;
 - an isolated CPython bridge with primitive/container conversion, `PyTonicProxy` protocol forwarding, and bounded cross-collector cycle tracing;
 - differential tests against Python and repeatable interpreter/JIT/interop benchmarks.

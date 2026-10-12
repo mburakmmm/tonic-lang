@@ -7,8 +7,8 @@ use crate::{
         Object, SuspendedGenerator, TracebackEntry, TypeParameterKind, TypingFormKind,
     },
     native::{
-        fastmath_add, fastmath_array, fastmath_sum, tonic_compile, Context, HandleTable,
-        NativeCallable, NativeDef, NativeFn, PersistentHandle,
+        fastmath_add, fastmath_array, fastmath_sum, tonic_compile, tonic_warmup, Context,
+        HandleTable, NativeCallable, NativeDef, NativeFn, PersistentHandle,
     },
     runtime_owner::RuntimeOwner,
     shapes::ShapeId,
@@ -113,6 +113,11 @@ pub struct Stats {
     pub jit_explicit_candidates: u64,
     pub jit_explicit_compiled: u64,
     pub jit_explicit_rejections: u64,
+    pub jit_warmup_requests: u64,
+    pub jit_warmup_candidates: u64,
+    pub jit_warmup_compiled: u64,
+    pub jit_warmup_deferred: u64,
+    pub jit_warmup_rejections: u64,
     pub jit_typed_int_guard_elisions: u64,
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
@@ -138,6 +143,7 @@ pub enum JitRejectionKind {
     Unprofitable,
     CodeBudget,
     UnsupportedBytecode,
+    CompileFailure,
     UnstableGuards,
 }
 
@@ -148,6 +154,7 @@ impl JitRejectionKind {
             Self::Unprofitable => "unprofitable",
             Self::CodeBudget => "code-budget",
             Self::UnsupportedBytecode => "unsupported-bytecode",
+            Self::CompileFailure => "compile-failure",
             Self::UnstableGuards => "unstable-guards",
         }
     }
@@ -742,6 +749,7 @@ const DEFAULT_JIT_THRESHOLD: u32 = 8;
 const DEFAULT_JIT_MIN_INSTRUCTIONS: usize = 7;
 const DEFAULT_JIT_OSR_THRESHOLD: u32 = 64;
 const DEFAULT_JIT_MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_JIT_WARMUP_MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
 const QUICKEN_THRESHOLD: u8 = 8;
 const MINORS_PER_MAJOR: u8 = 32;
 const GENERATOR_FINALIZERS_PER_SAFEPOINT: usize = 8;
@@ -1920,6 +1928,8 @@ pub struct Vm {
     pub jit_direct_call_inlining: bool,
     /// Maximum native code bytes accepted during one module execution.
     pub jit_max_code_bytes: usize,
+    /// Maximum native code bytes accepted by one module-level warmup request.
+    pub jit_warmup_max_code_bytes: usize,
     jit_code_budget_used: usize,
     jit_cache: Vec<JitEntry>,
     jit_rejections: Vec<Option<JitRejection>>,
@@ -2487,6 +2497,7 @@ impl Vm {
             jit_osr_threshold: DEFAULT_JIT_OSR_THRESHOLD,
             jit_direct_call_inlining: true,
             jit_max_code_bytes: DEFAULT_JIT_MAX_CODE_BYTES,
+            jit_warmup_max_code_bytes: DEFAULT_JIT_WARMUP_MAX_CODE_BYTES,
             jit_code_budget_used: 0,
             jit_cache: Vec::new(),
             jit_rejections: Vec::new(),
@@ -2539,6 +2550,7 @@ impl Vm {
         vm.register_native("fastmath", "array", 1, fastmath_array)?;
         vm.register_native("fastmath", "sum", 1, fastmath_sum)?;
         vm.register_native("tonic", "compile", 1, tonic_compile)?;
+        vm.register_varargs_native("tonic", "warmup", tonic_warmup)?;
         let object_new = vm.heap.alloc(Object::Builtin(Builtin::ObjectNew))?;
         let object_init = vm.heap.alloc(Object::Builtin(Builtin::ObjectInit))?;
         let object_hash = vm.heap.alloc(Object::Builtin(Builtin::ObjectHash))?;
@@ -3657,6 +3669,37 @@ impl Vm {
         let id = self.natives.len();
         self.natives.push(NativeDef {
             signature: crate::StatefulNativeSignature::Exact(arity),
+            function: NativeCallable::Rust(function),
+        });
+        let callable = self.heap.alloc(Object::Native(id))?;
+        self.heap.add_module_member(value, name, callable)?;
+        Ok(())
+    }
+    fn register_varargs_native(
+        &mut self,
+        module: &str,
+        name: &str,
+        function: NativeFn,
+    ) -> Result<()> {
+        self.ensure_running()?;
+        let value = if let Some(value) = self.modules.get(module) {
+            *value
+        } else {
+            let value = self.heap.alloc(Object::Module(Vec::new()))?;
+            self.modules.insert(module.into(), value);
+            value
+        };
+        if let Object::Module(members) = self.heap.get(value)? {
+            if members.iter().any(|(member, _)| member == name) {
+                return Err(Diagnostic::new(
+                    "ImportError",
+                    "native function already registered",
+                ));
+            }
+        }
+        let id = self.natives.len();
+        self.natives.push(NativeDef {
+            signature: crate::StatefulNativeSignature::VarArgs,
             function: NativeCallable::Rust(function),
         });
         let callable = self.heap.alloc(Object::Native(id))?;
@@ -9210,7 +9253,7 @@ impl Vm {
         &mut self,
         program: &'a Program,
         code_id: usize,
-        base: usize,
+        base: Option<usize>,
         caller: &AnnotationJitGuard,
     ) -> (
         Vec<tonic_jit::DirectCall<'a>>,
@@ -9271,7 +9314,7 @@ impl Vm {
                                 .copied()
                                 .filter(|kind| matches!(kind, AnnotationScalar::Class { .. }))
                                 .and_then(|kind| {
-                                    base.checked_add(register)
+                                    base.and_then(|base| base.checked_add(register))
                                         .and_then(|index| self.registers.get(index))
                                         .copied()
                                         .filter(|owner| {
@@ -9916,6 +9959,293 @@ impl Vm {
         self.stats.peak_registers = self.stats.peak_registers.max(end);
         Ok(())
     }
+    pub(crate) fn warmup_module_jit(
+        &mut self,
+        program: &Program,
+        requested: &[Value],
+    ) -> Result<()> {
+        self.stats.jit_warmup_requests += 1;
+        let caller_code = self
+            .frames
+            .last()
+            .map(|frame| frame.code)
+            .ok_or_else(|| Diagnostic::new("RuntimeError", "tonic.warmup has no caller"))?;
+        let module_id = program
+            .modules
+            .iter()
+            .position(|module| usize::from(module.code) == caller_code)
+            .ok_or_else(|| {
+                Diagnostic::new("TypeError", "tonic.warmup must be called at module scope")
+            })?;
+        let module = &program.modules[module_id];
+        let code_start = usize::from(module.code);
+        let code_end = code_start + usize::from(module.code_count);
+
+        let unwrap_function = |heap: &Heap, value: Value| match heap.get(value) {
+            Ok(Object::Function { .. }) => Some(value),
+            Ok(Object::StaticMethod(function) | Object::ClassMethod(function))
+                if matches!(heap.get(*function), Ok(Object::Function { .. })) =>
+            {
+                Some(*function)
+            }
+            _ => None,
+        };
+        let mut functions = Vec::new();
+        if requested.is_empty() {
+            for symbol in &module.globals {
+                let index = usize::from(symbol.0);
+                if self.global_owners.get(index).copied().flatten() != Some(module_id)
+                    || !self.global_defined.get(index).copied().unwrap_or(false)
+                {
+                    continue;
+                }
+                let value = self.globals[index];
+                let Some(function) = unwrap_function(&self.heap, value) else {
+                    continue;
+                };
+                let belongs_to_module = matches!(
+                    self.heap.get(function),
+                    Ok(Object::Function {
+                        code,
+                        execution,
+                        ..
+                    }) if *execution == self.execution
+                        && (code_start..code_end).contains(&usize::from(*code))
+                );
+                if belongs_to_module && !functions.contains(&function) {
+                    functions.push(function);
+                }
+            }
+        } else {
+            for value in requested {
+                let function = unwrap_function(&self.heap, *value).ok_or_else(|| {
+                    Diagnostic::new("TypeError", "tonic.warmup expects Tonic functions")
+                })?;
+                let belongs_to_module = matches!(
+                    self.heap.get(function),
+                    Ok(Object::Function {
+                        code,
+                        execution,
+                        ..
+                    }) if *execution == self.execution
+                        && (code_start..code_end).contains(&usize::from(*code))
+                );
+                if !belongs_to_module {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "tonic.warmup functions must belong to the calling module",
+                    ));
+                }
+                if !functions.contains(&function) {
+                    functions.push(function);
+                }
+            }
+        }
+
+        let warmup_budget_limit = self
+            .jit_code_budget_used
+            .saturating_add(self.jit_warmup_max_code_bytes)
+            .min(self.jit_max_code_bytes);
+        for function in functions {
+            let code_id = match self.heap.get_mut(function)? {
+                Object::Function {
+                    code,
+                    jit_compile_requested,
+                    ..
+                } => {
+                    *jit_compile_requested = true;
+                    usize::from(*code)
+                }
+                _ => unreachable!("warmup target was validated as a function"),
+            };
+            self.stats.jit_warmup_candidates += 1;
+            if self.execution_mode != ExecutionMode::Jit || self.limits.instructions.is_some() {
+                self.stats.jit_warmup_deferred += 1;
+                continue;
+            }
+            if !matches!(self.jit_cache[code_id], JitEntry::Untried) {
+                self.stats.jit_warmup_deferred += 1;
+                continue;
+            }
+            if program.code[code_id].generator || program.code[code_id].coroutine {
+                self.stats.jit_warmup_rejections += 1;
+                self.record_jit_rejection(
+                    program,
+                    code_id,
+                    JitRejectionKind::UnsupportedBytecode,
+                    None,
+                    None,
+                    "generators and coroutines are not warmup JIT candidates",
+                );
+                self.jit_cache[code_id] = JitEntry::Unsupported;
+                continue;
+            }
+            let Some(annotation) = self.annotation_jit_guard(program, function, code_id) else {
+                self.stats.jit_warmup_deferred += 1;
+                continue;
+            };
+            self.stats.jit_annotation_candidates += 1;
+            self.stats.jit_compile_attempts += 1;
+            if self.compile_warmup_jit(program, code_id, annotation, warmup_budget_limit) {
+                self.stats.jit_warmup_compiled += 1;
+            } else {
+                self.stats.jit_warmup_rejections += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_warmup_jit(
+        &mut self,
+        program: &Program,
+        code_id: usize,
+        mut annotation: AnnotationJitGuard,
+        budget_limit: usize,
+    ) -> bool {
+        let (direct_calls, dependencies, guarded_call_results) =
+            self.jit_annotation_direct_calls(program, code_id, None, &annotation);
+        annotation.callees = dependencies;
+        let exact_float_parameters = annotation
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(register, kind)| {
+                (*kind == AnnotationScalar::Float).then_some(register as u16)
+            })
+            .collect::<Vec<_>>();
+        let scalar = |kind| match kind {
+            AnnotationScalar::Dynamic | AnnotationScalar::Class { .. } => {
+                tonic_jit::ScalarType::Dynamic
+            }
+            AnnotationScalar::Buffer(plan)
+                if plan.rank.is_some_and(|rank| rank > 0)
+                    && plan.mutability == BufferMutabilityPlan::ReadOnly =>
+            {
+                tonic_jit::ScalarType::F64Buffer {
+                    rank: plan.rank.expect("guarded concrete buffer rank"),
+                    writable: false,
+                }
+            }
+            AnnotationScalar::Buffer(plan)
+                if plan.rank.is_some_and(|rank| rank > 0)
+                    && plan.mutability == BufferMutabilityPlan::Writable =>
+            {
+                tonic_jit::ScalarType::F64Buffer {
+                    rank: plan.rank.expect("guarded concrete buffer rank"),
+                    writable: true,
+                }
+            }
+            AnnotationScalar::Buffer(_) => tonic_jit::ScalarType::Dynamic,
+            AnnotationScalar::Int => tonic_jit::ScalarType::Int,
+            AnnotationScalar::Float => tonic_jit::ScalarType::Float,
+            AnnotationScalar::Bool => tonic_jit::ScalarType::Bool,
+            AnnotationScalar::None => tonic_jit::ScalarType::None,
+            AnnotationScalar::IntOrNone => tonic_jit::ScalarType::IntOrNone,
+            AnnotationScalar::BoolOrNone => tonic_jit::ScalarType::BoolOrNone,
+            AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
+        };
+        let typed_signature = tonic_jit::TypedSignature {
+            parameters: annotation.parameters.iter().copied().map(scalar).collect(),
+            result: scalar(annotation.result),
+        };
+        let materialized_constants = program.code[code_id]
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, instruction)| tonic_jit::MaterializedConstant {
+                pc,
+                value: self.constants[code_id][instruction.b as usize].raw(),
+            })
+            .collect::<Vec<_>>();
+        match tonic_jit::compile_with_execution_profile_types_and_call_results(
+            &program.code[code_id],
+            &direct_calls,
+            &materialized_constants,
+            &exact_float_parameters,
+            Some(&typed_signature),
+            &guarded_call_results,
+        ) {
+            Ok(compiled) => {
+                let metadata = compiled.metadata();
+                let Some(next_code_bytes) = self
+                    .jit_code_budget_used
+                    .checked_add(metadata.code_bytes)
+                    .filter(|total| *total <= budget_limit)
+                else {
+                    self.stats.jit_code_budget_rejections += 1;
+                    self.record_jit_rejection(
+                        program,
+                        code_id,
+                        JitRejectionKind::CodeBudget,
+                        None,
+                        None,
+                        format!(
+                            "warmup native code budget {} would exceed limit {budget_limit}",
+                            self.jit_code_budget_used
+                                .saturating_add(metadata.code_bytes)
+                        ),
+                    );
+                    self.jit_cache[code_id] = JitEntry::Unsupported;
+                    return false;
+                };
+                self.jit_code_budget_used = next_code_bytes;
+                self.stats.jit_compiled += 1;
+                self.stats.jit_annotation_compiled += 1;
+                self.stats.jit_compile_ns += metadata.compile_time.as_nanos();
+                self.stats.jit_code_bytes += metadata.code_bytes;
+                self.stats.jit_direct_call_sites += metadata.direct_call_sites as u64;
+                self.stats.jit_direct_method_sites += metadata.direct_method_sites as u64;
+                self.stats.jit_typed_int_guard_elisions += metadata.typed_int_guard_elisions as u64;
+                self.stats.jit_typed_bool_guard_elisions +=
+                    metadata.typed_bool_guard_elisions as u64;
+                self.stats.jit_typed_return_guards_elided +=
+                    u64::from(metadata.typed_return_proven);
+                self.stats.jit_typed_call_result_sites += metadata.typed_call_result_sites as u64;
+                self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
+                self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
+                self.stats.jit_f64_buffer_bounds_elided_sites +=
+                    metadata.f64_buffer_bounds_elided_sites as u64;
+                self.stats.jit_f64_buffer_rank2_item_sites +=
+                    metadata.f64_buffer_rank2_item_sites as u64;
+                self.stats.jit_f64_buffer_nd_item_sites += metadata.f64_buffer_nd_item_sites as u64;
+                self.stats.jit_f64_buffer_store_sites += metadata.f64_buffer_store_sites as u64;
+                self.jit_rejections[code_id] = None;
+                self.jit_cache[code_id] = JitEntry::Compiled {
+                    function: Box::new(compiled),
+                    deopts: 0,
+                    annotation: Some(annotation),
+                };
+                true
+            }
+            Err(tonic_jit::Error::Unsupported(unsupported)) => {
+                self.record_jit_rejection(
+                    program,
+                    code_id,
+                    JitRejectionKind::UnsupportedBytecode,
+                    Some(unsupported.pc),
+                    unsupported.opcode,
+                    unsupported.reason,
+                );
+                // Runtime arguments may unlock a guarded profile path. Keep the
+                // explicit marker and allow one ordinary first-call retry.
+                false
+            }
+            Err(error) => {
+                self.record_jit_rejection(
+                    program,
+                    code_id,
+                    JitRejectionKind::CompileFailure,
+                    None,
+                    None,
+                    error.to_string(),
+                );
+                self.jit_cache[code_id] = JitEntry::Unsupported;
+                false
+            }
+        }
+    }
+
     fn try_jit(&mut self, program: &Program, output: &mut dyn Write) -> Result<bool> {
         if self.execution_mode != ExecutionMode::Jit || self.limits.instructions.is_some() {
             return Ok(false);
@@ -10072,7 +10402,7 @@ impl Vm {
             let mut guarded_call_results = Vec::new();
             if let Some(annotation) = &mut annotation {
                 let (annotation_calls, dependencies, annotation_results) =
-                    self.jit_annotation_direct_calls(program, code_id, base, annotation);
+                    self.jit_annotation_direct_calls(program, code_id, Some(base), annotation);
                 direct_calls
                     .retain(|call| !annotation_results.iter().any(|result| result.pc == call.pc));
                 for call in annotation_calls {
@@ -10238,7 +10568,20 @@ impl Vm {
                     self.jit_cache[code_id] = JitEntry::Unsupported;
                     return Ok(false);
                 }
-                Err(error) => return Err(Diagnostic::new("JitError", error.to_string())),
+                Err(error) => {
+                    self.stats.jit_fallbacks += 1;
+                    self.stats.jit_explicit_rejections += u64::from(explicit_compile);
+                    self.record_jit_rejection(
+                        program,
+                        code_id,
+                        JitRejectionKind::CompileFailure,
+                        None,
+                        None,
+                        error.to_string(),
+                    );
+                    self.jit_cache[code_id] = JitEntry::Unsupported;
+                    return Ok(false);
+                }
             }
         }
         let end = base + register_count;

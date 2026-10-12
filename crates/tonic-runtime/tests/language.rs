@@ -3159,6 +3159,148 @@ fn tonic_compile_supports_both_static_and_class_method_decorator_orders() {
 }
 
 #[test]
+fn tonic_warmup_compiles_annotated_module_functions_before_their_first_call() {
+    let source = concat!(
+        "import tonic\n",
+        "def add(left:int,right:int)->int:\n",
+        "    return left+right\n",
+        "tonic.warmup()\n",
+        "print(add(20,22))\n",
+    );
+    let program = compile(source, "module-warmup").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = u32::MAX;
+    vm.jit_min_instructions = usize::MAX;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\n");
+    assert_eq!(vm.stats.jit_warmup_requests, 1);
+    assert_eq!(vm.stats.jit_warmup_candidates, 1);
+    assert_eq!(vm.stats.jit_warmup_compiled, 1, "{:?}", vm.stats);
+    assert_eq!(vm.stats.jit_warmup_deferred, 0);
+    assert_eq!(vm.stats.jit_warmup_rejections, 0);
+    assert_eq!(vm.stats.jit_compile_attempts, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_explicit_candidates, 0);
+    assert_eq!(vm.stats.jit_calls, 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
+fn tonic_warmup_runs_during_source_module_import() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import worker\nprint(worker.double(21))",
+            ),
+            ModuleSource::new(
+                "worker",
+                "worker.tonic",
+                "import tonic\ndef double(value:int)->int:\n    return value+value\ntonic.warmup()",
+            ),
+        ],
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = u32::MAX;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\n");
+    assert_eq!(vm.stats.jit_warmup_requests, 1);
+    assert_eq!(vm.stats.jit_warmup_candidates, 1);
+    assert_eq!(vm.stats.jit_warmup_compiled, 1, "{:?}", vm.stats);
+    assert_eq!(vm.stats.jit_calls, 1);
+}
+
+#[test]
+fn tonic_warmup_defers_dynamic_functions_to_explicit_first_call() {
+    let source = concat!(
+        "import tonic\n",
+        "def add(left,right):\n",
+        "    return left+right\n",
+        "tonic.warmup(add)\n",
+        "print(add(20,22))\n",
+    );
+    let program = compile(source, "module-warmup-deferred").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_threshold = u32::MAX;
+    vm.jit_min_instructions = usize::MAX;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\n");
+    assert_eq!(vm.stats.jit_warmup_candidates, 1);
+    assert_eq!(vm.stats.jit_warmup_compiled, 0);
+    assert_eq!(vm.stats.jit_warmup_deferred, 1);
+    assert_eq!(vm.stats.jit_explicit_candidates, 1);
+    assert_eq!(vm.stats.jit_explicit_compiled, 1);
+}
+
+#[test]
+fn tonic_warmup_budget_rejection_preserves_import_and_interpreter_fallback() {
+    let source = concat!(
+        "import tonic\n",
+        "def add(left:int,right:int)->int:\n",
+        "    return left+right\n",
+        "tonic.warmup()\n",
+        "print(add(20,22))\n",
+    );
+    let program = compile(source, "module-warmup-budget").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.jit_warmup_max_code_bytes = 0;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\n");
+    assert_eq!(vm.stats.jit_warmup_candidates, 1);
+    assert_eq!(vm.stats.jit_warmup_compiled, 0);
+    assert_eq!(vm.stats.jit_warmup_rejections, 1);
+    assert_eq!(vm.stats.jit_code_budget_rejections, 1);
+    assert_eq!(vm.stats.jit_calls, 0);
+    let rejection = vm.jit_rejections().next().expect("warmup rejection");
+    assert_eq!(rejection.function, "add");
+    assert_eq!(rejection.kind, JitRejectionKind::CodeBudget);
+
+    assert_eq!(
+        error("import tonic\ndef f():\n    tonic.warmup()\nf()").kind,
+        "TypeError"
+    );
+    assert_eq!(error("import tonic\ntonic.warmup(1)").kind, "TypeError");
+}
+
+#[test]
+fn tonic_warmup_unsupported_bytecode_retries_once_with_real_arguments() {
+    let source = concat!(
+        "import tonic\n",
+        "def build(value:int)->int:\n",
+        "    return [value]\n",
+        "tonic.warmup()\n",
+        "print(build(7))\n",
+    );
+    let program = compile(source, "module-warmup-unsupported").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"[7]\n");
+    assert_eq!(vm.stats.jit_warmup_candidates, 1);
+    assert_eq!(vm.stats.jit_warmup_compiled, 0);
+    assert_eq!(vm.stats.jit_warmup_rejections, 1);
+    assert_eq!(vm.stats.jit_explicit_candidates, 1);
+    assert_eq!(vm.stats.jit_explicit_rejections, 1);
+    assert_eq!(vm.stats.jit_compile_attempts, 2);
+    let rejection = vm.jit_rejections().next().expect("warmup rejection");
+    assert_eq!(rejection.function, "build");
+    assert_eq!(rejection.kind, JitRejectionKind::UnsupportedBytecode);
+}
+
+#[test]
 fn annotation_jit_compiles_exact_bool_and_keeps_annotations_advisory() {
     let source = concat!(
         "def choose(flag:bool,value:int)->int:\n",

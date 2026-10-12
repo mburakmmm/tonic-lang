@@ -205,6 +205,10 @@ fn link(programs: &[VerifiedProgram]) -> Result<VerifiedProgram> {
                 .free_vars
                 .iter_mut()
                 .for_each(|symbol| remap(symbol, map));
+            linked
+                .type_params
+                .iter_mut()
+                .for_each(|(symbol, _)| remap(symbol, map));
             for call in &mut linked.calls {
                 call.keywords
                     .iter_mut()
@@ -212,6 +216,9 @@ fn link(programs: &[VerifiedProgram]) -> Result<VerifiedProgram> {
             }
             for site in &mut linked.functions {
                 site.code = site.code.checked_add(offset).ok_or_else(module_limit)?;
+                site.annotations
+                    .iter_mut()
+                    .for_each(|(symbol, _)| remap(symbol, map));
             }
             for instruction in &mut linked.instructions {
                 let op = Op::try_from(instruction.opcode)?;

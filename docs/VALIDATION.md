@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 152, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 456 test.
+native handles 5, language/runtime 157, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 461 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -66,6 +66,17 @@ düşer ve normal `[7]` sonucunu üretir; fonksiyon olmayan decorator girdisi
 Descriptor-order testi `@tonic.compile` işaretini hem `staticmethod` wrapper'ının
 dışında hem `classmethod` üretiminden önce uygular; iki durumda da descriptor
 binding ve sonuç korunurken underlying function first-call JIT'e girer.
+
+Modül warmup testleri `tonic.warmup()` ile destekli annotated leaf'in ilk gerçek
+çağrıdan önce derlendiğini, source-module import frame'inde aynı politikanın
+çalıştığını ve annotation'sız fonksiyonun explicit first-call'a ertelendiğini
+doğrular. Sıfır warmup budget vakası importu ve normal sonucu korurken
+`CodeBudget` tanısı üretir; fonksiyon dışı girdi ve function-scope çağrı
+`TypeError` olur. Unsupported annotated gövde import sırasında kayıtlı
+reddedilir, gerçek argümanlarla yalnız bir first-call denemesi daha yapar ve
+normal interpreter sonucunu korur. Compiler regresyonu birleşik modül grafiğinde function
+annotation ve PEP 695 type-parameter sembollerinin doğru global symbol kimliğine
+remap edildiğini denetler.
 
 Typed integer overlay testi verified loop bytecode'unda parametre/sabit/local,
 branch merge ve loop fixed-point sonucunun redundant tag guard'larını gerçekten

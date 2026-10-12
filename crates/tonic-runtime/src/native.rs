@@ -555,6 +555,20 @@ impl<'a> Context<'a> {
         *jit_compile_requested = true;
         self.local(value)
     }
+    pub(crate) fn warmup_jit(&mut self, handles: &[Handle]) -> Result<Handle> {
+        let functions = handles
+            .iter()
+            .map(|handle| self.resolve(*handle))
+            .collect::<Result<Vec<_>>>()?;
+        let program = self.program.ok_or_else(|| {
+            Diagnostic::new(
+                "RuntimeError",
+                "tonic.warmup requires an active Tonic module",
+            )
+        })?;
+        self.vm.warmup_module_jit(program, &functions)?;
+        self.none()
+    }
     fn call_values(&mut self, callable: Value, arguments: &[Value]) -> Result<Value> {
         let program = self.program.ok_or_else(|| {
             Diagnostic::new(
@@ -1059,4 +1073,8 @@ pub(crate) fn fastmath_sum(ctx: &mut Context<'_>, args: &[Handle]) -> Result<Han
 
 pub(crate) fn tonic_compile(ctx: &mut Context<'_>, args: &[Handle]) -> Result<Handle> {
     ctx.request_jit_compile(args[0])
+}
+
+pub(crate) fn tonic_warmup(ctx: &mut Context<'_>, args: &[Handle]) -> Result<Handle> {
+    ctx.warmup_jit(args)
 }

@@ -892,7 +892,7 @@ fn module_graph_links_symbols_code_and_nested_import_discovery() {
             ModuleSource::new(
                 "helper",
                 "helper.tonic",
-                "value=40\ndef answer():\n    return value+2",
+                "value=40\ndef answer(input:int)->int:\n    return value+input\ndef identity[T](item:T)->T:\n    return item",
             ),
         ],
     )
@@ -907,6 +907,23 @@ fn module_graph_links_symbols_code_and_nested_import_discovery() {
         .first()
         .expect("helper function site");
     assert!(child.code > program.modules[1].code);
+    assert_eq!(
+        child
+            .annotations
+            .iter()
+            .map(|(symbol, _)| program.symbols[usize::from(symbol.0)].as_str())
+            .collect::<Vec<_>>(),
+        ["input", "return"]
+    );
+    let generic = &program.code[helper_entry].functions[1];
+    assert_eq!(
+        program.code[usize::from(generic.code)]
+            .type_params
+            .iter()
+            .map(|(symbol, _)| program.symbols[usize::from(symbol.0)].as_str())
+            .collect::<Vec<_>>(),
+        ["T"]
+    );
     assert!(program.symbols.iter().any(|symbol| symbol == "helper"));
     assert!(program.symbols.iter().any(|symbol| symbol == "value"));
 
