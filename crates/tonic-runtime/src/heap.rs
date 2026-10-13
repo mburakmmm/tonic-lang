@@ -198,12 +198,14 @@ pub(crate) enum Builtin {
     IntHash,
     FloatHash,
     StrHash,
+    BytesHash,
     TupleHash,
     RangeHash,
     IntNew,
     BoolNew,
     FloatNew,
     StrNew,
+    BytesNew,
     ListNew,
     ListInit,
     TupleNew,
@@ -264,6 +266,7 @@ pub(crate) enum Object {
     Buffer(crate::buffer::Buffer),
     Foreign(crate::foreign::ForeignObject),
     Str(String),
+    Bytes(Vec<u8>),
     Tuple(Vec<Value>),
     List(Vec<Value>),
     Slice([Value; 3]),
@@ -307,6 +310,7 @@ pub(crate) enum Object {
     TypeUnpack(Value),
     TypeAlias {
         name: String,
+        module: String,
         type_params: Value,
         value: Value,
     },
@@ -1733,6 +1737,7 @@ impl Heap {
             Object::Int(n) => !n.is_zero(),
             Object::Float(n) => *n != 0.0,
             Object::Str(s) => !s.is_empty(),
+            Object::Bytes(bytes) => !bytes.is_empty(),
             Object::Tuple(v) | Object::List(v) => !v.is_empty(),
             Object::Buffer(buffer) => buffer.len() != 0,
             Object::Dict(dict) | Object::Set(dict) => !dict.entries.is_empty(),
@@ -1904,6 +1909,7 @@ impl Heap {
                     s.clone()
                 }
             }
+            Object::Bytes(bytes) => quote_bytes(bytes),
             Object::Tuple(values) | Object::List(values) => {
                 let tuple = matches!(self.get(v)?, Object::Tuple(_));
                 if path.contains(&v) {
@@ -1961,7 +1967,7 @@ impl Heap {
                 );
                 let origin = match self.get(*origin)? {
                     Object::Class(class) => class.name.clone(),
-                    Object::TypeAlias { name, .. } => name.clone(),
+                    Object::TypeAlias { name, module, .. } => format!("{module}.{name}"),
                     _ => self.format_depth(*origin, true, path)?,
                 };
                 let Object::Tuple(arguments) = self.get(*args)? else {
@@ -2147,6 +2153,26 @@ fn quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+fn quote_bytes(bytes: &[u8]) -> String {
+    let mut output = String::from("b'");
+    for byte in bytes {
+        match *byte {
+            b'\\' => output.push_str("\\\\"),
+            b'\'' => output.push_str("\\'"),
+            b'\t' => output.push_str("\\t"),
+            b'\n' => output.push_str("\\n"),
+            b'\r' => output.push_str("\\r"),
+            0x20..=0x7e => output.push(char::from(*byte)),
+            byte => {
+                use std::fmt::Write as _;
+                write!(output, "\\x{byte:02x}").expect("writing to String cannot fail");
+            }
+        }
+    }
+    output.push('\'');
+    output
 }
 
 #[derive(Clone, Debug)]
@@ -2561,6 +2587,7 @@ impl Object {
                 Self::Class(c) | Self::Namespace(c) => c.estimated_bytes(),
                 Self::Instance { attributes, .. } => attributes.estimated_bytes(),
                 Self::Str(s) => s.capacity(),
+                Self::Bytes(bytes) => bytes.capacity(),
                 Self::Exception {
                     message,
                     arguments,
@@ -2598,7 +2625,8 @@ impl Object {
                             .as_ref()
                             .map_or(0, FunctionTypePlan::estimated_bytes)
                 }
-                Self::TypeParam { name, .. } | Self::TypeAlias { name, .. } => name.capacity(),
+                Self::TypeParam { name, .. } => name.capacity(),
+                Self::TypeAlias { name, module, .. } => name.capacity() + module.capacity(),
                 Self::Generator(frame) => frame.payload_bytes(),
                 Self::AsyncFuture(future) => {
                     (future.waiters.capacity() + future.callbacks.capacity())

@@ -296,6 +296,7 @@ pub enum Constant {
     Int(String),
     Float(f64),
     Str(String),
+    Bytes(Vec<u8>),
 }
 #[derive(Clone, Copy, Debug)]
 pub enum BinaryOp {

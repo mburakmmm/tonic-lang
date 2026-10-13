@@ -939,6 +939,7 @@ impl Adapter {
                 py::Constant::Int(n) => Constant::Int(n.to_string()),
                 py::Constant::Float(n) => Constant::Float(n),
                 py::Constant::Str(t) => Constant::Str(t),
+                py::Constant::Bytes(bytes) => Constant::Bytes(bytes),
                 _ => return Err(unsupported(s, "literal type")),
             }),
             py::Expr::Name(n) => ExprKind::Name(self.symbol(n.id.as_str())?),

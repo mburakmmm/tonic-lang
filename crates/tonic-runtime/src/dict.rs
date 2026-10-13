@@ -2,8 +2,8 @@
 //! managed key/value identities are retained separately in traced entries.
 use crate::{
     hashing::{
-        hash_range_parts, hash_string, hash_u64, normalize_bigint, range_length, sequence_finish,
-        sequence_start, sequence_step,
+        hash_bytes, hash_range_parts, hash_string, hash_u64, normalize_bigint, range_length,
+        sequence_finish, sequence_start, sequence_step,
     },
     heap::{Heap, Object, TypingFormKind},
     type_plan::{canonical_literal_arguments, LiteralTypePlan},
@@ -24,6 +24,7 @@ enum Key {
     Float(u64),
     NaN(u64),
     Str(String),
+    Bytes(Vec<u8>),
     Tuple(Vec<Key>),
     Slice(Vec<Key>),
     Range {
@@ -76,6 +77,7 @@ fn key_hash(key: &Key) -> u64 {
         Key::Float(bits) => hash_u64(*bits),
         Key::NaN(identity) | Key::Identity(identity) => hash_u64(*identity),
         Key::Str(value) => hash_string(value),
+        Key::Bytes(value) => hash_bytes(value),
         Key::Tuple(values) | Key::Slice(values) => {
             let accumulator = values.iter().fold(sequence_start(), |accumulator, value| {
                 sequence_step(accumulator, key_hash(value) as i64)
@@ -104,7 +106,8 @@ fn key_hash(key: &Key) -> u64 {
                         LiteralTypePlan::Bool(value) => 0x510 + i64::from(*value),
                         LiteralTypePlan::Int(value) => hash_string(value) ^ 0x520,
                         LiteralTypePlan::Str(value) => hash_string(value) ^ 0x530,
-                        LiteralTypePlan::Ellipsis => 0x540,
+                        LiteralTypePlan::Bytes(value) => hash_bytes(value) ^ 0x540,
+                        LiteralTypePlan::Ellipsis => 0x550,
                     };
                     sequence_step(accumulator, hash)
                 },
@@ -220,6 +223,7 @@ impl Heap {
             }
             Object::Float(n) => Key::Float(n.to_bits()),
             Object::Str(s) => Key::Str(s.clone()),
+            Object::Bytes(bytes) => Key::Bytes(bytes.clone()),
             Object::Tuple(values) => Key::Tuple(
                 values
                     .iter()

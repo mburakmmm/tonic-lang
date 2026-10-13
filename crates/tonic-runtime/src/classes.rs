@@ -1548,19 +1548,29 @@ impl Heap {
                 ..
             }) => Some((
                 parameter_name.clone(),
+                None,
                 Some((*kind, *bound, *default)),
                 None,
             )),
             Ok(Object::TypeAlias {
                 name: alias_name,
+                module,
                 type_params,
                 value,
-            }) => Some((alias_name.clone(), None, Some((*type_params, *value)))),
+            }) => Some((
+                alias_name.clone(),
+                Some(module.clone()),
+                None,
+                Some((*type_params, *value)),
+            )),
             _ => None,
         };
-        if let Some((metadata_name, parameter, alias)) = type_metadata {
+        if let Some((metadata_name, module, parameter, alias)) = type_metadata {
             return match name {
                 "__name__" => self.alloc(Object::Str(metadata_name)),
+                "__module__" if module.is_some() => {
+                    self.alloc(Object::Str(module.expect("checked module")))
+                }
                 "__bound__" if parameter.is_some() => Ok(parameter
                     .and_then(|(_, bound, _)| bound)
                     .unwrap_or(Value::NONE)),

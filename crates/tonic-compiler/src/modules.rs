@@ -226,9 +226,13 @@ fn link(programs: &[VerifiedProgram]) -> Result<VerifiedProgram> {
                     Op::LoadGlobal | Op::StoreGlobal | Op::LoadName => {
                         instruction.b = global_map[usize::from(instruction.b)];
                     }
-                    Op::Import | Op::DelAttr | Op::StoreName | Op::ClassDeref | Op::ArgNamed => {
-                        instruction.b = map[usize::from(instruction.b)]
-                    }
+                    Op::Import
+                    | Op::DelAttr
+                    | Op::StoreName
+                    | Op::ClassDeref
+                    | Op::ArgNamed
+                    | Op::TypeParam
+                    | Op::TypeAlias => instruction.b = map[usize::from(instruction.b)],
                     Op::ImportFrom => {
                         instruction.c = map[usize::from(instruction.c)];
                     }

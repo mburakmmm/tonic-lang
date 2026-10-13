@@ -9,8 +9,8 @@ use super::{
 use crate::{
     dict::Dict,
     hashing::{
-        hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish, sequence_start,
-        sequence_step,
+        hash_bytes, hash_range, hash_string, hash_u64, normalize_bigint, sequence_finish,
+        sequence_start, sequence_step,
     },
     heap::{
         AsyncFuture, AsyncGeneratorAwaitState, AsyncGeneratorOperation, AsyncState, AsyncTask,
@@ -170,6 +170,7 @@ fn native_new_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
         Builtin::BoolNew => super::RuntimeTypeKind::Bool,
         Builtin::FloatNew => super::RuntimeTypeKind::Float,
         Builtin::StrNew => super::RuntimeTypeKind::Str,
+        Builtin::BytesNew => super::RuntimeTypeKind::Bytes,
         Builtin::ListNew => super::RuntimeTypeKind::List,
         Builtin::TupleNew => super::RuntimeTypeKind::Tuple,
         Builtin::DictNew => super::RuntimeTypeKind::Dict,
@@ -183,6 +184,7 @@ fn native_hash_kind(builtin: Builtin) -> Option<super::RuntimeTypeKind> {
         Builtin::IntHash => super::RuntimeTypeKind::Int,
         Builtin::FloatHash => super::RuntimeTypeKind::Float,
         Builtin::StrHash => super::RuntimeTypeKind::Str,
+        Builtin::BytesHash => super::RuntimeTypeKind::Bytes,
         Builtin::TupleHash => super::RuntimeTypeKind::Tuple,
         Builtin::RangeHash => super::RuntimeTypeKind::Range,
         _ => return None,
@@ -3449,6 +3451,7 @@ impl Vm {
             super::RuntimeTypeKind::Bool => self.runtime_types.bool_,
             super::RuntimeTypeKind::Float => self.runtime_types.float,
             super::RuntimeTypeKind::Str => self.runtime_types.str_,
+            super::RuntimeTypeKind::Bytes => self.runtime_types.bytes,
             super::RuntimeTypeKind::List => self.runtime_types.list,
             super::RuntimeTypeKind::Tuple => self.runtime_types.tuple,
             super::RuntimeTypeKind::Dict => self.runtime_types.dict,
@@ -4107,18 +4110,37 @@ impl Vm {
         }
         let argument = (args.count() == 1).then(|| args.positional(&self.registers, 0));
         use super::RuntimeTypeKind;
-        if matches!(kind, RuntimeTypeKind::List | RuntimeTypeKind::Tuple) {
-            let collection_kind = if kind == RuntimeTypeKind::List {
-                finish.map_or(
-                    IterableCollectionKind::List,
-                    IterableCollectionKind::NativeList,
-                )
-            } else {
-                finish.map_or(
-                    IterableCollectionKind::Tuple,
-                    IterableCollectionKind::NativeTuple,
-                )
-            };
+        let collect_kind = match kind {
+            RuntimeTypeKind::List => Some(finish.clone().map_or(
+                IterableCollectionKind::List,
+                IterableCollectionKind::NativeList,
+            )),
+            RuntimeTypeKind::Tuple => Some(finish.clone().map_or(
+                IterableCollectionKind::Tuple,
+                IterableCollectionKind::NativeTuple,
+            )),
+            RuntimeTypeKind::Bytes => match argument {
+                None => Some(finish.clone().map_or(
+                    IterableCollectionKind::Bytes,
+                    IterableCollectionKind::NativeBytes,
+                )),
+                Some(value) if self.heap.is_integer(value) => None,
+                Some(value)
+                    if matches!(
+                        self.heap.get(self.heap.native_value(value)),
+                        Ok(Object::Bytes(_))
+                    ) =>
+                {
+                    None
+                }
+                Some(_) => Some(finish.clone().map_or(
+                    IterableCollectionKind::Bytes,
+                    IterableCollectionKind::NativeBytes,
+                )),
+            },
+            _ => None,
+        };
+        if let Some(collection_kind) = collect_kind {
             let Some(source) = argument else {
                 return self.finish_iterable_collection(
                     p,
@@ -4185,6 +4207,35 @@ impl Vm {
                     .transpose()?
                     .unwrap_or_default();
                 self.heap.alloc(Object::Str(value))?
+            }
+            RuntimeTypeKind::Bytes => {
+                let bytes = match argument {
+                    None => Vec::new(),
+                    Some(value) => {
+                        let native = self.heap.native_value(value);
+                        if self.heap.is_integer(native) {
+                            let length =
+                                self.heap.integer(native)?.to_usize().ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "ValueError",
+                                        "negative count or count too large",
+                                    )
+                                })?;
+                            let mut bytes = Vec::new();
+                            bytes.try_reserve_exact(length).map_err(|_| {
+                                Diagnostic::new("MemoryError", "bytes allocation failed")
+                            })?;
+                            bytes.resize(length, 0);
+                            bytes
+                        } else {
+                            match self.heap.get(native)? {
+                                Object::Bytes(bytes) => bytes.clone(),
+                                _ => unreachable!("other iterables use the collection path"),
+                            }
+                        }
+                    }
+                };
+                self.heap.alloc(Object::Bytes(bytes))?
             }
             RuntimeTypeKind::List | RuntimeTypeKind::Tuple => {
                 unreachable!("list and tuple handled before scalar constructors")
@@ -5332,6 +5383,20 @@ impl Vm {
         let (object, finish) = match kind {
             IterableCollectionKind::List => (Object::List(items), None),
             IterableCollectionKind::Tuple => (Object::Tuple(items), None),
+            IterableCollectionKind::Bytes | IterableCollectionKind::NativeBytes(_) => {
+                let mut bytes = Vec::with_capacity(items.len());
+                for item in items {
+                    let byte = self.heap.integer(item)?.to_u8().ok_or_else(|| {
+                        Diagnostic::new("ValueError", "bytes must be in range(0, 256)")
+                    })?;
+                    bytes.push(byte);
+                }
+                let finish = match kind {
+                    IterableCollectionKind::NativeBytes(finish) => Some(finish),
+                    _ => None,
+                };
+                (Object::Bytes(bytes), finish)
+            }
             IterableCollectionKind::NativeList(finish) => (Object::List(items), Some(finish)),
             IterableCollectionKind::NativeTuple(finish) => (Object::Tuple(items), Some(finish)),
             IterableCollectionKind::ListInit { result, .. } => {
@@ -5687,6 +5752,29 @@ impl Vm {
             self.registers[destination] = Value::bool(text.contains(fragment) != negate);
             return Ok(());
         }
+        if let Ok(Object::Bytes(bytes)) = self.heap.get(native_container) {
+            let found = if self.heap.is_integer(needle) {
+                let byte = self.heap.integer(needle)?.to_u8().ok_or_else(|| {
+                    Diagnostic::new("ValueError", "byte must be in range(0, 256)")
+                })?;
+                bytes.contains(&byte)
+            } else {
+                let native_needle = self.heap.native_value(needle);
+                let Object::Bytes(fragment) = self.heap.get(native_needle)? else {
+                    return Err(Diagnostic::new(
+                        "TypeError",
+                        "bytes membership requires an integer or bytes left operand",
+                    ));
+                };
+                fragment.is_empty()
+                    || fragment.len() <= bytes.len()
+                        && bytes
+                            .windows(fragment.len())
+                            .any(|window| window == fragment)
+            };
+            self.registers[destination] = Value::bool(found != negate);
+            return Ok(());
+        }
         if matches!(
             self.heap.get(native_container),
             Ok(Object::Dict(_) | Object::Set(_))
@@ -5867,6 +5955,9 @@ impl Vm {
         }
         let fallback = match (self.heap.get(native_left), self.heap.get(native_right)) {
             (Ok(Object::Str(left)), Ok(Object::Str(right))) => {
+                EqualityFallback::Ready(left == right)
+            }
+            (Ok(Object::Bytes(left)), Ok(Object::Bytes(right))) => {
                 EqualityFallback::Ready(left == right)
             }
             (Ok(Object::Range { .. }), Ok(Object::Range { .. })) => {
@@ -6631,6 +6722,9 @@ impl Vm {
                 matches!(self.heap.get(native), Ok(Object::Float(_)))
             }
             super::RuntimeTypeKind::Str => matches!(self.heap.get(native), Ok(Object::Str(_))),
+            super::RuntimeTypeKind::Bytes => {
+                matches!(self.heap.get(native), Ok(Object::Bytes(_)))
+            }
             super::RuntimeTypeKind::Tuple => {
                 matches!(self.heap.get(native), Ok(Object::Tuple(_)))
             }
@@ -6686,6 +6780,7 @@ impl Vm {
                 ),
                 Object::Float(number) => Some(hash_u64(number.to_bits())),
                 Object::Str(string) => Some(hash_string(string)),
+                Object::Bytes(bytes) => Some(hash_bytes(bytes)),
                 Object::Range { start, stop, step } => Some(hash_range(*start, *stop, *step)),
                 Object::Tuple(values) => {
                     return self.begin_hash_sequence(
@@ -7838,6 +7933,7 @@ impl Vm {
             | Builtin::BoolNew
             | Builtin::FloatNew
             | Builtin::StrNew
+            | Builtin::BytesNew
             | Builtin::ListNew
             | Builtin::ListInit
             | Builtin::TupleNew
@@ -7944,6 +8040,7 @@ impl Vm {
             | Builtin::IntHash
             | Builtin::FloatHash
             | Builtin::StrHash
+            | Builtin::BytesHash
             | Builtin::TupleHash
             | Builtin::RangeHash => {
                 unreachable!("hash builtin has a suspending call path")

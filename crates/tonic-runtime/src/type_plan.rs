@@ -5,7 +5,7 @@ use crate::{
 use num_traits::ToPrimitive;
 use std::{collections::HashSet, fmt};
 
-pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 7;
+pub const TYPE_PLAN_SCHEMA_VERSION: u16 = 8;
 const MAX_TYPE_PLAN_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +15,7 @@ pub(crate) struct TypePlanBuiltins {
     pub int: Value,
     pub float: Value,
     pub str_: Value,
+    pub bytes: Value,
     pub list: Value,
     pub tuple: Value,
     pub dict: Value,
@@ -32,6 +33,7 @@ pub enum ExactTypePlan {
     Int,
     Float,
     Str,
+    Bytes,
     List,
     Tuple,
     Dict,
@@ -44,6 +46,7 @@ pub enum LiteralTypePlan {
     Bool(bool),
     Int(String),
     Str(String),
+    Bytes(Vec<u8>),
     Ellipsis,
 }
 
@@ -226,6 +229,7 @@ fn plan_bytes(plan: &Result<TypePlan, TypePlanRejection>) -> usize {
                             LiteralTypePlan::Int(value) | LiteralTypePlan::Str(value) => {
                                 value.capacity()
                             }
+                            LiteralTypePlan::Bytes(value) => value.capacity(),
                             _ => 0,
                         })
                         .sum::<usize>()
@@ -307,6 +311,7 @@ fn resolve_type_plan(
         (builtins.int, ExactTypePlan::Int),
         (builtins.float, ExactTypePlan::Float),
         (builtins.str_, ExactTypePlan::Str),
+        (builtins.bytes, ExactTypePlan::Bytes),
         (builtins.list, ExactTypePlan::List),
         (builtins.tuple, ExactTypePlan::Tuple),
         (builtins.dict, ExactTypePlan::Dict),
@@ -661,7 +666,12 @@ impl CanonicalHash {
                             self.u8(3);
                             self.string(value);
                         }
-                        LiteralTypePlan::Ellipsis => self.u8(4),
+                        LiteralTypePlan::Bytes(value) => {
+                            self.u8(4);
+                            self.u64(value.len() as u64);
+                            self.bytes(value);
+                        }
+                        LiteralTypePlan::Ellipsis => self.u8(5),
                     }
                 }
             }
@@ -716,6 +726,7 @@ pub(crate) fn literal_type_plan(
     match heap.get(value) {
         Ok(Object::Int(value)) => Ok(LiteralTypePlan::Int(value.to_string())),
         Ok(Object::Str(value)) => Ok(LiteralTypePlan::Str(value.clone())),
+        Ok(Object::Bytes(value)) => Ok(LiteralTypePlan::Bytes(value.clone())),
         _ => Err(TypePlanRejection::UnsupportedValue),
     }
 }

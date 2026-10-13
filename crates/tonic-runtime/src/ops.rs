@@ -361,6 +361,37 @@ impl Heap {
             };
             return self.alloc(Object::Float(f));
         }
+        if op == Op::Mul {
+            let a_native = self.native_value(a);
+            let b_native = self.native_value(b);
+            let (bytes, count) = match (self.get(a_native), self.get(b_native)) {
+                (Ok(Object::Bytes(bytes)), _) if self.is_integer(b) => {
+                    (bytes.clone(), self.integer(b)?)
+                }
+                (_, Ok(Object::Bytes(bytes))) if self.is_integer(a) => {
+                    (bytes.clone(), self.integer(a)?)
+                }
+                _ => return Err(type_error()),
+            };
+            if count.is_negative() || count.is_zero() || bytes.is_empty() {
+                return self.alloc(Object::Bytes(Vec::new()));
+            }
+            let count = count
+                .to_usize()
+                .ok_or_else(|| Diagnostic::new("MemoryError", "repeated bytes are too long"))?;
+            let length = bytes
+                .len()
+                .checked_mul(count)
+                .ok_or_else(|| Diagnostic::new("MemoryError", "repeated bytes are too long"))?;
+            let mut repeated = Vec::new();
+            repeated
+                .try_reserve_exact(length)
+                .map_err(|_| Diagnostic::new("MemoryError", "repeated bytes are too long"))?;
+            for _ in 0..count {
+                repeated.extend_from_slice(&bytes);
+            }
+            return self.alloc(Object::Bytes(repeated));
+        }
         if op == Op::Add {
             let a = self.native_value(a);
             let b = self.native_value(b);
@@ -370,6 +401,12 @@ impl Heap {
                     s.push_str(x);
                     s.push_str(y);
                     Object::Str(s)
+                }
+                (Ok(Object::Bytes(x)), Ok(Object::Bytes(y))) => {
+                    let mut bytes = Vec::with_capacity(x.len() + y.len());
+                    bytes.extend_from_slice(x);
+                    bytes.extend_from_slice(y);
+                    Object::Bytes(bytes)
                 }
                 (Ok(Object::List(x)), Ok(Object::List(y))) => {
                     Object::List(x.iter().chain(y).copied().collect())
@@ -494,6 +531,7 @@ impl Heap {
                 }
             }
             (Ok(Object::Str(x)), Ok(Object::Str(y))) => x == y,
+            (Ok(Object::Bytes(x)), Ok(Object::Bytes(y))) => x == y,
             (Ok(Object::Tuple(x)), Ok(Object::Tuple(y)))
             | (Ok(Object::List(x)), Ok(Object::List(y))) => {
                 if x.len() != y.len() {
@@ -639,6 +677,7 @@ impl Heap {
         let b = self.native_value(b);
         match (self.get(a), self.get(b)) {
             (Ok(Object::Str(x)), Ok(Object::Str(y))) => Ok(Some(x.cmp(y))),
+            (Ok(Object::Bytes(x)), Ok(Object::Bytes(y))) => Ok(Some(x.cmp(y))),
             (Ok(Object::Tuple(x)), Ok(Object::Tuple(y)))
             | (Ok(Object::List(x)), Ok(Object::List(y))) => {
                 for (a, b) in x.iter().zip(y) {
@@ -655,6 +694,7 @@ impl Heap {
         let v = self.native_value(v);
         let n = match self.get(v)? {
             Object::Str(s) => BigInt::from(s.chars().count()),
+            Object::Bytes(bytes) => BigInt::from(bytes.len()),
             Object::Tuple(v) | Object::List(v) => BigInt::from(v.len()),
             Object::Buffer(buffer) => BigInt::from(buffer.len()),
             Object::Dict(dict) | Object::Set(dict) => BigInt::from(dict.entries.len()),
@@ -718,6 +758,7 @@ impl Heap {
         let len = match self.get(v)? {
             Object::Tuple(v) | Object::List(v) => v.len() as i128,
             Object::Str(s) => s.chars().count() as i128,
+            Object::Bytes(bytes) => bytes.len() as i128,
             Object::Range { start, stop, step } => range_len(*start, *stop, *step),
             _ => return Err(Diagnostic::new("TypeError", "object is not subscriptable")),
         };
@@ -735,6 +776,7 @@ impl Heap {
                     .to_string();
                 self.alloc(Object::Str(s))
             }
+            Object::Bytes(bytes) => self.i64(i64::from(bytes[i as usize])),
             Object::Range { start, step, .. } => {
                 self.int(BigInt::from(*start as i128 + i * (*step as i128)))
             }
@@ -811,6 +853,7 @@ impl Heap {
         let len = match self.get(source)? {
             Object::Tuple(values) | Object::List(values) => values.len(),
             Object::Str(value) => value.chars().count(),
+            Object::Bytes(bytes) => bytes.len(),
             _ => return Err(Diagnostic::new("TypeError", "object is not subscriptable")),
         };
         let indices = slice_indices(len, start, stop, step);
@@ -820,6 +863,9 @@ impl Heap {
             Object::Str(value) => {
                 let characters: Vec<char> = value.chars().collect();
                 Object::Str(indices.iter().map(|&i| characters[i]).collect())
+            }
+            Object::Bytes(bytes) => {
+                Object::Bytes(indices.iter().map(|&index| bytes[index]).collect())
             }
             _ => unreachable!("source type checked above"),
         };
@@ -848,10 +894,12 @@ impl Heap {
                 stop: *stop as i128,
                 step: *step as i128,
             },
-            Object::Tuple(_) | Object::List(_) | Object::Str(_) => Object::Iterator {
-                source: v,
-                index: 0,
-            },
+            Object::Tuple(_) | Object::List(_) | Object::Str(_) | Object::Bytes(_) => {
+                Object::Iterator {
+                    source: v,
+                    index: 0,
+                }
+            }
             Object::Dict(dict) | Object::Set(dict) => Object::DictIterator {
                 source: v,
                 index: 0,
@@ -956,6 +1004,10 @@ impl Heap {
                             None
                         }
                     }
+                    Object::Bytes(bytes) => bytes
+                        .get(i)
+                        .copied()
+                        .map(|byte| Value::int(i64::from(byte)).expect("byte is immediate")),
                     _ => return Err(type_error()),
                 };
                 if item.is_some() {

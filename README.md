@@ -67,6 +67,9 @@ The current implementation includes:
   with Future/Task scheduling and cancellation;
 - source modules and packages with versioned globals, circular-import state, and rollback;
 - adaptive integer quickening and bounded mono/polymorphic inline caches;
+- immutable Python-style `bytes` values with owned literals, handle-stable
+  runtime identity, integer iteration/indexing, slicing, hashing, sequence
+  operations, and canonical exact/Literal annotation plans;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps,
   including first-call annotation-guided `int`, `float`, `bool`, `None`,
@@ -182,7 +185,7 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 417 Rust tests and a differential corpus of
+The repository currently contains 465 Rust tests and a differential corpus of
 332 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets

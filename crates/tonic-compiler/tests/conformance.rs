@@ -66,6 +66,26 @@ fn ellipsis_has_owned_ast_and_verified_bytecode() {
 }
 
 #[test]
+fn bytes_literal_has_owned_ast_and_verified_bytecode() {
+    let source = "payload = b'A\\x00\\xff\\n'";
+    let ast = parse(source, "bytes-literal").unwrap();
+    let StmtKind::Assign(_, payload) = &ast.body[0].kind else {
+        panic!("bytes assignment")
+    };
+    assert!(matches!(
+        &payload.kind,
+        ExprKind::Constant(Constant::Bytes(bytes)) if bytes == b"A\0\xff\n"
+    ));
+
+    let program = compile(source, "bytes-literal").unwrap();
+    assert!(program.program().code.iter().any(|code| {
+        code.constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Bytes(bytes) if bytes == b"A\0\xff\n"))
+    }));
+}
+
+#[test]
 fn f_strings_have_owned_ast_and_verified_format_bytecode() {
     let source = "width=6\nresult=f'value={42!r:>{width}}'";
     let ast = parse(source, "f-string").unwrap();
@@ -892,7 +912,7 @@ fn module_graph_links_symbols_code_and_nested_import_discovery() {
             ModuleSource::new(
                 "helper",
                 "helper.tonic",
-                "value=40\ndef answer(input:int)->int:\n    return value+input\ndef identity[T](item:T)->T:\n    return item",
+                "value=40\ndef answer(input:int)->int:\n    return value+input\ndef identity[T](item:T)->T:\n    return item\ntype Pair[U] = (U,U)",
             ),
         ],
     )
@@ -926,6 +946,18 @@ fn module_graph_links_symbols_code_and_nested_import_discovery() {
     );
     assert!(program.symbols.iter().any(|symbol| symbol == "helper"));
     assert!(program.symbols.iter().any(|symbol| symbol == "value"));
+    let helper_instructions = &program.code[helper_entry].instructions;
+    let type_params = helper_instructions
+        .iter()
+        .filter(|instruction| instruction.opcode == Op::TypeParam as u16)
+        .map(|instruction| program.symbols[usize::from(instruction.b)].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(type_params, ["T", "U"]);
+    let type_alias = helper_instructions
+        .iter()
+        .find(|instruction| instruction.opcode == Op::TypeAlias as u16)
+        .expect("linked type alias instruction");
+    assert_eq!(program.symbols[usize::from(type_alias.b)], "Pair");
 
     let from = compile("from helper import answer as result", "from.tonic").unwrap();
     assert!(from.program().code[0]

@@ -313,7 +313,7 @@ sonra alınır.
   varsayımıdır; annotation yazmayan kod tamamen dinamik kalır. Desteklenen bir
   annotation planı bulunan kod profil sıcaklığını beklemeden guarded typed-JIT
   yoluna aday olur; yanlış tipte çağrı generic Python yoluna deopt eder.
-  - [x] TypePlan v7 temeli: exact `None/bool/int/float/str`, plain container,
+  - [x] TypePlan v8 temeli: exact `None/bool/int/float/str/bytes`, plain container,
     nested homogeneous list/dict/set, fixed tuple, class identity/version,
     canonical PEP 604 union/optional, variadic tuple, Literal, Callable ve exact
     `f64` buffer,
@@ -322,10 +322,16 @@ sonra alınır.
   - [ ] Çözümlenmiş annotation değerinden canonical `TypePlan`: exact builtin,
     union/optional/literal, fixed/variadic tuple, homogeneous list/dict/set,
     callable, class/shape ve buffer/dtype; unsupported/dynamic annotation için
-    deterministic “optimize edilmedi” nedeni. V7 exact/container/class, PEP 604
+    deterministic “optimize edilmedi” nedeni. V8 exact/container/class, PEP 604
     union/optional, variadic tuple, `typing.Literal` ve `typing.Callable` temeli
-    ile mevcut concrete ve parametrik `fastmath.Buffer`/`f64` planı tamamlandı;
-    bytes, ek gerçek storage dtype'ları ve strict `tonic.types` yüzeyi açık.
+    ile mevcut concrete ve parametrik `fastmath.Buffer`/`f64` planı ve bytes
+    tamamlandı; ek gerçek storage dtype'ları ve strict `tonic.types` yüzeyi açık.
+    - [x] Immutable bytes runtime ve canonical TypePlan: owned byte literal/
+      bytecode constant, `bytes` type/constructor, iteration/index/slice,
+      concat/repeat, comparison/membership, hash/dict-key davranışı ve schema v8
+      exact `bytes` ile type-sensitive `Literal[bytes]` planı. Heap-backed bytes
+      annotation'ı metadata olarak korunur; managed-value JIT guard/lowering
+      eklenmeden scalar unboxed ABI varsayımı yapılmaz.
     - [x] PEP 604 runtime/type-plan yolu: `A | B`/`T | None`, GenericAlias ve
       user-class üyeleri, düzleştirme/tekrar eleme, sıra-bağımsız canonical plan,
       class dependency taşıma, `types.UnionType`, `__args__/__origin__`, yapısal
@@ -334,7 +340,7 @@ sonra alınır.
       branch refinement tamamlandı; genel union branch narrowing açık iştir.
     - [x] Python `Ellipsis` singleton'ı ve `types.EllipsisType`; parser/bytecode/
       interpreter/Cranelift sabit yolu, truth/hash/dict davranışı ve canonical
-      schema v3 ile tanıtılan ve güncel v7'de korunan
+      schema v3 ile tanıtılan ve güncel v8'de korunan
       `tuple[T, ...] -> VariadicTuple(T)` planı. Hatalı ellipsis yerleşimleri
       deterministic `invalid-generic-arity` üretir.
     - [x] `typing.Literal` runtime özel formu ve schema v4 canonical planı:

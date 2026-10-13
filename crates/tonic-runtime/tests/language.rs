@@ -1762,6 +1762,45 @@ fn typing_literal_preserves_runtime_identity_and_routes_numeric_jit_guards() {
 }
 
 #[test]
+fn immutable_bytes_cover_python_value_container_and_hash_semantics() {
+    let source = concat!(
+        "value=b'A\\x00\\xff\\n'\n",
+        "print(value,repr(value),bool(value),bool(b''),len(value))\n",
+        "print(value[0],value[-1],value[1:3],value[::-1],list(value))\n",
+        "print(b'A' in value,b'' in value,65 in value,66 not in value)\n",
+        "print(value==b'A\\x00\\xff\\n',value<b'B',value+b'Z')\n",
+        "print(value*2,2*b'xy',b'x'*-1)\n",
+        "print(bytes(),bytes(3),bytes(True),bytes([65,255]),bytes((1,2)),bytes(range(4)))\n",
+        "print(type(value),isinstance(value,bytes),hash(value)==hash(b'A\\x00\\xff\\n'))\n",
+        "print({value:42}[b'A\\x00\\xff\\n'],sum(value))\n",
+    );
+    assert_output_under_stress_gc_and_jit(
+        source,
+        concat!(
+            "b'A\\x00\\xff\\n' b'A\\x00\\xff\\n' True False 4\n",
+            "65 10 b'\\x00\\xff' b'\\n\\xff\\x00A' [65, 0, 255, 10]\n",
+            "True True True True\n",
+            "True True b'A\\x00\\xff\\nZ'\n",
+            "b'A\\x00\\xff\\nA\\x00\\xff\\n' b'xyxy' b''\n",
+            "b'' b'\\x00\\x00\\x00' b'\\x00' b'A\\xff' b'\\x01\\x02' b'\\x00\\x01\\x02\\x03'\n",
+            "<class 'bytes'> True True\n",
+            "42 330\n",
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+fn bytes_constructor_and_membership_reject_invalid_values() {
+    assert_eq!(error("bytes([-1])").kind, "ValueError");
+    assert_eq!(error("bytes([256])").kind, "ValueError");
+    assert_eq!(error("bytes([1.5])").kind, "TypeError");
+    assert_eq!(error("bytes(-1)").kind, "ValueError");
+    assert_eq!(error("'x' in b'x'").kind, "TypeError");
+    assert_eq!(error("256 in b'x'").kind, "ValueError");
+}
+
+#[test]
 fn typing_callable_preserves_signature_shape_hash_and_reflection() {
     let source = concat!(
         "import typing\n",
@@ -1815,7 +1854,7 @@ fn variable_annotations_obey_scope_order_and_survive_jit_and_stress_gc() {
 
 #[test]
 fn type_parameters_aliases_and_lexical_cells_survive_jit_and_stress_gc() {
-    let source = "def identity[T: int](value: T) -> T:\n    return value\ndef reveal[T]():\n    def nested():\n        return T\n    return nested\nclass Box[T]:\n    seen=T\n    item: T\n    def reveal(self):\n        return T\nclass Child[T](Box[T]):\n    pass\ntype Plain = int\ntype Pair[T] = (T,T)\nprint(identity.__type_params__,identity.__annotations__,identity(7))\nprint(identity.__type_params__[0].__name__,identity.__type_params__[0].__bound__)\nprint(reveal()())\nprint(Box.__type_params__,Box.seen,Box.__annotations__,Box().reveal())\nprint(Child.__bases__)\nprint(Plain,Plain.__name__,Plain.__type_params__,Plain.__value__)\nprint(Pair,Pair.__name__,Pair.__type_params__,Pair.__value__)\nprint(list[int],tuple[int,str],dict[str,int],list[int]([1,2]))\nprint(Pair[int],Pair[int].__origin__,Pair[int].__args__,Pair[int].__value__)\ndef shadow[T](T):\n    return T\nprint(shadow(9),shadow.__type_params__)\ndef missing[T]():\n    print(T)\n    T=1\ntry:\n    missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
+    let source = "def identity[T: int](value: T) -> T:\n    return value\ndef reveal[T]():\n    def nested():\n        return T\n    return nested\nclass Box[T]:\n    seen=T\n    item: T\n    def reveal(self):\n        return T\nclass Child[T](Box[T]):\n    pass\ntype Plain = int\ntype Pair[T] = (T,T)\nprint(identity.__type_params__,identity.__annotations__,identity(7))\nprint(identity.__type_params__[0].__name__,identity.__type_params__[0].__bound__)\nprint(reveal()())\nprint(Box.__type_params__,Box.seen,Box.__annotations__,Box().reveal())\nprint(Child.__bases__)\nprint(Plain,Plain.__name__,Plain.__type_params__,Plain.__value__)\nprint(Pair,Pair.__name__,Pair.__module__,Pair.__type_params__,Pair.__value__)\nprint(list[int],tuple[int,str],dict[str,int],list[int]([1,2]))\nprint(Pair[int],Pair[int].__origin__,Pair[int].__args__,Pair[int].__value__)\ndef shadow[T](T):\n    return T\nprint(shadow(9),shadow.__type_params__)\ndef missing[T]():\n    print(T)\n    T=1\ntry:\n    missing()\nexcept UnboundLocalError as error:\n    print(type(error).__name__)";
     let program = compile(source, "type-parameters").unwrap();
     for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
         let mut vm = Vm::new().unwrap();
@@ -1825,7 +1864,7 @@ fn type_parameters_aliases_and_lexical_cells_survive_jit_and_stress_gc() {
         vm.run(&program, &mut out).unwrap();
         assert_eq!(
             out,
-            b"(T,) {'value': T, 'return': T} 7\nT <class 'int'>\nT\n(T,) T {'item': T} T\n(<class 'Box'>,)\nPlain Plain () <class 'int'>\nPair Pair (T,) (T, T)\nlist[int] tuple[int, str] dict[str, int] [1, 2]\nPair[int] Pair (<class 'int'>,) (T, T)\n9 (T,)\nUnboundLocalError\n"
+            b"(T,) {'value': T, 'return': T} 7\nT <class 'int'>\nT\n(T,) T {'item': T} T\n(<class 'Box'>,)\nPlain Plain () <class 'int'>\nPair Pair __main__ (T,) (T, T)\nlist[int] tuple[int, str] dict[str, int] [1, 2]\n__main__.Pair[int] Pair (<class 'int'>,) (T, T)\n9 (T,)\nUnboundLocalError\n"
         );
     }
 }
@@ -4005,6 +4044,30 @@ fn source_modules_isolate_versioned_globals_cache_once_and_support_cycles() {
     assert!(vm
         .module_version("beta")
         .is_some_and(|version| version >= 3));
+}
+
+#[test]
+fn imported_type_aliases_preserve_module_identity_in_generic_repr() {
+    let program = compile_modules(
+        "__main__",
+        &[
+            ModuleSource::new(
+                "__main__",
+                "main.tonic",
+                "import aliases\nprint(aliases.Pair[int],aliases.Pair.__module__,aliases.Pair.__type_params__)",
+            ),
+            ModuleSource::new("aliases", "aliases.tonic", "type Pair[T] = (T,T)"),
+        ],
+    )
+    .unwrap();
+    for mode in [ExecutionMode::Interpreter, ExecutionMode::Jit] {
+        let mut vm = Vm::new().unwrap();
+        vm.execution_mode = mode;
+        vm.gc_interval = Some(1);
+        let mut out = Vec::new();
+        vm.run(&program, &mut out).unwrap();
+        assert_eq!(out, b"aliases.Pair[int] aliases (T,)\n");
+    }
 }
 
 #[test]

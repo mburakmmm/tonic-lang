@@ -3829,7 +3829,10 @@ fn analyze_typed_scalar_execution(
                     }
                     Constant::Float(_) => ScalarFact::Float,
                     Constant::None => ScalarFact::None,
-                    Constant::Ellipsis | Constant::Int(_) | Constant::Str(_) => ScalarFact::Unknown,
+                    Constant::Ellipsis
+                    | Constant::Int(_)
+                    | Constant::Str(_)
+                    | Constant::Bytes(_) => ScalarFact::Unknown,
                 };
             }
             Op::Move => after[instruction.a as usize] = fact(instruction.b),
@@ -4244,7 +4247,7 @@ fn encode_constant(constant: &Constant) -> Option<u64> {
             .ok()
             .filter(|value| (MIN_INT..=MAX_INT).contains(value))
             .map(encode_i64),
-        Constant::Float(_) | Constant::Str(_) => None,
+        Constant::Float(_) | Constant::Str(_) | Constant::Bytes(_) => None,
     }
 }
 

@@ -1180,8 +1180,10 @@ pub(super) enum AttributePhase {
 pub(super) enum IterableCollectionKind {
     List,
     Tuple,
+    Bytes,
     NativeList(NativeSubclassFinish),
     NativeTuple(NativeSubclassFinish),
+    NativeBytes(NativeSubclassFinish),
     ListInit { owner: Value, result: Value },
     Unpack { first: usize, count: usize },
 }
@@ -1324,6 +1326,7 @@ struct RuntimeTypes {
     bool_: Value,
     float: Value,
     str_: Value,
+    bytes: Value,
     list: Value,
     tuple: Value,
     dict: Value,
@@ -1363,6 +1366,7 @@ pub(super) enum RuntimeTypeKind {
     Bool,
     Float,
     Str,
+    Bytes,
     List,
     Tuple,
     Dict,
@@ -1384,6 +1388,7 @@ impl RuntimeTypes {
             bool_: Value::UNBOUND,
             float: Value::UNBOUND,
             str_: Value::UNBOUND,
+            bytes: Value::UNBOUND,
             list: Value::UNBOUND,
             tuple: Value::UNBOUND,
             dict: Value::UNBOUND,
@@ -1865,12 +1870,14 @@ impl IndexContinuation {
 impl IterableCollectionKind {
     fn trace(&self, mut visit: impl FnMut(Value)) {
         match self {
-            Self::NativeList(state) | Self::NativeTuple(state) => state.trace(visit),
+            Self::NativeList(state) | Self::NativeTuple(state) | Self::NativeBytes(state) => {
+                state.trace(visit)
+            }
             Self::ListInit { owner, result } => {
                 visit(*owner);
                 visit(*result);
             }
-            Self::List | Self::Tuple | Self::Unpack { .. } => {}
+            Self::List | Self::Tuple | Self::Bytes | Self::Unpack { .. } => {}
         }
     }
 }
@@ -1975,6 +1982,7 @@ impl Vm {
                 int: self.runtime_types.int,
                 float: self.runtime_types.float,
                 str_: self.runtime_types.str_,
+                bytes: self.runtime_types.bytes,
                 list: self.runtime_types.list,
                 tuple: self.runtime_types.tuple,
                 dict: self.runtime_types.dict,
@@ -2052,7 +2060,9 @@ impl Vm {
                     LiteralTypePlan::None => has_none = true,
                     LiteralTypePlan::Bool(_) => has_bool = true,
                     LiteralTypePlan::Int(_) => has_int = true,
-                    LiteralTypePlan::Str(_) | LiteralTypePlan::Ellipsis => return None,
+                    LiteralTypePlan::Str(_)
+                    | LiteralTypePlan::Bytes(_)
+                    | LiteralTypePlan::Ellipsis => return None,
                 }
             }
             match (has_none, has_bool, has_int) {
@@ -2742,6 +2752,9 @@ impl Vm {
             str_: vm
                 .heap
                 .builtin_class("str", vec![vm.object_class], vm.type_class)?,
+            bytes: vm
+                .heap
+                .builtin_class("bytes", vec![vm.object_class], vm.type_class)?,
             list: vm
                 .heap
                 .builtin_class("list", vec![vm.object_class], vm.type_class)?,
@@ -2832,6 +2845,7 @@ impl Vm {
             (vm.runtime_types.bool_, "__new__", Builtin::BoolNew),
             (vm.runtime_types.float, "__new__", Builtin::FloatNew),
             (vm.runtime_types.str_, "__new__", Builtin::StrNew),
+            (vm.runtime_types.bytes, "__new__", Builtin::BytesNew),
             (vm.runtime_types.list, "__new__", Builtin::ListNew),
             (vm.runtime_types.list, "__init__", Builtin::ListInit),
             (vm.runtime_types.tuple, "__new__", Builtin::TupleNew),
@@ -3139,6 +3153,7 @@ impl Vm {
             (vm.runtime_types.bool_, Builtin::IntHash),
             (vm.runtime_types.float, Builtin::FloatHash),
             (vm.runtime_types.str_, Builtin::StrHash),
+            (vm.runtime_types.bytes, Builtin::BytesHash),
             (vm.runtime_types.tuple, Builtin::TupleHash),
             (vm.runtime_types.range, Builtin::RangeHash),
         ] {
@@ -3166,6 +3181,7 @@ impl Vm {
             ("bool", vm.runtime_types.bool_),
             ("float", vm.runtime_types.float),
             ("str", vm.runtime_types.str_),
+            ("bytes", vm.runtime_types.bytes),
             ("list", vm.runtime_types.list),
             ("tuple", vm.runtime_types.tuple),
             ("dict", vm.runtime_types.dict),
@@ -4124,6 +4140,7 @@ impl Vm {
                     })?)?,
                     Constant::Float(n) => self.heap.alloc(Object::Float(*n))?,
                     Constant::Str(s) => self.heap.alloc(Object::Str(s.clone()))?,
+                    Constant::Bytes(bytes) => self.heap.alloc(Object::Bytes(bytes.clone()))?,
                 });
             }
             self.constants.push(constants);
@@ -4545,6 +4562,7 @@ impl Vm {
             (self.runtime_types.bool_, RuntimeTypeKind::Bool),
             (self.runtime_types.float, RuntimeTypeKind::Float),
             (self.runtime_types.str_, RuntimeTypeKind::Str),
+            (self.runtime_types.bytes, RuntimeTypeKind::Bytes),
             (self.runtime_types.list, RuntimeTypeKind::List),
             (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
             (self.runtime_types.dict, RuntimeTypeKind::Dict),
@@ -4582,6 +4600,7 @@ impl Vm {
             (self.runtime_types.int, RuntimeTypeKind::Int),
             (self.runtime_types.float, RuntimeTypeKind::Float),
             (self.runtime_types.str_, RuntimeTypeKind::Str),
+            (self.runtime_types.bytes, RuntimeTypeKind::Bytes),
             (self.runtime_types.list, RuntimeTypeKind::List),
             (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
             (self.runtime_types.dict, RuntimeTypeKind::Dict),
@@ -4609,6 +4628,7 @@ impl Vm {
                 (self.runtime_types.int, RuntimeTypeKind::Int),
                 (self.runtime_types.float, RuntimeTypeKind::Float),
                 (self.runtime_types.str_, RuntimeTypeKind::Str),
+                (self.runtime_types.bytes, RuntimeTypeKind::Bytes),
                 (self.runtime_types.list, RuntimeTypeKind::List),
                 (self.runtime_types.tuple, RuntimeTypeKind::Tuple),
                 (self.runtime_types.dict, RuntimeTypeKind::Dict),
@@ -4649,6 +4669,7 @@ impl Vm {
             Object::Int(_) => self.runtime_types.int,
             Object::Float(_) => self.runtime_types.float,
             Object::Str(_) => self.runtime_types.str_,
+            Object::Bytes(_) => self.runtime_types.bytes,
             Object::List(_) => self.runtime_types.list,
             Object::Tuple(_) => self.runtime_types.tuple,
             Object::Dict(_) => self.runtime_types.dict,
@@ -6343,6 +6364,7 @@ impl Vm {
                         let type_params = self.read(c)?;
                         self.registers[a] = self.heap.alloc(Object::TypeAlias {
                             name: p.symbols[i.b as usize].clone(),
+                            module: module_name(p, code_id).to_owned(),
                             type_params,
                             value,
                         })?;
@@ -8048,13 +8070,17 @@ impl Vm {
                                 Object::Tuple(_)
                                     | Object::List(_)
                                     | Object::Str(_)
+                                    | Object::Bytes(_)
                                     | Object::Range { .. }
                             );
                             if sequence {
                                 if let Ok(Object::Slice(components)) = self.heap.get(key) {
                                     if matches!(
                                         self.heap.get(storage)?,
-                                        Object::Tuple(_) | Object::List(_) | Object::Str(_)
+                                        Object::Tuple(_)
+                                            | Object::List(_)
+                                            | Object::Str(_)
+                                            | Object::Bytes(_)
                                     ) {
                                         self.continue_slice_conversion(
                                             p,
@@ -11133,6 +11159,17 @@ fn module_filename(program: &Program, code: usize) -> &str {
         .map_or("<unknown>", |module| module.filename.as_str())
 }
 
+fn module_name(program: &Program, code: usize) -> &str {
+    program
+        .modules
+        .iter()
+        .find(|module| {
+            let start = usize::from(module.code);
+            (start..start + usize::from(module.code_count)).contains(&code)
+        })
+        .map_or("<unknown>", |module| module.name.as_str())
+}
+
 fn ascii_only(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     for character in text.chars() {
@@ -11264,9 +11301,10 @@ mod annotation_type_plan_tests {
             "import typing\n",
             "import fastmath\n",
             "class Marker:\n    pass\n",
-            "def typed(x:int,y:list[float],z:dict[str,int],",
+            "def typed(x:int,raw:bytes,y:list[float],z:dict[str,int],",
             "t:tuple[int,str],vt:tuple[int,...],s:type({1}),m:Marker,u:int|None,",
             "v:str|int|str,g:list[int]|None,lit:typing.Literal[1,True,None,'ok',...,1],",
+            "bytes_lit:typing.Literal[b'\\x00\\xff',b'\\x00\\xff'],",
             "nested:typing.Literal[typing.Literal[1],True],",
             "cb:typing.Callable[[int,str],float],any_cb:typing.Callable[...,int],",
             "empty_cb:typing.Callable[[],None],buffer:fastmath.Buffer,",
@@ -11303,6 +11341,7 @@ mod annotation_type_plan_tests {
                 .clone()
         };
         assert_eq!(entry("x"), Ok(TypePlan::Exact(ExactTypePlan::Int)));
+        assert_eq!(entry("raw"), Ok(TypePlan::Exact(ExactTypePlan::Bytes)));
         assert_eq!(
             entry("y"),
             Ok(TypePlan::List(Box::new(TypePlan::Exact(
@@ -11346,6 +11385,12 @@ mod annotation_type_plan_tests {
                 LiteralTypePlan::Bool(true),
                 LiteralTypePlan::Int("1".into()),
             ]))
+        );
+        assert_eq!(
+            entry("bytes_lit"),
+            Ok(TypePlan::Literal(vec![LiteralTypePlan::Bytes(vec![
+                0, 255,
+            ])]))
         );
         assert_eq!(
             entry("cb"),

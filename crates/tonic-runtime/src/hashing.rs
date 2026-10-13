@@ -40,6 +40,12 @@ pub(crate) fn hash_string(value: &str) -> i64 {
     hash_u64(hasher.finish())
 }
 
+pub(crate) fn hash_bytes(value: &[u8]) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hash_u64(hasher.finish())
+}
+
 pub(crate) fn sequence_start() -> i64 {
     0x345678
 }

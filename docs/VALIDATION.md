@@ -1,6 +1,6 @@
 # Yerel doğrulama
 
-12 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.14.6.
+13 Ekim 2026, macOS ARM64, Rust stable 1.86.0, Python 3.15.0.
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 30, core verifier 20, Cranelift JIT 34, runtime unit 30,
+Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 34, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 157, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 461 test.
+native handles 5, language/runtime 160, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 465 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -127,13 +127,13 @@ hash, `__args__`/`__origin__`, `types.UnionType`, `isinstance`/`issubclass`, hat
 operand reddi ve custom metaclass `__or__` önceliğini interpreter/JIT-caller ×
 her-allocation GC matrisinde doğrular. Builtin gözlenebilir çıktı aynı yerel Python
 koşusuyla eşleşir. TypePlan unit testi `int | None`, sırası ters `str | int` ve
-`list[int] | None` planlarını canonical schema v7 `Union` olarak, eşdeğer yazım
+`list[int] | None` planlarını canonical schema v8 `Union` olarak, eşdeğer yazım
 sıralarını da aynı hash ile doğrular.
 
 Ellipsis parser testi `...` sabitini Tonic-owned AST ve doğrulanmış bytecode'a
 taşır. Runtime testi singleton kimliği, `types.EllipsisType`, repr, truth, hash ve
 dict-key davranışını interpreter ile gerçek Cranelift dönüşünde stress-GC altında
-karşılaştırır. TypePlan testi `tuple[int, ...]` değerini güncel schema v7
+karşılaştırır. TypePlan testi `tuple[int, ...]` değerini güncel schema v8
 `VariadicTuple(Int)` planına çözer, fixed tuple'dan farklı hash üretir ve hatalı
 ellipsis yerleşimini `invalid-generic-arity` olarak kaydeder.
 C ABI testi aynı immediate değeri `OTHER`/opaque olarak güvenle sınıflandırır,
@@ -145,7 +145,7 @@ ve dict-key kullanımını interpreter/JIT ile stress-GC altında doğrular. Ayn
 `Literal[1] -> Literal[2]` fonksiyonunun ilk çağrıda guarded typed JIT'e girdiğini,
 anotasyonda yazmayan başka bir int değerin de Python'ın advisory annotation
 semantiği korunarak güvenli geniş int guard'ından geçtiğini doğrular. TypePlan
-unit testi güncel schema v7 `Literal` sıralama/tekrar elemesini, nested flattening'i,
+unit testi güncel schema v8 `Literal` sıralama/tekrar elemesini, nested flattening'i,
 canonical hash'i ve float literal için deterministic `unsupported-value` sonucunu
 denetler.
 
@@ -160,14 +160,14 @@ reddi doğrular.
 Native buffer tür testi `fastmath.array` sonucunun exact `fastmath.Buffer`
 runtime sınıfını `type` ve `isinstance` üzerinden verdiğini, annotation içinde
 aynı kimliğin kullanılabildiğini ve allocation-stress moving GC altında kökünün
-korunduğunu doğrular. TypePlan unit testi schema v6'da tanıtılıp güncel v7'de
+korunduğunu doğrular. TypePlan unit testi schema v6'da tanıtılıp güncel v8'de
 korunan planı yalnız gerçekten uygulanan `f64` dtype ile, rank ve mutability
 kısıtlarını `any` bırakarak üretir.
 Diğer public ABI dtype sabitleri bu test veya plan tarafından uygulanmış storage
 olarak kabul edilmez.
 
 Parametrik buffer TypePlan testi `Buffer`, `Buffer[float]` ve wildcard'lı eşdeğer
-yazımı aynı canonical schema v7 hash'ine indirger. Exact rank-1/read-only ile
+yazımı aynı canonical schema v8 hash'ine indirger. Exact rank-1/read-only ile
 rank-independent/writable planlarını ayrı doğrular; unsupported dtype, negatif
 rank, string mutability ve fazla generic argümanı dört deterministic rejection
 kategorisine ayırır. Runtime testi `__origin__`/`__args__` reflection'ını;
@@ -358,7 +358,7 @@ deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'
 
 Differential corpus: 332 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
-default/`gc_every=1` matrisinin sekiz koşusu da Python 3.14.6 oracle'ıyla geçmiştir.
+default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
 short-circuit, büyük integer/float karşılaştırması, bigint true division,
 subnormal ties-to-even, container alias/cycle, nested closure/cell mutation,
@@ -607,6 +607,16 @@ fixed tuple, set class'ı, kullanıcı class identity/version ve unsupported-val
 reason code'unu doğrular. Var olan `__annotations__` anahtarının değeri
 değiştirildiğinde structural dict epoch'u korunurken content epoch'u ve canonical
 plan hash'i değişir; lazy function cache yeni planla yenilenir.
+Bytes parser testi ham byte dizisinin Tonic-owned AST ve verified bytecode
+sabitinde Unicode metnine dönüşmeden korunduğunu doğrular. Runtime testleri
+literal/repr/truth/len, signed index, stepped slice, integer iteration,
+concat/repeat, lexicographic comparison, integer ve subsequence membership,
+constructor'ın count/list/tuple/range yolları, hash/dict key eşitliği ve
+`type`/`isinstance` davranışını interpreter/JIT ile her-allocation moving GC
+altında aynı çıktıyla çalıştırır. Negatif/256 byte, float eleman, negatif count
+ve geçersiz membership operandları deterministic guest exception üretir.
+TypePlan testi exact `bytes` ile tekrarları elenmiş `Literal[b'\\x00\\xff']`
+değerini canonical schema v8 planına dönüştürür.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size
@@ -733,7 +743,7 @@ atomik CALL deopt'unu; `inf`, `nan`, `-0.0` testi IEEE gözlenebilirliğini inte
 eşitliğiyle doğrular.
 Attribute interception tamamlandıktan sonra 274 Rust testi ile 290 stdout ve 116
 exception differential vakası debug/release olarak geçirildi. Sekiz differential
-koşunun tamamı interpreter/JIT × normal/stress-GC matrisinde Python 3.14.6 ile
+koşunun tamamı interpreter/JIT × normal/stress-GC matrisinde Python 3.15.0 ile
 eşleşti. Özel `__getattribute__` JIT testi direct-method profilinin hook'u
 atlamadığını, class version testi ise sonradan hook ekleme/silmenin quickened slot
 guard'ını düşürdüğünü doğrular.
@@ -749,7 +759,7 @@ metaclass dispatch'ini her-allocation stress GC altında kapsar. Büyük integer
 sonuçları kaynak sınırıyla kontrollü `MemoryError` üretir; bu opcode'lar native
 JIT kapsamı dışında kaldığında doğrulanmış exact-PC interpreter fallback'i
 kullanır. Debug/release × interpreter/JIT × normal/stress-GC
-differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+differential matrisinin sekiz koşusu Python 3.15.0 ile eşleşmiştir.
 Canonical builtin constructor aşamasında toplam 280 Rust testi ile 295 stdout ve
 130 exception differential vakasına ulaşıldı. `object.__init__`, native builtin
 `__new__` descriptor'ları, list/dict reinitialization, custom native subclass
@@ -757,7 +767,7 @@ Canonical builtin constructor aşamasında toplam 280 Rust testi ile 295 stdout 
 altında sınanır. Conversion continuation state'i class ve pending native finish
 değerlerini precise root olarak taşır; yanlış sonuç tipleri `TypeError` üretir.
 Debug/release × interpreter/JIT × normal/stress-GC matrisinin sekiz koşusu
-Python 3.14.6 ile eşleşmiştir.
+Python 3.15.0 ile eşleşmiştir.
 Index conversion aşamasında toplam 281 Rust testi ile 296 stdout ve 136 exception
 differential vakasına ulaşıldı. `range`, scalar/slice sequence erişimi, list
 set/delete, explicit int base ve length/truth yolları guest `__index__` metodunu
@@ -778,7 +788,7 @@ normal guest `__eq__`/truth frame'lerinden geçer. List/tuple/dict/slice nested
 equality, list/tuple lexicographic order, cyclic comparison sınırı ve exact-int
 JIT guard miss sonrası exact-PC continuation yolu kapsanır. Debug/release workspace,
 clippy ve interpreter/JIT × normal/stress-GC differential matrisinin sekiz koşusu
-Python 3.14.6 ile eşleşmiştir.
+Python 3.15.0 ile eşleşmiştir.
 
 Kimlik ve üyelik karşılaştırmaları aşamasında toplam 329 Rust testi ile 311
 stdout ve 164 exception differential vakasına ulaşıldı. Parser/compiler/verifier
@@ -788,7 +798,7 @@ truthiness, iterator ve equality continuation'larını, metaclass dispatch'ini v
 moving stress-GC köklerini doğrular. Cranelift `is`/`is not` işlemlerini doğrudan
 logical `Value` karşılaştırmasıyla üretir; genel üyelik açık desteklenmeyen-op
 sınırından interpreter'a düşer. Debug/release × interpreter/JIT × normal/stress-GC
-differential matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+differential matrisinin sekiz koşusu Python 3.15.0 ile eşleşmiştir.
 
 Senkron comprehension aşamasında toplam 334 Rust testi ile 312 stdout ve 166
 exception differential vakasına ulaşıldı. List/dict comprehension ve generator
@@ -799,7 +809,7 @@ class-scope görünürlüğünü ve suspended generator köklerini kapsar. Bytec
 append yolunu;
 public JIT testi ise comprehension code'unun açık generic-runtime fallback'ini
 doğrular. Debug/release × interpreter/JIT × normal/stress-GC differential
-matrisinin sekiz koşusu Python 3.14.6 ile eşleşmiştir.
+matrisinin sekiz koşusu Python 3.15.0 ile eşleşmiştir.
 
 User finalizer testi erişilemeyen `__del__` sahibi nesnelerin collector dışında
 bounded kuyrukla çalıştırılmasını, resurrection'ı, exactly-once çağrıyı ve
@@ -825,7 +835,7 @@ testi eager module/class kayıt sırasını, annotation-only missing binding'i,
 çalışmayan control-flow suite'inin boş metadata etkisini, attribute/subscript
 target yan etkilerini ve yalnız class annotation dict'inden erişilen bir sınıfın
 interpreter/JIT-caller × allocation-stress GC altında yaşamasını kapsar. Python
-3.14 differential vakaları ortak class sözlüğü, local binding ve karmaşık target
+3.15 differential vakaları ortak class sözlüğü, local binding ve karmaşık target
 davranışını karşılaştırır; Tonic'in eager annotation değerlendirmesi ADR 0084'te
 açıkça belgelenmiş dil tercihidir.
 
@@ -837,8 +847,10 @@ annotation ve gövde görünürlüğünü, nested lexical cell'i, ordinary bindi
 shadowing'ini, generic base çözümlemeyi, builtin/class/type-alias subscription ve
 class-alias construction'ı interpreter/JIT-caller × allocation-stress GC altında
 kapsar. Cranelift testi construction opkodlarının explicit generic fallback'te
-kaldığını doğrular. Python 3.14 differential vakaları aynı gözlemlenebilir çıktı
-ve shadowing hata sınıflarını karşılaştırır.
+kaldığını doğrular. Type alias `__module__` kimliği ve parametrik repr'i hem
+`__main__.Alias[int]` hem de `package.Alias[int]` biçiminde korunur. Python 3.15
+differential vakaları aynı gözlemlenebilir çıktı ve shadowing hata sınıflarını
+karşılaştırır.
 
 Python 3.13 type-parameter default dilimi bytecode v33
 `TYPE_PARAM_DEFAULT` operandlarını ve unpack modunu verifier'da sınar. Parser
@@ -848,7 +860,7 @@ AST/HIR yoluna girer. Runtime `typing.NoDefault` tekil kimliğini,
 `__default__`, starred tuple `__origin__`/`__args__`/`__unpacked__` metadata'sını
 ve generic sınıfın eksik trailing argümanlarını doğrular. Interpreter/JIT-caller
 × allocation-stress GC testi default graph'larının precise trace edildiğini;
-Python 3.14 differential vakası gözlenebilir metadata ve alias argümanlarını
+Python 3.15 differential vakası gözlenebilir metadata ve alias argümanlarını
 karşılaştırır. Tonic'in eager değerlendirme tercihi ADR 0093'te belgelenmiştir.
 
 PEP 649/749 incelemesi sonucunda Tonic 0.x için eager annotation sözleşmesi ADR
@@ -863,40 +875,40 @@ lowering'ini; runtime testi direct/reflected/in-place yolları, strict subclass
 önceliği, `NotImplemented` fallback'i, metaclass dispatch'i ve askıya alınan
 method frame'lerinin precise roots'unu JIT-caller × allocation-stress GC altında
 doğrular. Cranelift testi opkodun açık generic-runtime fallback'inde kaldığını;
-Python 3.14 differential vakaları gözlenebilir sonuç ve TypeError sınırını
+Python 3.15 differential vakaları gözlenebilir sonuç ve TypeError sınırını
 karşılaştırır.
 
 Class-subscription testi metaclass `__getitem__` önceliğini, plain ve explicit
 classmethod `__class_getitem__` binding'ini, inherited hook'ta dinamik subclass
 receiver'ını, generic class override'ını ve hook yokken managed `GenericAlias`
 fallback'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
-Python 3.14 differential vakası aynı gözlenebilir çağrı sırasını; hata vakası
+Python 3.15 differential vakası aynı gözlenebilir çağrı sırasını; hata vakası
 callable olmayan hook'un TypeError sınırını karşılaştırır.
 
 `divmod` testi native int/float sonuçlarını, suspending `__divmod__`, strict
 subclass `__rdivmod__` önceliği, `NotImplemented` fallback'i ve metaclass
 dispatch'ini interpreter/JIT-caller × allocation-stress GC altında doğrular.
-Python 3.14 differential vakaları aynı gözlenebilir sonuçları; sıfıra bölme,
+Python 3.15 differential vakaları aynı gözlenebilir sonuçları; sıfıra bölme,
 desteklenmeyen operand ve yanlış arity hata sınıflarını karşılaştırır.
 
 `round` testi global keyword binder'ını, doğrudan int/float `__round__`
 descriptor'larını, suspending kullanıcı/metaclass hook'unu ve `__index__`
 dönüşümünü interpreter/JIT-caller × allocation-stress GC altında doğrular.
 Exact ratio motoru decimal ties-to-even, bigint negatif basamak, signed zero,
-NaN/infinity ve overflow sınırlarını kapsar. Kalıcı Python 3.14 vakalarına ek
+NaN/infinity ve overflow sınırlarını kapsar. Kalıcı Python 3.15 vakalarına ek
 olarak seed'li 5.000 finite-f64/basamak ve 1.000 bigint/basamak birleşimi
 CPython'ın ürettiği sonuçlarla sıfır değer farkı vermiştir.
 
 `pow` testi iki/üç argümanlı ve positional/keyword çağrıları, explicit `None`,
 native int/float kuvvet, pozitif/negatif modulus, bool, BigInt, negatif üs ve
-modüler tersi kapsar. Suspended `__pow__`/`__rpow__`, Python 3.14 strict-subclass
+modüler tersi kapsar. Suspended `__pow__`/`__rpow__`, Python 3.15 strict-subclass
 ternary reflected önceliği, `NotImplemented`, metaclass ve native int-subclass
 fallback'i interpreter/JIT-caller × allocation-stress GC altında çalıştırılır.
 Kalıcı differential vakaları arity/binder, sıfır modulus, terslenemeyen taban ve
 integer olmayan ternary operand hata sınıflarını da CPython ile karşılaştırır.
 Seed 20261001 ile 1.000 nonnegative ve 500 terslenebilir negative-exponent
 BigInt/modulus birleşimi debug/release × interpreter/JIT/JIT+`gc_every=1`
-yollarında Python 3.14.6 ile toplam 9.000 sonuç karşılaştırmasında sıfır değer
+yollarında Python 3.15.0 ile toplam 9.000 sonuç karşılaştırmasında sıfır değer
 farkı vermiştir.
 
 Global `repr`/`ascii`/`format` testi user instance ve metaclass hook'larını,
@@ -905,7 +917,7 @@ escaping'i, native integer/float/string format-spec'lerini ve JIT caller dönü�
 interpreter/JIT × allocation-stress GC altında doğrular. F-string `!s`/`!r`/`!a`
 ve format-spec opkodları aynı alt yordamı kullanır; metaclass override'ları da bu
 yüzeyde karşılaştırılır. Differential hata vakaları positional-only arity,
-keyword reddi, string olmayan spec ve hook dönüşlerini Python 3.14 ile eşler.
+keyword reddi, string olmayan spec ve hook dönüşlerini Python 3.15 ile eşler.
 
 Global `sum` testi list/tuple/range, generator ve genel custom iterator'ları
 öğeleri materialize etmeden tüketir; explicit/keyword `start`, boş iterable,
@@ -914,7 +926,7 @@ sırasını kapsar. Suspended `__iter__`/`__next__` ile `__add__`/`__radd__`, st
 subclass önceliği, `NotImplemented`, iterator sınırındaki `StopIteration` tüketimi
 ve toplama içinden kaçan `StopIteration` interpreter/JIT-caller × allocation-
 stress GC altında doğrulanır. Seed 42 ile üretilen 160 yüksek dinamik aralıklı
-int/float dizisi Python 3.14'ün Neumaier compensated sonucuyla sıfır fark vermiştir.
+int/float dizisi Python 3.15'in Neumaier compensated sonucuyla sıfır fark vermiştir.
 Kalıcı interpreter ve Python-karşılaştırma benchmark'ları 1.000 öğelik integer ve
 float dizilerini 100 kez toplar; integer hızlı yolunda öğe başına guest allocation
 yoktur.
@@ -931,7 +943,7 @@ Native set dilimi bytecode v23 `SET`/`SET_ADD` operand doğrulamasını, duplica
 eleme ve collision'lı kullanıcı `__hash__`/`__eq__` çağrılarını, hash-aware
 üyelik/eşitlik, iteration, boş set gösterimi ile sync/async set comprehension'ı
 kapsar. Runtime testi interpreter/JIT-caller × allocation-stress GC altında
-precise eleman köklerini; differential çıktı/hata vakaları Python 3.14.6 ile
+precise eleman köklerini; differential çıktı/hata vakaları Python 3.15.0 ile
 gözlenebilir sonuçları ve unhashable set elemanı hatasını karşılaştırır.
 
 Structural matching dilimi bytecode v29 `MATCH_SEQUENCE`, `MATCH_MAPPING`,
@@ -949,7 +961,7 @@ verifier'da doğrular. Compiler/runtime testleri owned AST'yi, kaynak sırasın�
 nested dynamic spec'i, `!s`/`!r`/`!a`, Unicode string precision ve kullanıcı
 `__str__`/`__repr__`/`__format__` continuation'larını interpreter/JIT-caller ×
 allocation-stress GC altında kapsar. Kalıcı diferansiyel vaka sonuçları ve hata
-türlerini Python 3.14.6 ile karşılaştırır; ek deterministik format grid'i 216
+türlerini Python 3.15.0 ile karşılaştırır; ek deterministik format grid'i 216
 string/int/float birleşimini, seeded numeric tarama ise 2.684 sayı/spec
 birleşimini sıfır gözlenebilir farkla doğrulamıştır. Cranelift format opkodlarında
 açık generic-tier fallback uygular.
