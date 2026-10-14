@@ -3715,6 +3715,47 @@ fn annotation_jit_refines_optional_bool_float_union_and_call_results() {
 }
 
 #[test]
+fn annotation_jit_refines_three_way_numeric_union_and_call_results() {
+    let source = concat!(
+        "def preserve(value:int|bool|float)->int|bool|float:\n    return value\n",
+        "def normalize(value:int|bool|float)->int|float:\n",
+        "    selected=preserve(value)\n",
+        "    if isinstance(selected,float):\n        return selected+1.5\n",
+        "    return selected+1\n",
+        "def normalize_bool(value:int|bool|float)->int|float:\n",
+        "    if isinstance(value,bool):\n        return value+10\n",
+        "    if isinstance(value,float):\n        return value+0.5\n",
+        "    return value+100\n",
+        "def normalize_int(value:int|bool|float)->int|float:\n",
+        "    if isinstance(value,int):\n        return value+1000\n",
+        "    return value+0.25\n",
+        "print(normalize(False),normalize(True),normalize(4),normalize(2.0))\n",
+        "print(normalize_bool(False),normalize_bool(4),normalize_bool(2.0))\n",
+        "print(normalize_int(False),normalize_int(4),normalize_int(2.0))\n",
+        "try:\n    print(normalize('advisory'))\n",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+        "isinstance=lambda value,kind:False\n",
+        "print(normalize(2.0))",
+    );
+    let program = compile(source, "annotation-jit-three-way-numeric-union").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(
+        out,
+        b"1 2 5 3.5\n10 104 2.5\n1000 1004 2.25\nTypeError\n3.0\n"
+    );
+    assert!(vm.stats.jit_annotation_compiled >= 3, "{:?}", vm.stats);
+    assert!(vm.stats.jit_typed_type_test_sites >= 4);
+    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 3);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

@@ -259,6 +259,14 @@ olarak doğrular. Exact int/string annotation uyuşmazlığı ile builtin rebind
 generic Python semantiğine exact PC'de döner. Karar
 [ADR 0149](adr/0149-optional-bool-float-union-jit.md) içindedir.
 
+Üç numeric üyeyi birleştiren `int | bool | float` imzası da tamamlandı. Exact
+float testi true/false kenarlarını `Float` ve `IntOrBool`; exact bool testi
+`Bool` ve `IntOrFloat`; exact int testi ise Python'ın `bool <: int` kuralıyla
+`IntOrBool` ve `Float` olarak üretir. Giriş, arbitrary-PC resume ve guarded
+direct-call sonucu üç representation'ı exact guard eder. String gibi union dışı
+değerler ve builtin rebinding generic Python yürütmesine döner. Karar
+[ADR 0150](adr/0150-three-way-numeric-union-jit.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

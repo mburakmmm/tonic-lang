@@ -776,6 +776,33 @@ except TypeError as error:
 isinstance=lambda value,kind:False
 print(normalize_optional_bool_float(2.0))
 ''',
+'''def preserve_three_way_numeric(value:int|bool|float)->int|bool|float:
+    return value
+def normalize_three_way_numeric(value:int|bool|float)->int|float:
+    selected=preserve_three_way_numeric(value)
+    if isinstance(selected,float):
+        return selected+1.5
+    return selected+1
+def normalize_three_way_bool(value:int|bool|float)->int|float:
+    if isinstance(value,bool):
+        return value+10
+    if isinstance(value,float):
+        return value+0.5
+    return value+100
+def normalize_three_way_int(value:int|bool|float)->int|float:
+    if isinstance(value,int):
+        return value+1000
+    return value+0.25
+print(normalize_three_way_numeric(False),normalize_three_way_numeric(True),normalize_three_way_numeric(4),normalize_three_way_numeric(2.0))
+print(normalize_three_way_bool(False),normalize_three_way_bool(4),normalize_three_way_bool(2.0))
+print(normalize_three_way_int(False),normalize_three_way_int(4),normalize_three_way_int(2.0))
+try:
+    print(normalize_three_way_numeric("advisory"))
+except TypeError as error:
+    print(type(error).__name__)
+isinstance=lambda value,kind:False
+print(normalize_three_way_numeric(2.0))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

@@ -43,8 +43,8 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 39, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 168, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 478 test.
+native handles 5, language/runtime 169, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 479 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -356,7 +356,7 @@ function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
 deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
 `code-budget` kaydını ve limit açıklamasını doğrular.
 
-Differential corpus: 340 stdout vakası ve 261 exception türü vakası. Seed 42.
+Differential corpus: 341 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -676,6 +676,12 @@ için guard eder. Guarded call sonucu sonrası None identity kenarı
 None/False/True/2.0 girdileri 0/1/2/3.5 döndürür; exact int ve string advisory
 fallback'i, builtin rebinding sonrası generic 3.0 sonucu ve yanlış-tag PC 0
 deopt'u debug/release ile normal/stress-GC matrisinde doğrulanır.
+Üç yönlü numeric-union testi `int | bool | float` için exact int/bool/float
+girişini ve guarded call sonucunu doğrular. Float testi `Float/IntOrBool`, bool
+testi `Bool/IntOrFloat`, int testi Python `bool <: int` kuralıyla
+`IntOrBool/Float` edge'leri üretir. False/True/4/2.0 yolları native integer/F64
+sonuçlarını; string advisory fallback'i ve builtin rebinding generic 3.0
+sonucunu sekizli differential matrisinde korur.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

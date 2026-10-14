@@ -311,6 +311,7 @@ enum AnnotationScalar {
     IntOrFloatOrNone,
     BoolOrFloat,
     BoolOrFloatOrNone,
+    IntOrBoolOrFloat,
     IntOrBool,
     IntOrBoolOrNone,
     Buffer(BufferTypePlan),
@@ -2072,6 +2073,14 @@ impl Vm {
             | [TypePlan::None, TypePlan::Exact(ExactTypePlan::Float), TypePlan::Exact(ExactTypePlan::Bool)] => {
                 Some(AnnotationScalar::BoolOrFloatOrNone)
             }
+            [TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Float), TypePlan::Exact(ExactTypePlan::Int)]
+            | [TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Int), TypePlan::Exact(ExactTypePlan::Float)]
+            | [TypePlan::Exact(ExactTypePlan::Float), TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Int)]
+            | [TypePlan::Exact(ExactTypePlan::Float), TypePlan::Exact(ExactTypePlan::Int), TypePlan::Exact(ExactTypePlan::Bool)]
+            | [TypePlan::Exact(ExactTypePlan::Int), TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Float)]
+            | [TypePlan::Exact(ExactTypePlan::Int), TypePlan::Exact(ExactTypePlan::Float), TypePlan::Exact(ExactTypePlan::Bool)] => {
+                Some(AnnotationScalar::IntOrBoolOrFloat)
+            }
             [TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Int)] => {
                 Some(AnnotationScalar::IntOrBool)
             }
@@ -2256,6 +2265,11 @@ impl Vm {
                     || value.as_bool().is_some()
                     || matches!(self.heap.get(value), Ok(Object::Float(_)))
             }
+            AnnotationScalar::IntOrBoolOrFloat => {
+                value.as_int().is_some()
+                    || value.as_bool().is_some()
+                    || matches!(self.heap.get(value), Ok(Object::Float(_)))
+            }
             AnnotationScalar::IntOrBool => value.as_int().is_some() || value.as_bool().is_some(),
             AnnotationScalar::IntOrBoolOrNone => {
                 value == Value::NONE || value.as_int().is_some() || value.as_bool().is_some()
@@ -2320,6 +2334,11 @@ impl Vm {
                 value == Value::NONE
                     || value.as_bool().is_some()
                     || matches!(self.heap.get(value), Ok(Object::Float(_)))
+            }
+            AnnotationScalar::IntOrBoolOrFloat => {
+                value.as_int().is_some()
+                    || value.as_bool().is_some()
+                    || matches!(self.heap.get(value), Ok(Object::Int(_) | Object::Float(_)))
             }
             AnnotationScalar::IntOrBool => {
                 value.as_int().is_some()
@@ -9529,6 +9548,7 @@ impl Vm {
                 AnnotationScalar::IntOrFloatOrNone => tonic_jit::ScalarType::IntOrFloatOrNone,
                 AnnotationScalar::BoolOrFloat => tonic_jit::ScalarType::BoolOrFloat,
                 AnnotationScalar::BoolOrFloatOrNone => tonic_jit::ScalarType::BoolOrFloatOrNone,
+                AnnotationScalar::IntOrBoolOrFloat => tonic_jit::ScalarType::IntOrBoolOrFloat,
                 AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
                 AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
             };
@@ -9555,6 +9575,7 @@ impl Vm {
                                 | AnnotationScalar::IntOrFloatOrNone
                                 | AnnotationScalar::BoolOrFloat
                                 | AnnotationScalar::BoolOrFloatOrNone
+                                | AnnotationScalar::IntOrBoolOrFloat
                                 | AnnotationScalar::IntOrBool
                                 | AnnotationScalar::IntOrBoolOrNone
                         )
@@ -9572,6 +9593,7 @@ impl Vm {
                 AnnotationScalar::BoolOrFloatOrNone => {
                     Some(tonic_jit::ScalarType::BoolOrFloatOrNone)
                 }
+                AnnotationScalar::IntOrBoolOrFloat => Some(tonic_jit::ScalarType::IntOrBoolOrFloat),
                 AnnotationScalar::IntOrBool => Some(tonic_jit::ScalarType::IntOrBool),
                 AnnotationScalar::IntOrBoolOrNone => Some(tonic_jit::ScalarType::IntOrBoolOrNone),
                 AnnotationScalar::Dynamic
@@ -9638,6 +9660,7 @@ impl Vm {
                 | AnnotationScalar::IntOrFloatOrNone
                 | AnnotationScalar::BoolOrFloat
                 | AnnotationScalar::BoolOrFloatOrNone
+                | AnnotationScalar::IntOrBoolOrFloat
                 | AnnotationScalar::Bool
                 | AnnotationScalar::None
                 | AnnotationScalar::IntOrNone
@@ -10373,6 +10396,7 @@ impl Vm {
             AnnotationScalar::IntOrFloatOrNone => tonic_jit::ScalarType::IntOrFloatOrNone,
             AnnotationScalar::BoolOrFloat => tonic_jit::ScalarType::BoolOrFloat,
             AnnotationScalar::BoolOrFloatOrNone => tonic_jit::ScalarType::BoolOrFloatOrNone,
+            AnnotationScalar::IntOrBoolOrFloat => tonic_jit::ScalarType::IntOrBoolOrFloat,
             AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
             AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
         };
@@ -10709,6 +10733,7 @@ impl Vm {
                     AnnotationScalar::IntOrFloatOrNone => tonic_jit::ScalarType::IntOrFloatOrNone,
                     AnnotationScalar::BoolOrFloat => tonic_jit::ScalarType::BoolOrFloat,
                     AnnotationScalar::BoolOrFloatOrNone => tonic_jit::ScalarType::BoolOrFloatOrNone,
+                    AnnotationScalar::IntOrBoolOrFloat => tonic_jit::ScalarType::IntOrBoolOrFloat,
                     AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
                     AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
                 };

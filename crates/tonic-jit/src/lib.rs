@@ -363,6 +363,9 @@ pub enum ScalarType {
     /// A canonical `bool | float | None` annotation. Identity refinement
     /// removes `None` before an exact builtin type test selects bool or F64.
     BoolOrFloatOrNone,
+    /// A canonical `int | bool | float` annotation. Exact builtin type tests
+    /// refine it into an integer-like immediate union or an F64 state.
+    IntOrBoolOrFloat,
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
@@ -542,6 +545,7 @@ enum ScalarFact {
     IntOrFloatOrNone,
     BoolOrFloat,
     BoolOrFloatOrNone,
+    IntOrBoolOrFloat,
     IntOrBool,
     IntOrBoolOrNone,
     F64Buffer { rank: u32, writable: bool },
@@ -562,6 +566,7 @@ impl ScalarFact {
             ScalarType::IntOrFloatOrNone => Self::IntOrFloatOrNone,
             ScalarType::BoolOrFloat => Self::BoolOrFloat,
             ScalarType::BoolOrFloatOrNone => Self::BoolOrFloatOrNone,
+            ScalarType::IntOrBoolOrFloat => Self::IntOrBoolOrFloat,
             ScalarType::IntOrBool => Self::IntOrBool,
             ScalarType::IntOrBoolOrNone => Self::IntOrBoolOrNone,
             ScalarType::F64Buffer { rank, writable } => Self::F64Buffer { rank, writable },
@@ -607,6 +612,16 @@ impl ScalarFact {
                     | Self::FloatOrNone
                     | Self::BoolOrFloat
                     | Self::BoolOrFloatOrNone
+            ),
+            ScalarType::IntOrBoolOrFloat => matches!(
+                self,
+                Self::Int
+                    | Self::Bool
+                    | Self::Float
+                    | Self::IntOrBool
+                    | Self::IntOrFloat
+                    | Self::BoolOrFloat
+                    | Self::IntOrBoolOrFloat
             ),
             ScalarType::IntOrBool => matches!(self, Self::Int | Self::Bool | Self::IntOrBool),
             ScalarType::IntOrBoolOrNone => matches!(
@@ -698,6 +713,27 @@ impl ScalarFact {
             && matches!(incoming, Self::Int | Self::Bool | Self::IntOrBool)
         {
             return Self::IntOrBool;
+        }
+        if matches!(
+            self,
+            Self::Int
+                | Self::Bool
+                | Self::Float
+                | Self::IntOrBool
+                | Self::IntOrFloat
+                | Self::BoolOrFloat
+                | Self::IntOrBoolOrFloat
+        ) && matches!(
+            incoming,
+            Self::Int
+                | Self::Bool
+                | Self::Float
+                | Self::IntOrBool
+                | Self::IntOrFloat
+                | Self::BoolOrFloat
+                | Self::IntOrBoolOrFloat
+        ) {
+            return Self::IntOrBoolOrFloat;
         }
         if matches!(
             self,
@@ -902,6 +938,15 @@ fn refine_guarded_type_test_branch(
         }
         (TypeTestKind::Bool, ScalarFact::BoolOrFloatOrNone) => {
             (ScalarFact::Bool, ScalarFact::FloatOrNone)
+        }
+        (TypeTestKind::Float, ScalarFact::IntOrBoolOrFloat) => {
+            (ScalarFact::Float, ScalarFact::IntOrBool)
+        }
+        (TypeTestKind::Bool, ScalarFact::IntOrBoolOrFloat) => {
+            (ScalarFact::Bool, ScalarFact::IntOrFloat)
+        }
+        (TypeTestKind::Int, ScalarFact::IntOrBoolOrFloat) => {
+            (ScalarFact::IntOrBool, ScalarFact::Float)
         }
         _ => return None,
     };
@@ -1587,6 +1632,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                         | ScalarType::IntOrFloatOrNone
                         | ScalarType::BoolOrFloat
                         | ScalarType::BoolOrFloatOrNone
+                        | ScalarType::IntOrBoolOrFloat
                 )
             })
     }) || call_results.iter().any(|summary| {
@@ -1597,6 +1643,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                 | ScalarType::IntOrFloatOrNone
                 | ScalarType::BoolOrFloat
                 | ScalarType::BoolOrFloatOrNone
+                | ScalarType::IntOrBoolOrFloat
         )
     }) || direct_calls.iter().any(|call| {
         matches!(
@@ -1606,7 +1653,8 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                     | ScalarType::IntOrFloat
                     | ScalarType::IntOrFloatOrNone
                     | ScalarType::BoolOrFloat
-                    | ScalarType::BoolOrFloatOrNone,
+                    | ScalarType::BoolOrFloatOrNone
+                    | ScalarType::IntOrBoolOrFloat,
             )
         )
     });
@@ -3348,6 +3396,7 @@ fn validate_guarded_call_results(
                 | ScalarType::IntOrFloatOrNone
                 | ScalarType::BoolOrFloat
                 | ScalarType::BoolOrFloatOrNone
+                | ScalarType::IntOrBoolOrFloat
                 | ScalarType::IntOrBool
                 | ScalarType::IntOrBoolOrNone
         ) {
@@ -4464,6 +4513,7 @@ fn analyze_typed_scalar_execution(
                     | ScalarFact::IntOrFloatOrNone
                     | ScalarFact::BoolOrFloat
                     | ScalarFact::BoolOrFloatOrNone
+                    | ScalarFact::IntOrBoolOrFloat
                     | ScalarFact::IntOrBoolOrNone
                     | ScalarFact::F64Buffer { .. } => ScalarFact::Unknown,
                 };
@@ -4938,6 +4988,7 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::IntOrFloatOrNone
         | ScalarFact::BoolOrFloat
         | ScalarFact::BoolOrFloatOrNone
+        | ScalarFact::IntOrBoolOrFloat
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached integer lowering")
@@ -5207,6 +5258,7 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::IntOrFloatOrNone
         | ScalarFact::BoolOrFloat
         | ScalarFact::BoolOrFloatOrNone
+        | ScalarFact::IntOrBoolOrFloat
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached truth lowering")
@@ -5508,6 +5560,7 @@ fn emit_typed_scalar_entry_guards(
             ScalarFact::IntOrFloatOrNone,
             ScalarFact::BoolOrFloat,
             ScalarFact::BoolOrFloatOrNone,
+            ScalarFact::IntOrBoolOrFloat,
             ScalarFact::IntOrBool,
             ScalarFact::IntOrBoolOrNone,
         ] {
@@ -5640,6 +5693,25 @@ fn emit_typed_scalar_entry_guards(
                     inspect_registers = checked_registers;
                     let scalar = builder.ins().bor(boolean, float);
                     builder.ins().bor(scalar, none)
+                }
+                ScalarFact::IntOrBoolOrFloat => {
+                    let integer = exact_int(builder, raw);
+                    let boolean = exact_bool(builder, raw);
+                    let (checked_registers, float) = emit_exact_float_check(
+                        builder,
+                        inspect_registers,
+                        raw,
+                        start_pc,
+                        float_scratch.expect("int-bool-float union guard scratch slot"),
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                        pointer_type,
+                    );
+                    inspect_registers = checked_registers;
+                    let immediate = builder.ins().bor(integer, boolean);
+                    builder.ins().bor(immediate, float)
                 }
                 ScalarFact::IntOrBool => {
                     let integer = exact_int(builder, raw);
@@ -7975,6 +8047,7 @@ mod tests {
                 | ScalarFact::IntOrFloatOrNone
                 | ScalarFact::BoolOrFloat
                 | ScalarFact::BoolOrFloatOrNone
+                | ScalarFact::IntOrBoolOrFloat
                 | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
@@ -8070,6 +8143,7 @@ mod tests {
                 | ScalarFact::IntOrFloatOrNone
                 | ScalarFact::BoolOrFloat
                 | ScalarFact::BoolOrFloatOrNone
+                | ScalarFact::IntOrBoolOrFloat
                 | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
