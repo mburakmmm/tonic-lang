@@ -122,6 +122,7 @@ pub struct Stats {
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
     pub jit_typed_call_result_sites: u64,
+    pub jit_typed_type_test_sites: u64,
     pub jit_f64_buffer_parameters: u64,
     pub jit_f64_buffer_item_sites: u64,
     pub jit_f64_buffer_bounds_elided_sites: u64,
@@ -9622,6 +9623,95 @@ impl Vm {
         (calls, dependencies, guarded_results)
     }
 
+    fn jit_static_global_value(
+        &self,
+        code: &tonic_core::bytecode::CodeObject,
+        mut register: u16,
+        mut before: usize,
+    ) -> Option<Value> {
+        while before > 0 {
+            let writer_pc = code.instructions[..before]
+                .iter()
+                .rposition(|instruction| {
+                    instruction.a == register
+                        && !matches!(
+                            Op::try_from(instruction.opcode),
+                            Ok(Op::Jump
+                                | Op::JumpFalse
+                                | Op::JumpTrue
+                                | Op::Return
+                                | Op::SetItem
+                                | Op::BeginArgs
+                                | Op::ArgPos
+                                | Op::ArgStar
+                                | Op::ArgNamed
+                                | Op::ArgMapping)
+                        )
+                })?;
+            let writer = code.instructions[writer_pc];
+            match Op::try_from(writer.opcode) {
+                Ok(Op::Move) => {
+                    register = writer.b;
+                    before = writer_pc;
+                }
+                Ok(Op::LoadGlobal) => {
+                    let symbol = usize::from(writer.b);
+                    return self
+                        .globals
+                        .get(symbol)
+                        .copied()
+                        .filter(|value| *value != Value::UNBOUND);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn jit_annotation_type_tests(
+        &self,
+        program: &Program,
+        code_id: usize,
+    ) -> Vec<tonic_jit::GuardedTypeTest> {
+        let code = &program.code[code_id];
+        code.instructions
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(pc, instruction)| {
+                if Op::try_from(instruction.opcode) != Ok(Op::Call) {
+                    return None;
+                }
+                let site = code.calls.get(instruction.c as usize)?;
+                if site.count != 2 || !site.keywords.is_empty() {
+                    return None;
+                }
+                let callee = self.jit_static_global_value(code, instruction.b, pc)?;
+                if !matches!(
+                    self.heap.get(callee),
+                    Ok(Object::Builtin(Builtin::IsInstance))
+                ) {
+                    return None;
+                }
+                let type_register = site.first.checked_add(1)?;
+                let type_object = self.jit_static_global_value(code, type_register, pc)?;
+                let kind = if type_object == self.runtime_types.bool_ {
+                    tonic_jit::TypeTestKind::Bool
+                } else if type_object == self.runtime_types.int {
+                    tonic_jit::TypeTestKind::Int
+                } else {
+                    return None;
+                };
+                Some(tonic_jit::GuardedTypeTest {
+                    pc,
+                    callee: callee.raw(),
+                    type_object: type_object.raw(),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
     fn jit_direct_call_profile_pending(&self, program: &Program, code_id: usize) -> bool {
         if !self.jit_direct_call_inlining {
             return false;
@@ -10153,6 +10243,7 @@ impl Vm {
     ) -> bool {
         let (direct_calls, dependencies, guarded_call_results) =
             self.jit_annotation_direct_calls(program, code_id, None, &annotation);
+        let guarded_type_tests = self.jit_annotation_type_tests(program, code_id);
         annotation.callees = dependencies;
         let exact_float_parameters = annotation
             .parameters
@@ -10208,13 +10299,14 @@ impl Vm {
                 value: self.constants[code_id][instruction.b as usize].raw(),
             })
             .collect::<Vec<_>>();
-        match tonic_jit::compile_with_execution_profile_types_and_call_results(
+        match tonic_jit::compile_with_execution_profile_types_call_results_and_type_tests(
             &program.code[code_id],
             &direct_calls,
             &materialized_constants,
             &exact_float_parameters,
             Some(&typed_signature),
             &guarded_call_results,
+            &guarded_type_tests,
         ) {
             Ok(compiled) => {
                 let metadata = compiled.metadata();
@@ -10252,6 +10344,7 @@ impl Vm {
                 self.stats.jit_typed_return_guards_elided +=
                     u64::from(metadata.typed_return_proven);
                 self.stats.jit_typed_call_result_sites += metadata.typed_call_result_sites as u64;
+                self.stats.jit_typed_type_test_sites += metadata.typed_type_test_sites as u64;
                 self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
                 self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
                 self.stats.jit_f64_buffer_bounds_elided_sites +=
@@ -10450,6 +10543,7 @@ impl Vm {
             self.stats.jit_compile_attempts += 1;
             let mut direct_calls = self.jit_direct_calls(program, code_id);
             let mut guarded_call_results = Vec::new();
+            let mut guarded_type_tests = Vec::new();
             if let Some(annotation) = &mut annotation {
                 let (annotation_calls, dependencies, annotation_results) =
                     self.jit_annotation_direct_calls(program, code_id, Some(base), annotation);
@@ -10465,6 +10559,7 @@ impl Vm {
                 }
                 annotation.callees = dependencies;
                 guarded_call_results = annotation_results;
+                guarded_type_tests = self.jit_annotation_type_tests(program, code_id);
             }
             let exact_float_parameters = annotation.as_ref().map_or_else(
                 || {
@@ -10536,13 +10631,14 @@ impl Vm {
                     value: self.constants[code_id][instruction.b as usize].raw(),
                 })
                 .collect::<Vec<_>>();
-            match tonic_jit::compile_with_execution_profile_types_and_call_results(
+            match tonic_jit::compile_with_execution_profile_types_call_results_and_type_tests(
                 &program.code[code_id],
                 &direct_calls,
                 &materialized_constants,
                 &exact_float_parameters,
                 typed_signature.as_ref(),
                 &guarded_call_results,
+                &guarded_type_tests,
             ) {
                 Ok(compiled) => {
                     let metadata = compiled.metadata();
@@ -10586,6 +10682,7 @@ impl Vm {
                         u64::from(annotation.is_some() && metadata.typed_return_proven);
                     self.stats.jit_typed_call_result_sites +=
                         metadata.typed_call_result_sites as u64;
+                    self.stats.jit_typed_type_test_sites += metadata.typed_type_test_sites as u64;
                     self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
                     self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
                     self.stats.jit_f64_buffer_bounds_elided_sites +=

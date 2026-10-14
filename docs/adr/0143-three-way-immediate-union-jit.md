@@ -36,6 +36,7 @@ first call and keep non-None arithmetic native. A value outside the annotation
 fails the entry or resume guard and executes the ordinary generic semantics; no
 runtime type error is introduced by the annotation.
 
-This decision does not claim general union narrowing. Heap-backed unions such as
-`int | float`, builtin-rebinding-safe `isinstance` narrowing, and user-class
-shape refinement remain separate roadmap work.
+This decision does not claim general union narrowing. ADR 0144 adds
+builtin-rebinding-safe `isinstance` narrowing for immediate unions; heap-backed
+unions such as `int | float` and user-class shape refinement remain separate
+roadmap work.

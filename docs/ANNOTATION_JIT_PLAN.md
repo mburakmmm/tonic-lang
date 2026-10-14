@@ -193,6 +193,16 @@ guard tekrarına gerek kalmadan çalışır. Yanlış annotation girdisi normal 
 semantiğe döner; karar [ADR 0143](adr/0143-three-way-immediate-union-jit.md)
 içindedir.
 
+Exact builtin `isinstance(value, bool)` ve `isinstance(value, int)` çağrıları da
+immediate union branch'lerini daraltabilir. Çağrının kendisi generic VM sınırında
+Python semantiğiyle çalışır; successor PC'deki native resume girişi, materialize
+edilmiş callee ile type-object logical handle'larını derleme anındaki exact
+değerlerle karşılaştırmadan sonucu typed fact olarak kullanmaz. `isinstance`
+veya type global'i yeniden bağlanırsa hesaplanmış bool sonuç korunur, JIT aynı
+successor PC'de deopt eder ve branch generic yürür. `int` testi Python'ın
+`bool <: int` ilişkisini korur. Karar
+[ADR 0144](adr/0144-guarded-isinstance-union-narrowing.md) içindedir.
+
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve
@@ -213,8 +223,8 @@ Immutable bytes literal/runtime/constructor/container davranışı ile exact byt
 ve `Literal[bytes]` canonical planı [ADR 0142](adr/0142-immutable-bytes-type-plan.md)
 içindedir. Bytes heap-backed managed değer olarak kalır; planın varlığı tek başına
 unboxed scalar JIT ABI'si oluşturmaz. Ek gerçek storage dtype'ları, strict
-`tonic.types`, giriş ötesindeki loop guard'ları ve union narrowing/branch
-refinement sonraki genişleme dilimleridir.
+`tonic.types`, giriş ötesindeki loop guard'ları ve heap-backed/user-class union
+narrowing sonraki genişleme dilimleridir.
 Concrete buffer planı annotation-JIT parametre kapısına da bağlıdır. Exact native
 buffer object kind ve `f64` storage doğrulanır; planda mevcutsa rank ve mutability
 da kontrol edilir. Buffer tagged managed root olarak kaldığı için scalar ABI'ye

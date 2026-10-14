@@ -312,6 +312,9 @@ pub struct Metadata {
     pub typed_return_proven: bool,
     /// Direct-call results imported from guarded annotation summaries.
     pub typed_call_result_sites: usize,
+    /// Exact builtin `isinstance` sites that refine an immediate union after a
+    /// guarded generic-call resume.
+    pub typed_type_test_sites: usize,
     /// Exact f64 buffer parameters materialized into ephemeral native views.
     pub f64_buffer_parameters: usize,
     /// ITEM instructions lowered to guarded direct f64 loads.
@@ -440,6 +443,23 @@ pub struct DirectCall<'a> {
 pub struct GuardedCallResult {
     pub pc: usize,
     pub result: ScalarType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeTestKind {
+    Int,
+    Bool,
+}
+
+/// One exact builtin `isinstance(value, type)` call used for branch refinement.
+/// The generated resume entry compares the materialized callee and type-object
+/// words with these logical values before trusting Python's builtin semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardedTypeTest {
+    pub pc: usize,
+    pub callee: u64,
+    pub type_object: u64,
+    pub kind: TypeTestKind,
 }
 
 /// Runtime-materialized value for a non-immediate CONST instruction. The word
@@ -701,6 +721,83 @@ fn refine_optional_identity_branch(
     }
     if comparison_op == Op::IsNot {
         std::mem::swap(&mut is_true, &mut is_false);
+    }
+    Some((is_true, is_false))
+}
+
+fn refine_guarded_type_test_branch(
+    code: &CodeObject,
+    block_starts: &[bool],
+    branch_pc: usize,
+    condition: u16,
+    state: &[ScalarFact],
+    type_tests: &[GuardedTypeTest],
+) -> Option<(Vec<ScalarFact>, Vec<ScalarFact>)> {
+    let block_start = block_starts[..=branch_pc]
+        .iter()
+        .rposition(|start| *start)?;
+    let (call_pc, call) = code.instructions[block_start..branch_pc]
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find(|(_, instruction)| instruction_writes_a(*instruction) && instruction.a == condition)
+        .map(|(offset, instruction)| (block_start + offset, instruction))?;
+    if Op::try_from(call.opcode) != Ok(Op::Call) {
+        return None;
+    }
+    let test = type_tests.iter().find(|test| test.pc == call_pc)?;
+    let site = &code.calls[call.c as usize];
+    let value_register = site.first;
+    let original = state[value_register as usize];
+    let (true_fact, false_fact) = match (test.kind, original) {
+        (TypeTestKind::Bool, ScalarFact::IntOrBool) => (ScalarFact::Bool, ScalarFact::Int),
+        (TypeTestKind::Bool, ScalarFact::BoolOrNone) => (ScalarFact::Bool, ScalarFact::None),
+        (TypeTestKind::Bool, ScalarFact::IntOrBoolOrNone) => {
+            (ScalarFact::Bool, ScalarFact::IntOrNone)
+        }
+        (TypeTestKind::Int, ScalarFact::IntOrNone) => (ScalarFact::Int, ScalarFact::None),
+        (TypeTestKind::Int, ScalarFact::BoolOrNone) => (ScalarFact::Bool, ScalarFact::None),
+        (TypeTestKind::Int, ScalarFact::IntOrBoolOrNone) => {
+            (ScalarFact::IntOrBool, ScalarFact::None)
+        }
+        _ => return None,
+    };
+    let mut aliases = vec![value_register];
+    let mut register = value_register;
+    let mut before_pc = call_pc;
+    while aliases.len() <= state.len() {
+        let writer = code.instructions[block_start..before_pc]
+            .iter()
+            .copied()
+            .enumerate()
+            .rev()
+            .find(|(_, instruction)| instruction.a == register);
+        let Some((offset, writer)) = writer else {
+            break;
+        };
+        if Op::try_from(writer.opcode) != Ok(Op::Move) || aliases.contains(&writer.b) {
+            break;
+        }
+        let writer_pc = block_start + offset;
+        if code.instructions[writer_pc + 1..call_pc]
+            .iter()
+            .any(|instruction| instruction.a == writer.b)
+        {
+            break;
+        }
+        register = writer.b;
+        aliases.push(register);
+        before_pc = writer_pc;
+    }
+    let mut is_true = state.to_vec();
+    let mut is_false = state.to_vec();
+    for register in aliases {
+        let slot = register as usize;
+        if state[slot] == original {
+            is_true[slot] = true_fact;
+            is_false[slot] = false_fact;
+        }
     }
     Some((is_true, is_false))
 }
@@ -1189,7 +1286,7 @@ pub fn typed_return_is_proven_with_call_results(
         return Ok(false);
     }
     validate_guarded_call_results(code, &[], call_results)?;
-    Ok(analyze_typed_scalar_execution(code, signature, &[], call_results)?.return_proven)
+    Ok(analyze_typed_scalar_execution(code, signature, &[], call_results, &[])?.return_proven)
 }
 
 pub fn compile_with_execution_profile_and_types(
@@ -1217,10 +1314,30 @@ pub fn compile_with_execution_profile_types_and_call_results(
     typed_signature: Option<&TypedSignature>,
     call_results: &[GuardedCallResult],
 ) -> Result<CompiledFunction, Error> {
+    compile_with_execution_profile_types_call_results_and_type_tests(
+        code,
+        direct_calls,
+        materialized_constants,
+        exact_float_parameters,
+        typed_signature,
+        call_results,
+        &[],
+    )
+}
+
+pub fn compile_with_execution_profile_types_call_results_and_type_tests(
+    code: &CodeObject,
+    direct_calls: &[DirectCall<'_>],
+    materialized_constants: &[MaterializedConstant],
+    exact_float_parameters: &[u16],
+    typed_signature: Option<&TypedSignature>,
+    call_results: &[GuardedCallResult],
+    type_tests: &[GuardedTypeTest],
+) -> Result<CompiledFunction, Error> {
     validate_structural_safety(code)?;
-    if typed_signature.is_none() && !call_results.is_empty() {
+    if typed_signature.is_none() && (!call_results.is_empty() || !type_tests.is_empty()) {
         return Err(Error::Backend(
-            "guarded call results require a typed signature".into(),
+            "guarded call facts require a typed signature".into(),
         ));
     }
     for direct in direct_calls {
@@ -1281,6 +1398,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
         .unwrap_or_default();
     validate_direct_calls(code, direct_calls)?;
     validate_guarded_call_results(code, direct_calls, call_results)?;
+    validate_guarded_type_tests(code, direct_calls, call_results, type_tests)?;
     validate_materialized_constants(code, materialized_constants)?;
     let exact_f64_buffer_registers = exact_f64_buffer_parameters
         .iter()
@@ -1311,7 +1429,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
     )?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
-            analyze_typed_scalar_execution(code, signature, direct_calls, call_results)
+            analyze_typed_scalar_execution(code, signature, direct_calls, call_results, type_tests)
         })
         .transpose()?;
     const METHOD_CACHE_WORDS: usize = 4;
@@ -1477,6 +1595,14 @@ pub fn compile_with_execution_profile_types_and_call_results(
             let interval = builder.ins().iconst(types::I64, BACKEDGE_POLL_INTERVAL);
             builder.ins().stack_store(interval, slot, 0);
         }
+        registers = emit_guarded_type_test_resume_guards(
+            &mut builder,
+            code,
+            registers,
+            start_pc,
+            type_tests,
+            pointer_type,
+        );
         if let Some(analysis) = &typed_scalar_analysis {
             registers = emit_typed_scalar_entry_guards(
                 &mut builder,
@@ -2470,6 +2596,7 @@ pub fn compile_with_execution_profile_types_and_call_results(
                 .filter(|call| call.result.is_some())
                 .count()
                 + call_results.len(),
+            typed_type_test_sites: type_tests.len(),
             f64_buffer_parameters: exact_f64_buffer_parameters.len(),
             f64_buffer_item_sites: float_analysis.as_ref().map_or(0, |analysis| {
                 analysis.buffer_load_source.iter().flatten().count()
@@ -3012,6 +3139,55 @@ fn validate_guarded_call_results(
                 "guarded and direct call results overlap at bytecode PC {}",
                 summary.pc
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_guarded_type_tests(
+    code: &CodeObject,
+    direct_calls: &[DirectCall<'_>],
+    call_results: &[GuardedCallResult],
+    type_tests: &[GuardedTypeTest],
+) -> Result<(), Error> {
+    for (index, test) in type_tests.iter().enumerate() {
+        if type_tests[..index]
+            .iter()
+            .any(|previous| previous.pc == test.pc)
+        {
+            return Err(Error::Backend(format!(
+                "duplicate guarded type test at bytecode PC {}",
+                test.pc
+            )));
+        }
+        let Some(instruction) = code.instructions.get(test.pc) else {
+            return Err(Error::Backend(format!(
+                "guarded type-test PC {} is outside the caller",
+                test.pc
+            )));
+        };
+        if Op::try_from(instruction.opcode) != Ok(Op::Call) {
+            return Err(Error::Backend(format!(
+                "guarded type-test PC {} is not an ordinary CALL",
+                test.pc
+            )));
+        }
+        let site = &code.calls[instruction.c as usize];
+        let positional_end = site.first.checked_add(site.count);
+        if site.count != 2
+            || !site.keywords.is_empty()
+            || positional_end.is_none_or(|end| end > code.registers)
+            || test.pc + 1 >= code.instructions.len()
+            || test.callee == VALUE_UNBOUND
+            || test.type_object == VALUE_UNBOUND
+            || direct_calls.iter().any(|direct| direct.pc == test.pc)
+            || call_results.iter().any(|result| result.pc == test.pc)
+        {
+            return Err(unsupported(
+                test.pc,
+                Some(Op::Call),
+                "guarded type test is not an exact two-positional-argument builtin call",
+            ));
         }
     }
     Ok(())
@@ -3840,6 +4016,7 @@ fn analyze_typed_scalar_execution(
     signature: &TypedSignature,
     direct_calls: &[DirectCall<'_>],
     call_results: &[GuardedCallResult],
+    type_tests: &[GuardedTypeTest],
 ) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
     let block_starts = typed_block_starts(code);
@@ -3961,17 +4138,21 @@ fn analyze_typed_scalar_execution(
             }
             Op::SetItem => {}
             Op::Call => {
-                after[instruction.a as usize] = call_results
-                    .iter()
-                    .find(|summary| summary.pc == pc)
-                    .map(|summary| summary.result)
-                    .or_else(|| {
-                        direct_calls
-                            .iter()
-                            .find(|call| call.pc == pc)
-                            .and_then(|call| call.result)
-                    })
-                    .map_or(ScalarFact::Unknown, ScalarFact::from_signature);
+                after[instruction.a as usize] = if type_tests.iter().any(|test| test.pc == pc) {
+                    ScalarFact::Bool
+                } else {
+                    call_results
+                        .iter()
+                        .find(|summary| summary.pc == pc)
+                        .map(|summary| summary.result)
+                        .or_else(|| {
+                            direct_calls
+                                .iter()
+                                .find(|call| call.pc == pc)
+                                .and_then(|call| call.result)
+                        })
+                        .map_or(ScalarFact::Unknown, ScalarFact::from_signature)
+                };
             }
             Op::LoadGlobal | Op::Attr | Op::CallExpanded => {
                 after[instruction.a as usize] = ScalarFact::Unknown;
@@ -3998,6 +4179,16 @@ fn analyze_typed_scalar_execution(
             Op::JumpFalse | Op::JumpTrue => {
                 let (is_true, is_false) =
                     refine_optional_identity_branch(code, &block_starts, pc, instruction.a, &after)
+                        .or_else(|| {
+                            refine_guarded_type_test_branch(
+                                code,
+                                &block_starts,
+                                pc,
+                                instruction.a,
+                                &after,
+                                type_tests,
+                            )
+                        })
                         .unwrap_or_else(|| (after.clone(), after));
                 let (target, fallthrough) = if op == Op::JumpTrue {
                     (is_true, is_false)
@@ -4803,6 +4994,64 @@ fn runtime_guard_dynamic_pc(
     builder.ins().return_(&[status]);
     builder.switch_to_block(pass);
     builder.block_params(pass)[0]
+}
+
+fn emit_guarded_type_test_resume_guards(
+    builder: &mut FunctionBuilder<'_>,
+    code: &CodeObject,
+    mut registers: Value,
+    start_pc: Value,
+    type_tests: &[GuardedTypeTest],
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    for test in type_tests {
+        let instruction = code.instructions[test.pc];
+        let site = &code.calls[instruction.c as usize];
+        let resume_pc = test.pc + 1;
+        let needed = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, start_pc, resume_pc as i64);
+        let inspect = builder.create_block();
+        builder.append_block_param(inspect, pointer_type);
+        let skip = builder.create_block();
+        builder.append_block_param(skip, pointer_type);
+        let next = builder.create_block();
+        builder.append_block_param(next, pointer_type);
+        builder
+            .ins()
+            .brif(needed, inspect, &[registers], skip, &[registers]);
+
+        builder.switch_to_block(inspect);
+        let inspect_registers = builder.block_params(inspect)[0];
+        let callee = load(builder, inspect_registers, instruction.b);
+        let type_object = load(builder, inspect_registers, site.first + 1);
+        let callee_matches = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, callee, test.callee as i64);
+        let type_matches =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, type_object, test.type_object as i64);
+        let exact = builder.ins().band(callee_matches, type_matches);
+        let valid = builder.create_block();
+        builder.append_block_param(valid, pointer_type);
+        let invalid = builder.create_block();
+        builder
+            .ins()
+            .brif(exact, valid, &[inspect_registers], invalid, &[]);
+        builder.switch_to_block(invalid);
+        builder.ins().return_(&[start_pc]);
+        builder.switch_to_block(valid);
+        let valid_registers = builder.block_params(valid)[0];
+        builder.ins().jump(next, &[valid_registers]);
+
+        builder.switch_to_block(skip);
+        let skip_registers = builder.block_params(skip)[0];
+        builder.ins().jump(next, &[skip_registers]);
+        builder.switch_to_block(next);
+        registers = builder.block_params(next)[0];
+    }
+    registers
 }
 
 fn emit_typed_scalar_entry_guards(
@@ -6369,7 +6618,7 @@ mod tests {
         let add = loop_code.instructions[add_pc];
         let mut loop_registers = vec![VALUE_UNBOUND; loop_compiled.metadata().root_count];
         let loop_analysis =
-            analyze_typed_scalar_execution(loop_code, &loop_signature, &[], &[]).unwrap();
+            analyze_typed_scalar_execution(loop_code, &loop_signature, &[], &[], &[]).unwrap();
         for (register, fact) in loop_analysis.before[add_pc]
             .as_ref()
             .expect("reachable refined loop add")
@@ -6415,6 +6664,115 @@ mod tests {
             },
         )
         .unwrap());
+    }
+
+    #[test]
+    fn guarded_builtin_type_test_refines_union_and_checks_resume_identity() {
+        let program = function(
+            "def normalize(value):\n    if isinstance(value,bool):\n        return value+1\n    if value is None:\n        return 0\n    return value+1",
+        );
+        let code = &program.program().code[1];
+        let call_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("isinstance call");
+        let call = code.instructions[call_pc];
+        let site = &code.calls[call.c as usize];
+        let callee = 0x1234_5678_u64;
+        let type_object = 0x8765_4321_u64;
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrBoolOrNone],
+            result: ScalarType::Int,
+        };
+        let type_tests = [GuardedTypeTest {
+            pc: call_pc,
+            callee,
+            type_object,
+            kind: TypeTestKind::Bool,
+        }];
+        let analysis =
+            analyze_typed_scalar_execution(code, &signature, &[], &[], &type_tests).unwrap();
+        let compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+            code,
+            &[],
+            &[],
+            &[],
+            Some(&signature),
+            &[],
+            &type_tests,
+        )
+        .unwrap();
+        assert!(compiled.metadata().typed_return_proven);
+        assert_eq!(compiled.metadata().typed_type_test_sites, 1);
+        assert!(compiled.metadata().typed_int_guard_elisions >= 2);
+
+        let resume_pc = call_pc + 1;
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        for (register, fact) in analysis.before[resume_pc]
+            .as_ref()
+            .expect("reachable isinstance successor")
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            registers[register] = match fact {
+                ScalarFact::Int => encode_i64(1),
+                ScalarFact::Bool => VALUE_TRUE as u64,
+                ScalarFact::None => VALUE_NONE,
+                ScalarFact::IntOrNone => encode_i64(1),
+                ScalarFact::BoolOrNone => VALUE_TRUE as u64,
+                ScalarFact::IntOrBool => VALUE_TRUE as u64,
+                ScalarFact::IntOrBoolOrNone => VALUE_TRUE as u64,
+                ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {
+                    VALUE_UNBOUND
+                }
+            };
+        }
+        registers[0] = VALUE_TRUE as u64;
+        registers[call.b as usize] = callee;
+        registers[(site.first + 1) as usize] = type_object;
+        registers[call.a as usize] = VALUE_TRUE as u64;
+        let Outcome::Returned { value, .. } = compiled
+            .run_from(&mut registers, resume_pc, &mut UnavailableRuntime)
+            .unwrap()
+        else {
+            panic!("guarded builtin type test unexpectedly deoptimized");
+        };
+        assert_eq!(value, encode_i64(2));
+
+        registers[call.b as usize] = callee + 1;
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, resume_pc, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::Deopt { pc: resume_pc }
+        );
+        registers[call.b as usize] = callee;
+        registers[(site.first + 1) as usize] = type_object + 1;
+        assert_eq!(
+            compiled
+                .run_from(&mut registers, resume_pc, &mut UnavailableRuntime)
+                .unwrap(),
+            Outcome::Deopt { pc: resume_pc }
+        );
+
+        let invalid = [GuardedTypeTest {
+            type_object: VALUE_UNBOUND,
+            ..type_tests[0]
+        }];
+        assert!(matches!(
+            compile_with_execution_profile_types_call_results_and_type_tests(
+                code,
+                &[],
+                &[],
+                &[],
+                Some(&signature),
+                &[],
+                &invalid,
+            ),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]

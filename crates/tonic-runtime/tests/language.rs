@@ -3485,6 +3485,37 @@ fn annotation_jit_refines_three_way_immediate_union_and_call_results() {
 }
 
 #[test]
+fn annotation_jit_refines_builtin_isinstance_and_guards_rebinding() {
+    let source = concat!(
+        "def normalize(value:int|bool|None)->int:\n",
+        "    if isinstance(value,bool):\n        return value+10\n",
+        "    if value is None:\n        return 20\n",
+        "    return value+30\n",
+        "print(normalize(True),normalize(1),normalize(None))\n",
+        "def normalize_int(value:int|bool|None)->int:\n",
+        "    if isinstance(value,int):\n        return value+100\n",
+        "    return 200\n",
+        "print(normalize_int(True),normalize_int(1),normalize_int(None))\n",
+        "isinstance=lambda value,kind:False\n",
+        "print(normalize(True),normalize_int(True))",
+    );
+    let program = compile(source, "annotation-jit-guarded-isinstance").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"11 31 20\n101 101 200\n31 200\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_typed_type_test_sites, 2);
+    assert!(vm.stats.jit_typed_int_guard_elisions >= 4);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+    assert!(vm.stats.jit_side_exits >= 1);
+    assert!(vm.stats.jit_resumes >= 1);
+    assert!(vm.stats.jit_deopts >= 2);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

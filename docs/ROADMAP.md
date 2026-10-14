@@ -395,11 +395,16 @@ sonra alınır.
       - [x] Optional identity branch refinement: `x is None`/`x is not None` ve
         ters operand biçimleri için true/false edge fact'leri, saf `Move` alias
         zinciri, non-None dalında exact scalar lowering ve stale-alias güvenlik
-        kapısı. Genel union üye/test narrowing'i açık kalır.
+        kapısı. Heap-backed ve kullanıcı sınıflı genel union narrowing açık kalır.
       - [x] Üç üyeli immediate union: canonical `int | bool | None` giriş/dönüş
         guard'ı, branch/loop merge lattice'i, `is None` sonrasında non-None dalını
         `int | bool` olarak native aritmetiğe daraltma, guarded direct-call sonuç
         propagation'ı ve yanlış tipte advisory generic fallback.
+      - [x] Builtin-identity guarded `isinstance(value, bool/int)` narrowing:
+        exact callee ve type-object logical-handle resume guard'ı, `bool <: int`
+        branch semantiği, immediate union edge fact'leri, stale-condition kapısı,
+        rebinding'de successor-PC deopt ve ayrı JIT/VM sayaçları. Heap-backed
+        union üyeleri ile user-class/shape testleri açık kalır.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.

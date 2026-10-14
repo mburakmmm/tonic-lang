@@ -642,6 +642,21 @@ def immediate_normalize(value:int|bool|None)->int:
 print(immediate_normalize(None),immediate_normalize(False),immediate_normalize(True),immediate_normalize(7))
 print(immediate_normalize(1.5),immediate_identity("advisory"))
 ''',
+'''def builtin_type_narrow(value:int|bool|None)->int:
+    if isinstance(value,bool):
+        return value+10
+    if value is None:
+        return 20
+    return value+30
+print(builtin_type_narrow(True),builtin_type_narrow(1),builtin_type_narrow(None))
+def builtin_int_narrow(value:int|bool|None)->int:
+    if isinstance(value,int):
+        return value+100
+    return 200
+print(builtin_int_narrow(True),builtin_int_narrow(1),builtin_int_narrow(None))
+isinstance=lambda value,kind:False
+print(builtin_type_narrow(True),builtin_int_narrow(True))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
