@@ -348,6 +348,9 @@ pub enum ScalarType {
     /// A canonical `bool | None` annotation. Entry guards accept either
     /// immediate tag without making either branch boolean-like.
     BoolOrNone,
+    /// A canonical `float | None` annotation. The boxed float remains a
+    /// precise root until a refined non-None edge unboxes it into F64 state.
+    FloatOrNone,
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
@@ -521,6 +524,7 @@ enum ScalarFact {
     None,
     IntOrNone,
     BoolOrNone,
+    FloatOrNone,
     IntOrBool,
     IntOrBoolOrNone,
     F64Buffer { rank: u32, writable: bool },
@@ -536,6 +540,7 @@ impl ScalarFact {
             ScalarType::None => Self::None,
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
+            ScalarType::FloatOrNone => Self::FloatOrNone,
             ScalarType::IntOrBool => Self::IntOrBool,
             ScalarType::IntOrBoolOrNone => Self::IntOrBoolOrNone,
             ScalarType::F64Buffer { rank, writable } => Self::F64Buffer { rank, writable },
@@ -552,6 +557,9 @@ impl ScalarFact {
             ScalarType::IntOrNone => matches!(self, Self::Int | Self::None | Self::IntOrNone),
             ScalarType::BoolOrNone => {
                 matches!(self, Self::Bool | Self::None | Self::BoolOrNone)
+            }
+            ScalarType::FloatOrNone => {
+                matches!(self, Self::Float | Self::None | Self::FloatOrNone)
             }
             ScalarType::IntOrBool => matches!(self, Self::Int | Self::Bool | Self::IntOrBool),
             ScalarType::IntOrBoolOrNone => matches!(
@@ -581,6 +589,11 @@ impl ScalarFact {
             && matches!(incoming, Self::Bool | Self::None | Self::BoolOrNone)
         {
             return Self::BoolOrNone;
+        }
+        if matches!(self, Self::Float | Self::None | Self::FloatOrNone)
+            && matches!(incoming, Self::Float | Self::None | Self::FloatOrNone)
+        {
+            return Self::FloatOrNone;
         }
         if matches!(self, Self::Int | Self::Bool | Self::IntOrBool)
             && matches!(incoming, Self::Int | Self::Bool | Self::IntOrBool)
@@ -669,10 +682,16 @@ fn refine_optional_identity_branch(
     let (optional_register, optional_fact) = match (left, right) {
         (
             ScalarFact::None,
-            fact @ (ScalarFact::IntOrNone | ScalarFact::BoolOrNone | ScalarFact::IntOrBoolOrNone),
+            fact @ (ScalarFact::IntOrNone
+            | ScalarFact::BoolOrNone
+            | ScalarFact::FloatOrNone
+            | ScalarFact::IntOrBoolOrNone),
         ) => (comparison.c, fact),
         (
-            fact @ (ScalarFact::IntOrNone | ScalarFact::BoolOrNone | ScalarFact::IntOrBoolOrNone),
+            fact @ (ScalarFact::IntOrNone
+            | ScalarFact::BoolOrNone
+            | ScalarFact::FloatOrNone
+            | ScalarFact::IntOrBoolOrNone),
             ScalarFact::None,
         ) => (comparison.b, fact),
         _ => return None,
@@ -680,6 +699,7 @@ fn refine_optional_identity_branch(
     let non_none = match optional_fact {
         ScalarFact::IntOrNone => ScalarFact::Int,
         ScalarFact::BoolOrNone => ScalarFact::Bool,
+        ScalarFact::FloatOrNone => ScalarFact::Float,
         ScalarFact::IntOrBoolOrNone => ScalarFact::IntOrBool,
         _ => unreachable!(),
     };
@@ -1404,15 +1424,15 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
         .iter()
         .map(|(register, _, _)| *register)
         .collect::<Vec<_>>();
-    let float_analysis =
+    let base_float_analysis =
         analyze_float_execution(code, exact_float_parameters, &exact_f64_buffer_registers)?;
     let buffer_bounds_proofs = typed_signature
-        .zip(float_analysis.as_ref())
+        .zip(base_float_analysis.as_ref())
         .map_or_else(Vec::new, |(signature, analysis)| {
             analyze_buffer_bounds(code, signature, analysis)
         });
     let buffer_tuple_items = typed_signature
-        .zip(float_analysis.as_ref())
+        .zip(base_float_analysis.as_ref())
         .map_or_else(Vec::new, |(signature, analysis)| {
             analyze_buffer_tuple_items(code, signature, analysis)
         });
@@ -1422,7 +1442,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
         materialized_constants,
         call_results,
         &buffer_tuple_items,
-        float_analysis
+        base_float_analysis
             .as_ref()
             .map_or(&[][..], |analysis| &analysis.buffer_store_source),
         typed_signature,
@@ -1432,6 +1452,22 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             analyze_typed_scalar_execution(code, signature, direct_calls, call_results, type_tests)
         })
         .transpose()?;
+    let has_optional_float = typed_signature.is_some_and(|signature| {
+        signature
+            .parameters
+            .iter()
+            .chain(std::iter::once(&signature.result))
+            .any(|kind| *kind == ScalarType::FloatOrNone)
+    });
+    let float_analysis = if has_optional_float && exact_f64_buffer_registers.is_empty() {
+        typed_scalar_analysis
+            .as_ref()
+            .map(|analysis| analyze_typed_float_execution(code, analysis))
+            .transpose()?
+            .flatten()
+    } else {
+        base_float_analysis
+    };
     const METHOD_CACHE_WORDS: usize = 4;
     let method_site_count = direct_calls
         .iter()
@@ -1609,6 +1645,11 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                 registers,
                 start_pc,
                 analysis,
+                float_scratch,
+                runtime_signature,
+                runtime_helper,
+                runtime_context,
+                root_count,
                 pointer_type,
             );
         }
@@ -2186,44 +2227,81 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                     } else {
                         (pc + 1, instruction.b as usize)
                     };
-                    let backedge = (instruction.b as usize <= pc).then(|| {
+                    let needs_edge = |target: usize| {
+                        target <= pc
+                            || float_state.is_some_and(|from| {
+                                float_analysis
+                                    .as_ref()
+                                    .and_then(|analysis| analysis.before[target].as_deref())
+                                    .is_some_and(|to| {
+                                        from.iter()
+                                            .zip(to)
+                                            .any(|(was_float, is_float)| !*was_float && *is_float)
+                                    })
+                            })
+                    };
+                    let taken_edge = needs_edge(taken).then(|| {
                         let block = builder.create_block();
                         builder.append_block_param(block, pointer_type);
                         block
                     });
-                    let taken_block = if jump_when_true {
-                        backedge.unwrap_or(blocks[taken])
-                    } else {
-                        blocks[taken]
-                    };
-                    let other_block = if jump_when_true {
-                        blocks[other]
-                    } else {
-                        backedge.unwrap_or(blocks[other])
-                    };
-                    builder
-                        .ins()
-                        .brif(truth, taken_block, &[registers], other_block, &[registers]);
-                    if let Some(backedge) = backedge {
-                        builder.switch_to_block(backedge);
-                        let registers = builder.block_params(backedge)[0];
-                        emit_backedge_poll(
-                            &mut builder,
-                            registers,
-                            blocks[instruction.b as usize],
-                            runtime_signature,
-                            runtime_helper,
-                            runtime_context,
-                            root_count,
-                            poll_slot.expect("backedge has poll slot"),
-                            pc,
-                            instruction.b as usize,
-                            pointer_type,
-                            float_analysis.as_ref().and_then(|analysis| {
-                                analysis.before[instruction.b as usize].as_deref()
-                            }),
-                            &float_slots,
-                        );
+                    let other_edge = needs_edge(other).then(|| {
+                        let block = builder.create_block();
+                        builder.append_block_param(block, pointer_type);
+                        block
+                    });
+                    builder.ins().brif(
+                        truth,
+                        taken_edge.unwrap_or(blocks[taken]),
+                        &[registers],
+                        other_edge.unwrap_or(blocks[other]),
+                        &[registers],
+                    );
+                    for (edge, target) in [(taken_edge, taken), (other_edge, other)] {
+                        let Some(edge) = edge else { continue };
+                        builder.switch_to_block(edge);
+                        let mut edge_registers = builder.block_params(edge)[0];
+                        if let Some((from, to)) = float_state.zip(
+                            float_analysis
+                                .as_ref()
+                                .and_then(|analysis| analysis.before[target].as_deref()),
+                        ) {
+                            edge_registers = emit_float_edge_initialization(
+                                &mut builder,
+                                edge_registers,
+                                from,
+                                to,
+                                target,
+                                &float_slots,
+                                float_scratch.expect("float edge scratch slot"),
+                                runtime_signature,
+                                runtime_helper,
+                                runtime_context,
+                                root_count,
+                                pointer_type,
+                            );
+                        }
+                        if target <= pc {
+                            emit_backedge_poll(
+                                &mut builder,
+                                edge_registers,
+                                blocks[target],
+                                runtime_signature,
+                                runtime_helper,
+                                runtime_context,
+                                root_count,
+                                poll_slot.expect("backedge has poll slot"),
+                                pc,
+                                target,
+                                pointer_type,
+                                float_analysis
+                                    .as_ref()
+                                    .and_then(|analysis| analysis.before[target].as_deref()),
+                                &float_slots,
+                            );
+                        } else {
+                            builder.ins().jump(blocks[target], &[edge_registers]);
+                        }
                     }
                 }
                 Op::Tuple => {
@@ -3530,6 +3608,125 @@ fn analyze_float_execution(
     }))
 }
 
+fn analyze_typed_float_execution(
+    code: &CodeObject,
+    typed: &TypedScalarAnalysis,
+) -> Result<Option<FloatAnalysis>, Error> {
+    let before = typed
+        .before
+        .iter()
+        .map(|state| {
+            state.as_ref().map(|state| {
+                state
+                    .iter()
+                    .map(|fact| *fact == ScalarFact::Float)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    if !before
+        .iter()
+        .flatten()
+        .any(|state| state.iter().any(|float| *float))
+    {
+        return Ok(None);
+    }
+    for (pc, state) in before.iter().enumerate() {
+        let Some(state) = state else { continue };
+        let instruction = code.instructions[pc];
+        let op = Op::try_from(instruction.opcode).map_err(|error| {
+            Error::Backend(format!("verified opcode could not be decoded: {error}"))
+        })?;
+        let any_float = state.iter().any(|float| *float);
+        let operand_float = match op {
+            Op::Move | Op::Neg | Op::Pos | Op::Not => state[instruction.b as usize],
+            Op::Add
+            | Op::InplaceAdd
+            | Op::Sub
+            | Op::Mul
+            | Op::FloorDiv
+            | Op::Mod
+            | Op::Div
+            | Op::Eq
+            | Op::Ne
+            | Op::Lt
+            | Op::Le
+            | Op::Gt
+            | Op::Ge
+            | Op::Is
+            | Op::IsNot => state[instruction.b as usize] || state[instruction.c as usize],
+            Op::JumpFalse | Op::JumpTrue | Op::Return => state[instruction.a as usize],
+            _ => false,
+        };
+        let safe = match op {
+            Op::Const | Op::Move | Op::LoadGlobal | Op::Jump | Op::Return => true,
+            Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul => {
+                state[instruction.b as usize] && state[instruction.c as usize] || !operand_float
+            }
+            Op::Is | Op::IsNot | Op::JumpFalse | Op::JumpTrue => !operand_float,
+            _ => !any_float && !operand_float,
+        };
+        if !safe {
+            return Ok(None);
+        }
+        let targets = match op {
+            Op::Jump => vec![instruction.a as usize],
+            Op::JumpFalse | Op::JumpTrue => vec![instruction.b as usize, pc + 1],
+            _ => Vec::new(),
+        };
+        for target in targets {
+            let Some(target_state) = before.get(target).and_then(Option::as_ref) else {
+                continue;
+            };
+            if state
+                .iter()
+                .zip(target_state)
+                .any(|(was_float, is_float)| *was_float && !*is_float)
+                || op == Op::Jump
+                    && state
+                        .iter()
+                        .zip(target_state)
+                        .any(|(was_float, is_float)| !*was_float && *is_float)
+            {
+                return Ok(None);
+            }
+        }
+    }
+    let mut slots = vec![false; code.registers as usize];
+    let deopt_maps = before
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, state)| {
+            state.as_ref().map(|state| {
+                let unboxed_float_registers = state
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(register, float)| {
+                        if *float {
+                            slots[register] = true;
+                            Some(register as u16)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                DeoptMap {
+                    pc,
+                    register_count: code.registers as usize,
+                    unboxed_float_registers,
+                }
+            })
+        })
+        .collect();
+    Ok(Some(FloatAnalysis {
+        before,
+        slots,
+        deopt_maps,
+        buffer_load_source: vec![None; code.instructions.len()],
+        buffer_store_source: vec![None; code.instructions.len()],
+    }))
+}
+
 fn analyze_buffer_sources(
     code: &CodeObject,
     parameters: &[u16],
@@ -4097,6 +4294,7 @@ fn analyze_typed_scalar_execution(
                     | ScalarFact::None
                     | ScalarFact::IntOrNone
                     | ScalarFact::BoolOrNone
+                    | ScalarFact::FloatOrNone
                     | ScalarFact::IntOrBoolOrNone
                     | ScalarFact::F64Buffer { .. } => ScalarFact::Unknown,
                 };
@@ -4566,6 +4764,7 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::None
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
+        | ScalarFact::FloatOrNone
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached integer lowering")
@@ -4830,6 +5029,7 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::None
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
+        | ScalarFact::FloatOrNone
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached truth lowering")
@@ -5054,11 +5254,68 @@ fn emit_guarded_type_test_resume_guards(
     registers
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_exact_float_check(
+    builder: &mut FunctionBuilder<'_>,
+    registers: Value,
+    raw: Value,
+    pc: Value,
+    scratch: StackSlot,
+    runtime_signature: cranelift_codegen::ir::SigRef,
+    runtime_helper: Value,
+    runtime_context: Value,
+    root_count: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> (Value, Value) {
+    let count = builder.ins().iconst(pointer_type, root_count as i64);
+    let operation = builder
+        .ins()
+        .iconst(types::I32, i64::from(RuntimeOp::UnboxFloat as u32));
+    let zero = builder.ins().iconst(types::I64, 0);
+    let output = builder.ins().stack_addr(pointer_type, scratch, 0);
+    let call = builder.ins().call_indirect(
+        runtime_signature,
+        runtime_helper,
+        &[
+            runtime_context,
+            registers,
+            count,
+            operation,
+            raw,
+            zero,
+            output,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let helper_ok = builder.ins().icmp_imm(IntCC::Equal, status, 0);
+    let inspect = builder.create_block();
+    builder.append_block_param(inspect, pointer_type);
+    let helper_failed = builder.create_block();
+    builder
+        .ins()
+        .brif(helper_ok, inspect, &[registers], helper_failed, &[]);
+    builder.switch_to_block(helper_failed);
+    let error_flag = builder.ins().iconst(types::I64, ERROR_FLAG as i64);
+    let error = builder.ins().bor(pc, error_flag);
+    builder.ins().return_(&[error]);
+    builder.switch_to_block(inspect);
+    let registers = builder.block_params(inspect)[0];
+    let present = builder.ins().stack_load(types::I64, scratch, 8);
+    let present = builder.ins().icmp_imm(IntCC::NotEqual, present, 0);
+    (registers, present)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_typed_scalar_entry_guards(
     builder: &mut FunctionBuilder<'_>,
     mut registers: Value,
     start_pc: Value,
     analysis: &TypedScalarAnalysis,
+    float_scratch: Option<StackSlot>,
+    runtime_signature: cranelift_codegen::ir::SigRef,
+    runtime_helper: Value,
+    runtime_context: Value,
+    root_count: usize,
     pointer_type: cranelift_codegen::ir::Type,
 ) -> Value {
     let register_count = analysis.before.iter().flatten().next().map_or(0, Vec::len);
@@ -5069,6 +5326,7 @@ fn emit_typed_scalar_entry_guards(
             ScalarFact::None,
             ScalarFact::IntOrNone,
             ScalarFact::BoolOrNone,
+            ScalarFact::FloatOrNone,
             ScalarFact::IntOrBool,
             ScalarFact::IntOrBoolOrNone,
         ] {
@@ -5097,7 +5355,7 @@ fn emit_typed_scalar_entry_guards(
                 .brif(needed, inspect, &[registers], skip, &[registers]);
 
             builder.switch_to_block(inspect);
-            let inspect_registers = builder.block_params(inspect)[0];
+            let mut inspect_registers = builder.block_params(inspect)[0];
             let raw = load(builder, inspect_registers, register as u16);
             let exact = match expected {
                 ScalarFact::Int => exact_int(builder, raw),
@@ -5112,6 +5370,23 @@ fn emit_typed_scalar_entry_guards(
                     let boolean = exact_bool(builder, raw);
                     let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
                     builder.ins().bor(boolean, none)
+                }
+                ScalarFact::FloatOrNone => {
+                    let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
+                    let (checked_registers, float) = emit_exact_float_check(
+                        builder,
+                        inspect_registers,
+                        raw,
+                        start_pc,
+                        float_scratch.expect("optional float guard scratch slot"),
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                        pointer_type,
+                    );
+                    inspect_registers = checked_registers;
+                    builder.ins().bor(float, none)
                 }
                 ScalarFact::IntOrBool => {
                     let integer = exact_int(builder, raw);
@@ -5256,6 +5531,61 @@ fn emit_float_entry_initialization(
         builder.ins().jump(next, &[skip_registers]);
         builder.switch_to_block(next);
         registers = builder.block_params(next)[0];
+    }
+    registers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_float_edge_initialization(
+    builder: &mut FunctionBuilder<'_>,
+    mut registers: Value,
+    from: &[bool],
+    to: &[bool],
+    target_pc: usize,
+    slots: &[Option<StackSlot>],
+    scratch: StackSlot,
+    runtime_signature: cranelift_codegen::ir::SigRef,
+    runtime_helper: Value,
+    runtime_context: Value,
+    root_count: usize,
+    pointer_type: cranelift_codegen::ir::Type,
+) -> Value {
+    for (register, (was_float, is_float)) in from.iter().zip(to).enumerate() {
+        if *was_float || !*is_float {
+            continue;
+        }
+        let raw = load(builder, registers, register as u16);
+        let pc = builder.ins().iconst(types::I64, target_pc as i64);
+        let (checked_registers, present) = emit_exact_float_check(
+            builder,
+            registers,
+            raw,
+            pc,
+            scratch,
+            runtime_signature,
+            runtime_helper,
+            runtime_context,
+            root_count,
+            pointer_type,
+        );
+        registers = checked_registers;
+        let valid = builder.create_block();
+        builder.append_block_param(valid, pointer_type);
+        let invalid = builder.create_block();
+        builder
+            .ins()
+            .brif(present, valid, &[registers], invalid, &[]);
+        builder.switch_to_block(invalid);
+        builder.ins().return_(&[pc]);
+        builder.switch_to_block(valid);
+        registers = builder.block_params(valid)[0];
+        let bits = builder.ins().stack_load(types::I64, scratch, 0);
+        let value = builder.ins().bitcast(types::F64, MemFlags::new(), bits);
+        builder.ins().stack_store(
+            value,
+            slots[register].expect("refined float register slot"),
+            0,
+        );
     }
     registers
 }
@@ -6543,6 +6873,123 @@ mod tests {
     }
 
     #[test]
+    fn typed_optional_float_refinement_unboxes_only_the_non_none_edge() {
+        struct FloatRuntime {
+            boxed: Vec<f64>,
+        }
+        impl Runtime for FloatRuntime {
+            fn binary(
+                &mut self,
+                _op: RuntimeOp,
+                _left: u64,
+                _right: u64,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("optional float test has no generic binary call")
+            }
+
+            fn load_global(
+                &mut self,
+                _symbol: u32,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("optional float test has no global load")
+            }
+
+            fn unbox_float(
+                &mut self,
+                value: u64,
+                _registers: &[u64],
+            ) -> Result<Option<u64>, RuntimeFailure> {
+                Ok((value == 0x100).then_some(2.0_f64.to_bits()))
+            }
+
+            fn box_float(&mut self, bits: u64, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                let handle = 0x200 + self.boxed.len() as u64 * 8;
+                self.boxed.push(f64::from_bits(bits));
+                Ok(handle)
+            }
+
+            fn poll(&mut self, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                Ok(0)
+            }
+        }
+
+        let program = function(
+            "def normalize(value):\n    if value is None:\n        return 0.5\n    return value+1.5",
+        );
+        let code = &program.program().code[1];
+        let constants = code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, _)| MaterializedConstant {
+                pc,
+                value: 0x800 + pc as u64 * 8,
+            })
+            .collect::<Vec<_>>();
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::FloatOrNone],
+            result: ScalarType::Float,
+        };
+        let compiled =
+            compile_with_execution_profile_and_types(code, &[], &constants, &[], Some(&signature))
+                .unwrap();
+        assert!(compiled.metadata().typed_return_proven);
+        assert!(compiled
+            .deopt_maps()
+            .iter()
+            .any(|map| !map.unboxed_float_registers.is_empty()));
+
+        let mut runtime = FloatRuntime { boxed: Vec::new() };
+        let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        registers[0] = VALUE_NONE;
+        let Outcome::Returned { value, .. } = compiled
+            .run_with_runtime(&mut registers, &mut runtime)
+            .unwrap()
+        else {
+            panic!("optional None float path unexpectedly deoptimized");
+        };
+        assert_eq!(value, 0x200);
+        assert_eq!(runtime.boxed[0], 0.5);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x100;
+        let Outcome::Returned { value, .. } = compiled
+            .run_with_runtime(&mut registers, &mut runtime)
+            .unwrap()
+        else {
+            panic!("optional float path unexpectedly deoptimized");
+        };
+        assert_eq!(value, 0x208);
+        assert_eq!(runtime.boxed[1], 3.5);
+
+        registers.fill(VALUE_UNBOUND);
+        registers[0] = 0x999;
+        assert_eq!(
+            compiled
+                .run_with_runtime(&mut registers, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
+
+        let merging_program = function(
+            "def merge(value, flag):\n    if value is None:\n        return None\n    if flag:\n        value = None\n    return value",
+        );
+        let merging_code = &merging_program.program().code[1];
+        let merging_signature = TypedSignature {
+            parameters: vec![ScalarType::FloatOrNone, ScalarType::Bool],
+            result: ScalarType::FloatOrNone,
+        };
+        let typed = analyze_typed_scalar_execution(merging_code, &merging_signature, &[], &[], &[])
+            .unwrap();
+        assert!(analyze_typed_float_execution(merging_code, &typed)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn typed_three_way_immediate_union_refines_to_integer_like_non_none() {
         let program = function(
             "def normalize(value):\n    if value is None:\n        return 0\n    return value+1",
@@ -6632,6 +7079,7 @@ mod tests {
                 ScalarFact::None => VALUE_NONE,
                 ScalarFact::IntOrNone => encode_i64(1),
                 ScalarFact::BoolOrNone => VALUE_FALSE as u64,
+                ScalarFact::FloatOrNone => VALUE_NONE,
                 ScalarFact::IntOrBool => VALUE_TRUE as u64,
                 ScalarFact::IntOrBoolOrNone => VALUE_NONE,
                 ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {
@@ -6722,6 +7170,7 @@ mod tests {
                 ScalarFact::None => VALUE_NONE,
                 ScalarFact::IntOrNone => encode_i64(1),
                 ScalarFact::BoolOrNone => VALUE_TRUE as u64,
+                ScalarFact::FloatOrNone => VALUE_NONE,
                 ScalarFact::IntOrBool => VALUE_TRUE as u64,
                 ScalarFact::IntOrBoolOrNone => VALUE_TRUE as u64,
                 ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {

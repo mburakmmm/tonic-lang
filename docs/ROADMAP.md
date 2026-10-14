@@ -389,6 +389,10 @@ sonra alınır.
       - [x] Canonical `int | None` ve `bool | None` imzaları: normal/arbitrary-PC
         tag-set guard'ı, control-flow birleşiminde optional fact, çoklu `RETURN`
         kanıtı ve yanlış argümanda advisory generic fallback.
+      - [x] Canonical `float | None` heap-backed optional imzası: runtime/public
+        giriş guard'ı, `is None` edge refinement, non-None kenarında guarded F64
+        unboxing, arbitrary-PC slot reconstruction, native F64 arithmetic/return,
+        unsafe float→boxed-union merge reddi ve yanlış girdide advisory fallback.
       - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
         control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
         integer aritmetiği ve üye olmayan değerde advisory generic fallback.

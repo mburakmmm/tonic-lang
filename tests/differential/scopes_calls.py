@@ -657,6 +657,16 @@ print(builtin_int_narrow(True),builtin_int_narrow(1),builtin_int_narrow(None))
 isinstance=lambda value,kind:False
 print(builtin_type_narrow(True),builtin_int_narrow(True))
 ''',
+'''def optional_float(value:float|None)->float:
+    if value is None:
+        return 0.5
+    return value+1.5
+print(optional_float(None),optional_float(2.0))
+try:
+    print(optional_float("advisory"))
+except TypeError as error:
+    print(type(error).__name__)
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

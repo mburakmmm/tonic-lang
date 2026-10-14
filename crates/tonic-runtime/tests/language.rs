@@ -3516,6 +3516,29 @@ fn annotation_jit_refines_builtin_isinstance_and_guards_rebinding() {
 }
 
 #[test]
+fn annotation_jit_unboxes_optional_float_after_none_refinement() {
+    let source = concat!(
+        "def normalize(value:float|None)->float:\n",
+        "    if value is None:\n        return 0.5\n",
+        "    return value+1.5\n",
+        "print(normalize(None),normalize(2.0))\n",
+        "try:\n    print(normalize('advisory'))\n",
+        "except TypeError as error:\n    print(type(error).__name__)",
+    );
+    let program = compile(source, "annotation-jit-optional-float").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"0.5 3.5\nTypeError\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_returns >= 2);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

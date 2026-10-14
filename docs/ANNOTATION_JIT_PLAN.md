@@ -203,6 +203,14 @@ successor PC'de deopt eder ve branch generic yürür. `int` testi Python'ın
 `bool <: int` ilişkisini korur. Karar
 [ADR 0144](adr/0144-guarded-isinstance-union-narrowing.md) içindedir.
 
+Heap-backed union altyapısının ilk dilimi `float | None` için tamamlandı. Normal
+ve arbitrary-PC girişler logical value'yu `None` veya exact Tonic float olarak
+guard eder. `is None` kontrolünün non-None CFG kenarı boxed root'u F64 stack
+slotuna unbox eder; sonraki toplama/çıkarma/çarpma ve dönüş mevcut deopt map'leriyle
+native kalır. Float fact'inin boxed union birleşiminde kaybolacağı control-flow
+şekilleri materialization eklenene kadar bu optimizasyondan güvenle çıkarılır.
+Karar [ADR 0145](adr/0145-optional-float-union-jit.md) içindedir.
+
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve

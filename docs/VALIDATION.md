@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 36, runtime unit 30,
+Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 37, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 162, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 469 test.
+native handles 5, language/runtime 163, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 471 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -356,7 +356,7 @@ function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
 deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
 `code-budget` kaydını ve limit açıklamasını doğrular.
 
-Differential corpus: 334 stdout vakası ve 261 exception türü vakası. Seed 42.
+Differential corpus: 335 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -633,6 +633,14 @@ yeniden bağladıktan sonra hesaplanan generic bool sonucu üzerinden farklı br
 seçildiğini, allocation-stress GC altında çıktının Python ile aynı kaldığını ve
 type-test/side-exit/resume/deopt sayaçlarını doğrular. Kalıcı differential vaka
 aynı rebinding semantiğini Python 3.15 oracle'ıyla karşılaştırır.
+Optional-float testi canonical `float | None` girişini hem `None` hem exact heap
+float ile first-call typed JIT'te çalıştırır. `is None` non-None kenarında value
+root'u F64 slota unbox edilir; `+ 1.5` ve iki dönüş native kalır. Public JIT testi
+deopt map'inde refined float register'ını, doğru 0.5/3.5 box sonuçlarını ve union
+dışı logical value'nun PC 0 guard deopt'unu doğrular. Runtime testi yanlış string
+girdisinin annotation'ı zorlayıcı type check'e çevirmeden generic `TypeError`
+üretmesini allocation-stress GC altında kapsar; Python oracle vakası sekizli
+differential matrise dahildir.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size
