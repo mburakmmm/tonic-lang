@@ -661,11 +661,18 @@ print(builtin_type_narrow(True),builtin_int_narrow(True))
     if value is None:
         return 0.5
     return value+1.5
+def optional_float_type_test(value:float|None)->float:
+    if isinstance(value,float):
+        return value+2.5
+    return 0.25
 print(optional_float(None),optional_float(2.0))
+print(optional_float_type_test(None),optional_float_type_test(2.0))
 try:
     print(optional_float("advisory"))
 except TypeError as error:
     print(type(error).__name__)
+isinstance=lambda value,kind:False
+print(optional_float_type_test(2.0))
 ''',
 ]
 ERRORS = [

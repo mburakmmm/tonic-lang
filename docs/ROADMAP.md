@@ -407,8 +407,9 @@ sonra alınır.
       - [x] Builtin-identity guarded `isinstance(value, bool/int)` narrowing:
         exact callee ve type-object logical-handle resume guard'ı, `bool <: int`
         branch semantiği, immediate union edge fact'leri, stale-condition kapısı,
-        rebinding'de successor-PC deopt ve ayrı JIT/VM sayaçları. Heap-backed
-        union üyeleri ile user-class/shape testleri açık kalır.
+        rebinding'de successor-PC deopt ve ayrı JIT/VM sayaçları. Aynı identity
+        guard'ı `float | None` üzerinde exact `float`/`None` edge fact'leri ve
+        true edge'de F64 unboxing üretir. User-class/shape testleri açık kalır.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.

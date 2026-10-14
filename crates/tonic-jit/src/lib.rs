@@ -452,6 +452,7 @@ pub struct GuardedCallResult {
 pub enum TypeTestKind {
     Int,
     Bool,
+    Float,
 }
 
 /// One exact builtin `isinstance(value, type)` call used for branch refinement.
@@ -781,6 +782,7 @@ fn refine_guarded_type_test_branch(
         (TypeTestKind::Int, ScalarFact::IntOrBoolOrNone) => {
             (ScalarFact::IntOrBool, ScalarFact::None)
         }
+        (TypeTestKind::Float, ScalarFact::FloatOrNone) => (ScalarFact::Float, ScalarFact::None),
         _ => return None,
     };
     let mut aliases = vec![value_register];
@@ -6987,6 +6989,48 @@ mod tests {
         assert!(analyze_typed_float_execution(merging_code, &typed)
             .unwrap()
             .is_none());
+
+        let type_test_program = function(
+            "def normalize(value):\n    if isinstance(value,float):\n        return value+1.5\n    return 0.5",
+        );
+        let type_test_code = &type_test_program.program().code[1];
+        let type_test_pc = type_test_code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("isinstance call");
+        let type_test_constants = type_test_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, _)| MaterializedConstant {
+                pc,
+                value: 0x900 + pc as u64 * 8,
+            })
+            .collect::<Vec<_>>();
+        let type_tests = [GuardedTypeTest {
+            pc: type_test_pc,
+            callee: 0x1234,
+            type_object: 0x5678,
+            kind: TypeTestKind::Float,
+        }];
+        let type_test_compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+            type_test_code,
+            &[],
+            &type_test_constants,
+            &[],
+            Some(&signature),
+            &[],
+            &type_tests,
+        )
+        .unwrap();
+        assert!(type_test_compiled.metadata().typed_return_proven);
+        assert_eq!(type_test_compiled.metadata().typed_type_test_sites, 1);
+        assert!(type_test_compiled
+            .deopt_maps()
+            .iter()
+            .any(|map| !map.unboxed_float_registers.is_empty()));
     }
 
     #[test]

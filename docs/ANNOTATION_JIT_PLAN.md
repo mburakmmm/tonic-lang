@@ -209,6 +209,11 @@ guard eder. `is None` kontrolünün non-None CFG kenarı boxed root'u F64 stack
 slotuna unbox eder; sonraki toplama/çıkarma/çarpma ve dönüş mevcut deopt map'leriyle
 native kalır. Float fact'inin boxed union birleşiminde kaybolacağı control-flow
 şekilleri materialization eklenene kadar bu optimizasyondan güvenle çıkarılır.
+Exact builtin `isinstance(value, float)` de aynı union'ı `Float`/`None`
+kenarlarına ayırır. Resume girişi callee ve type-object logical handle'larını
+guard ettikten sonra true edge mevcut F64 materialization yolunu kullanır;
+`isinstance` veya `float` yeniden bağlanırsa successor PC'de generic yürütmeye
+döner.
 Karar [ADR 0145](adr/0145-optional-float-union-jit.md) içindedir.
 
 TypePlan temeli tek başına her plan için typed native entry seçmez.

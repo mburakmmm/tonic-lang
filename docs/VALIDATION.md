@@ -640,7 +640,10 @@ deopt map'inde refined float register'ını, doğru 0.5/3.5 box sonuçlarını v
 dışı logical value'nun PC 0 guard deopt'unu doğrular. Runtime testi yanlış string
 girdisinin annotation'ı zorlayıcı type check'e çevirmeden generic `TypeError`
 üretmesini allocation-stress GC altında kapsar; Python oracle vakası sekizli
-differential matrise dahildir.
+differential matrise dahildir. Aynı test exact builtin
+`isinstance(value, float)` ile true edge'i F64'e daraltır; builtin yeniden
+bağlandıktan sonra callee identity resume guard'ı deopt eder ve hesaplanmış
+generic false sonucu branch'i belirler.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

@@ -3521,9 +3521,15 @@ fn annotation_jit_unboxes_optional_float_after_none_refinement() {
         "def normalize(value:float|None)->float:\n",
         "    if value is None:\n        return 0.5\n",
         "    return value+1.5\n",
+        "def normalize_type_test(value:float|None)->float:\n",
+        "    if isinstance(value,float):\n        return value+2.5\n",
+        "    return 0.25\n",
         "print(normalize(None),normalize(2.0))\n",
+        "print(normalize_type_test(None),normalize_type_test(2.0))\n",
         "try:\n    print(normalize('advisory'))\n",
-        "except TypeError as error:\n    print(type(error).__name__)",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+        "isinstance=lambda value,kind:False\n",
+        "print(normalize_type_test(2.0))",
     );
     let program = compile(source, "annotation-jit-optional-float").unwrap();
     let mut vm = Vm::new().unwrap();
@@ -3531,11 +3537,13 @@ fn annotation_jit_unboxes_optional_float_after_none_refinement() {
     vm.gc_interval = Some(1);
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
-    assert_eq!(out, b"0.5 3.5\nTypeError\n");
-    assert_eq!(vm.stats.jit_annotation_compiled, 1);
-    assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+    assert_eq!(out, b"0.5 3.5\n0.25 4.5\nTypeError\n0.25\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 2);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
+    assert_eq!(vm.stats.jit_typed_type_test_sites, 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
-    assert!(vm.stats.jit_returns >= 2);
+    assert!(vm.stats.jit_returns >= 4);
+    assert!(vm.stats.jit_deopts >= 1);
 }
 
 #[test]

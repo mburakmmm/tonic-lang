@@ -9712,6 +9712,8 @@ impl Vm {
                     tonic_jit::TypeTestKind::Bool
                 } else if type_object == self.runtime_types.int {
                     tonic_jit::TypeTestKind::Int
+                } else if type_object == self.runtime_types.float {
+                    tonic_jit::TypeTestKind::Float
                 } else {
                     return None;
                 };

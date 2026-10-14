@@ -26,6 +26,12 @@ stack slot before entering the target block. Direct arbitrary-PC entry uses the
 same guarded reconstruction. Float constants and arithmetic remain in F64 form;
 guest-visible returns are boxed at the existing allocation safepoint.
 
+An exact builtin `isinstance(value, float)` site may produce the same
+`Float`/`None` edge facts. Native resume first guards both the builtin callee and
+the exact float type-object logical handles; rebinding either dependency causes
+an exact successor-PC deoptimization before the type-test result influences
+native control flow.
+
 The typed-float analysis accepts only operations whose materialization state is
 explicit. A control-flow edge that would lose exact F64 state by merging back
 into a boxed union is rejected until edge materialization exists. Generic
@@ -34,9 +40,10 @@ semantics remain authoritative in that case.
 ## Consequences
 
 Canonical optional-float functions can compile on their first valid call and
-run refined arithmetic without per-operation boxing. Values outside the
-annotation take the ordinary advisory fallback. Deopt maps identify every live
-unboxed register, and persistent metadata contains logical values only.
+run identity- or builtin-type-test-refined arithmetic without per-operation
+boxing. Values outside the annotation take the ordinary advisory fallback.
+Deopt maps identify every live unboxed register, and persistent metadata
+contains logical values only.
 
 This is the first heap-backed union lowering. Mixed `int | float`, nested
 container unions, and user-class shape unions remain roadmap work, but they can
