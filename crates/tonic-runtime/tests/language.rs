@@ -3650,6 +3650,40 @@ fn annotation_jit_refines_optional_mixed_numeric_union_and_call_results() {
 }
 
 #[test]
+fn annotation_jit_refines_bool_float_union_and_call_results() {
+    let source = concat!(
+        "def preserve(value:bool|float)->bool|float:\n    return value\n",
+        "def normalize(value:bool|float)->int|float:\n",
+        "    selected=preserve(value)\n",
+        "    if isinstance(selected,float):\n        return selected+1.5\n",
+        "    return selected+1\n",
+        "def normalize_bool(value:bool|float)->int|float:\n",
+        "    if isinstance(value,bool):\n        return value+10\n",
+        "    return value+0.5\n",
+        "print(normalize(False),normalize(True),normalize(2.0))\n",
+        "print(normalize_bool(False),normalize_bool(True),normalize_bool(2.0))\n",
+        "print(normalize(4))\n",
+        "try:\n    print(normalize('advisory'))\n",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+        "isinstance=lambda value,kind:False\n",
+        "print(normalize(2.0),normalize_bool(True))",
+    );
+    let program = compile(source, "annotation-jit-bool-float-union").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"1 2 3.5\n10 11 2.5\n5\nTypeError\n3.0 1.5\n");
+    assert!(vm.stats.jit_annotation_compiled >= 2, "{:?}", vm.stats);
+    assert!(vm.stats.jit_typed_type_test_sites >= 2);
+    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 2);
+    assert!(vm.stats.jit_annotation_guard_misses >= 2);
+    assert!(vm.stats.jit_deopts >= 2);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

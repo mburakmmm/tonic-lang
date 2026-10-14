@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 38, runtime unit 30,
+Test dağılımı: CLI 10, compiler/parser 31, core verifier 20, Cranelift JIT 39, runtime unit 30,
 direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 166, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 475 test.
+native handles 5, language/runtime 167, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 477 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -356,7 +356,7 @@ function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
 deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
 `code-budget` kaydını ve limit açıklamasını doğrular.
 
-Differential corpus: 338 stdout vakası ve 261 exception türü vakası. Seed 42.
+Differential corpus: 339 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -663,6 +663,13 @@ advisory generic davranışı korur; builtin rebinding sonrası 2.0 generic 3.0
 sonucunu üretir. Public JIT testi yanlış logical değerin PC 0'da deopt ettiğini,
 runtime ve kalıcı Python differential vakaları da allocation-stress GC dahil
 sekizli matriste aynı gözlenebilir çıktıyı doğrular.
+Bool-float union testi canonical `bool | float` girişini exact bool immediate
+ve heap-float olarak guard eder. Exact builtin `isinstance(..., float/bool)`
+true/false kenarları Python bool 0/1 integer aritmetiği ile F64 state'i ayırır;
+False/True/2.0 girdileri sırasıyla 1/2/3.5 ve ters testte 10/11/2.5 üretir.
+Guarded direct-call sonucu aynı union fact'ini caller'a taşır. Exact int ve string
+advisory generic davranışı, builtin rebinding sonrası 3.0/1.5 sonuçları ve PC 0
+yanlış-tag deopt'u public JIT/runtime/differential testlerinde kapsanır.
 Leaf JIT aynı differential corpus'ta debug/release ve default/stress GC ile
 çalıştırılır. Exact integer guard failure, immediate taşma, floor sıfıra bölme
 deopt'u, unsupported opcode fallback'i, native dönüş, compile süresi ve code-size

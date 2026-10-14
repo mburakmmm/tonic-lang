@@ -405,6 +405,11 @@ sonra alınır.
         `isinstance(..., int/float)` ile i64/F64 dalı, guarded direct-call sonuç
         propagation'ı, yanlış annotation girdisi ve builtin rebinding'de exact-PC
         advisory fallback.
+      - [x] Canonical `bool | float` karma representation imzası: exact-bool
+        immediate veya exact heap-float giriş/resume guard'ı, builtin-identity
+        guarded `isinstance(..., bool/float)` ile Python 0/1 integer ve F64 dalı,
+        guarded direct-call result propagation ve annotation uyuşmazlığı ile
+        builtin rebinding'de advisory fallback.
       - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
         control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
         integer aritmetiği ve üye olmayan değerde advisory generic fallback.

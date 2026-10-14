@@ -737,6 +737,27 @@ except TypeError as error:
 isinstance=lambda value,kind:False
 print(normalize_optional_numeric(2.0))
 ''',
+'''def preserve_bool_float(value:bool|float)->bool|float:
+    return value
+def normalize_bool_float(value:bool|float)->int|float:
+    selected=preserve_bool_float(value)
+    if isinstance(selected,float):
+        return selected+1.5
+    return selected+1
+def normalize_bool_float_bool_test(value:bool|float)->int|float:
+    if isinstance(value,bool):
+        return value+10
+    return value+0.5
+print(normalize_bool_float(False),normalize_bool_float(True),normalize_bool_float(2.0))
+print(normalize_bool_float_bool_test(False),normalize_bool_float_bool_test(True),normalize_bool_float_bool_test(2.0))
+print(normalize_bool_float(4))
+try:
+    print(normalize_bool_float("advisory"))
+except TypeError as error:
+    print(type(error).__name__)
+isinstance=lambda value,kind:False
+print(normalize_bool_float(2.0),normalize_bool_float_bool_test(True))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

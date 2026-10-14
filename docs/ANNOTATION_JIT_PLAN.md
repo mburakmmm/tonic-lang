@@ -242,6 +242,15 @@ akışının ayrılmadan kullanıldığı noktalar güvenli materialization ekle
 native kabul edilmez. Karar
 [ADR 0147](adr/0147-optional-int-float-union-jit.md) içindedir.
 
+`bool | float` karma representation imzası da typed scalar lattice'e eklendi.
+Giriş/resume guard'ı exact bool immediate veya exact Tonic float kabul eder;
+exact builtin `isinstance(..., float)` true dalını F64, false dalını Python 0/1
+integer semantiğindeki bool olarak daraltır. Ters `isinstance(..., bool)` testi
+de bool/F64 kenarlarını üretir. Guarded direct-call sonucu caller'a aynı fact ile
+taşınır. Exact int, string ve yeniden bağlanmış builtin durumları annotation'ı
+zorlayıcı kontrole çevirmeden generic Python yoluna döner. Karar
+[ADR 0148](adr/0148-bool-float-union-jit.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş
