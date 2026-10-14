@@ -632,6 +632,16 @@ print(DefaultBox[str].__args__)
 print(DefaultSpread[bool].__args__)
 print(DefaultAlias[str].__args__)
 ''',
+'''def immediate_identity(value:int|bool|None)->int|bool|None:
+    return value
+def immediate_normalize(value:int|bool|None)->int:
+    result=immediate_identity(value)
+    if result is None:
+        return 0
+    return result+1
+print(immediate_normalize(None),immediate_normalize(False),immediate_normalize(True),immediate_normalize(7))
+print(immediate_normalize(1.5),immediate_identity("advisory"))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

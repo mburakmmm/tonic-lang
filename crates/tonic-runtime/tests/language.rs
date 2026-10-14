@@ -3458,6 +3458,33 @@ fn annotation_jit_refines_optional_int_after_none_identity_test() {
 }
 
 #[test]
+fn annotation_jit_refines_three_way_immediate_union_and_call_results() {
+    let source = concat!(
+        "def identity(value:int|bool|None)->int|bool|None:\n    return value\n",
+        "def normalize(value:int|bool|None)->int:\n",
+        "    result=identity(value)\n",
+        "    if result is None:\n        return 0\n",
+        "    return result+1\n",
+        "print(normalize(None),normalize(False),normalize(True),normalize(7))\n",
+        "print(normalize(1.5))\n",
+        "print(identity('advisory'))",
+    );
+    let program = compile(source, "annotation-jit-three-way-immediate-union").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"0 1 2 8\n2.5\nadvisory\n");
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_compiled, 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 2);
+    assert!(vm.stats.jit_typed_int_guard_elisions >= 2);
+    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

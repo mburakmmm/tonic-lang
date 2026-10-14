@@ -306,6 +306,7 @@ enum AnnotationScalar {
     IntOrNone,
     BoolOrNone,
     IntOrBool,
+    IntOrBoolOrNone,
     Buffer(BufferTypePlan),
     Class {
         class: Value,
@@ -2049,6 +2050,9 @@ impl Vm {
             [TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Int)] => {
                 Some(AnnotationScalar::IntOrBool)
             }
+            [TypePlan::None, TypePlan::Exact(ExactTypePlan::Bool), TypePlan::Exact(ExactTypePlan::Int)] => {
+                Some(AnnotationScalar::IntOrBoolOrNone)
+            }
             _ => None,
         };
         let literal_scalar = |items: &[LiteralTypePlan]| {
@@ -2072,6 +2076,7 @@ impl Vm {
                 (true, true, false) => Some(AnnotationScalar::BoolOrNone),
                 (true, false, true) => Some(AnnotationScalar::IntOrNone),
                 (false, true, true) => Some(AnnotationScalar::IntOrBool),
+                (true, true, true) => Some(AnnotationScalar::IntOrBoolOrNone),
                 _ => None,
             }
         };
@@ -2208,6 +2213,9 @@ impl Vm {
             AnnotationScalar::IntOrNone => value == Value::NONE || value.as_int().is_some(),
             AnnotationScalar::BoolOrNone => value == Value::NONE || value.as_bool().is_some(),
             AnnotationScalar::IntOrBool => value.as_int().is_some() || value.as_bool().is_some(),
+            AnnotationScalar::IntOrBoolOrNone => {
+                value == Value::NONE || value.as_int().is_some() || value.as_bool().is_some()
+            }
             AnnotationScalar::Buffer(plan) => match self.heap.get(value) {
                 Ok(Object::Buffer(buffer)) if plan.dtype == BufferDTypePlan::F64 => {
                     let view = buffer.view();
@@ -2251,6 +2259,12 @@ impl Vm {
             AnnotationScalar::BoolOrNone => value == Value::NONE || value.as_bool().is_some(),
             AnnotationScalar::IntOrBool => {
                 value.as_int().is_some()
+                    || value.as_bool().is_some()
+                    || matches!(self.heap.get(value), Ok(Object::Int(_)))
+            }
+            AnnotationScalar::IntOrBoolOrNone => {
+                value == Value::NONE
+                    || value.as_int().is_some()
                     || value.as_bool().is_some()
                     || matches!(self.heap.get(value), Ok(Object::Int(_)))
             }
@@ -9447,6 +9461,7 @@ impl Vm {
                 AnnotationScalar::IntOrNone => tonic_jit::ScalarType::IntOrNone,
                 AnnotationScalar::BoolOrNone => tonic_jit::ScalarType::BoolOrNone,
                 AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
+                AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
             };
             let signature = tonic_jit::TypedSignature {
                 parameters: summary
@@ -9468,6 +9483,7 @@ impl Vm {
                                 | AnnotationScalar::IntOrNone
                                 | AnnotationScalar::BoolOrNone
                                 | AnnotationScalar::IntOrBool
+                                | AnnotationScalar::IntOrBoolOrNone
                         )
                 });
             let guarded_result = match summary.result {
@@ -9477,6 +9493,7 @@ impl Vm {
                 AnnotationScalar::IntOrNone => Some(tonic_jit::ScalarType::IntOrNone),
                 AnnotationScalar::BoolOrNone => Some(tonic_jit::ScalarType::BoolOrNone),
                 AnnotationScalar::IntOrBool => Some(tonic_jit::ScalarType::IntOrBool),
+                AnnotationScalar::IntOrBoolOrNone => Some(tonic_jit::ScalarType::IntOrBoolOrNone),
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Float
                 | AnnotationScalar::Buffer(_)
@@ -9528,6 +9545,11 @@ impl Vm {
                 {
                     Some(tonic_jit::ScalarType::IntOrBool)
                 }
+                AnnotationScalar::IntOrBoolOrNone
+                    if return_proven && immediate_parameters && inlineable =>
+                {
+                    Some(tonic_jit::ScalarType::IntOrBoolOrNone)
+                }
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Int
                 | AnnotationScalar::Float
@@ -9536,6 +9558,7 @@ impl Vm {
                 | AnnotationScalar::IntOrNone
                 | AnnotationScalar::BoolOrNone
                 | AnnotationScalar::IntOrBool
+                | AnnotationScalar::IntOrBoolOrNone
                 | AnnotationScalar::Buffer(_)
                 | AnnotationScalar::Class { .. } => None,
             };
@@ -10169,6 +10192,7 @@ impl Vm {
             AnnotationScalar::IntOrNone => tonic_jit::ScalarType::IntOrNone,
             AnnotationScalar::BoolOrNone => tonic_jit::ScalarType::BoolOrNone,
             AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
+            AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
         };
         let typed_signature = tonic_jit::TypedSignature {
             parameters: annotation.parameters.iter().copied().map(scalar).collect(),
@@ -10495,6 +10519,7 @@ impl Vm {
                     AnnotationScalar::IntOrNone => tonic_jit::ScalarType::IntOrNone,
                     AnnotationScalar::BoolOrNone => tonic_jit::ScalarType::BoolOrNone,
                     AnnotationScalar::IntOrBool => tonic_jit::ScalarType::IntOrBool,
+                    AnnotationScalar::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
                 };
                 tonic_jit::TypedSignature {
                     parameters: annotation.parameters.iter().copied().map(scalar).collect(),

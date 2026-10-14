@@ -396,6 +396,10 @@ sonra alınır.
         ters operand biçimleri için true/false edge fact'leri, saf `Move` alias
         zinciri, non-None dalında exact scalar lowering ve stale-alias güvenlik
         kapısı. Genel union üye/test narrowing'i açık kalır.
+      - [x] Üç üyeli immediate union: canonical `int | bool | None` giriş/dönüş
+        guard'ı, branch/loop merge lattice'i, `is None` sonrasında non-None dalını
+        `int | bool` olarak native aritmetiğe daraltma, guarded direct-call sonuç
+        propagation'ı ve yanlış tipte advisory generic fallback.
       - [x] Bütün erişilebilir `RETURN` noktalarında result planı kanıtı,
         public JIT metadata/VM sayacı ve kanıtlı native dönüşte yinelenen host
         type-guard elimination; kanıtlanamayan dönüşte exact-PC advisory deopt.

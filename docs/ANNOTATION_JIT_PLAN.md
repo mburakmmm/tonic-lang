@@ -185,6 +185,14 @@ tip kontrolü değildir. Str/Ellipsis veya desteklenmeyen değer taşıyan Liter
 planı generic yürütmede kalır. Karar [ADR 0123](adr/0123-literal-type-plan.md)
 içindedir.
 
+Canonical `int | bool | None` planı da tek-word immediate typed-JIT imzasına
+çevrilir. Giriş ve arbitrary-PC guard'ı üç üyeyi doğrular; `value is None` veya
+ters `is not` dalı non-None kenarında `int | bool` fact'i üretir. Böylece Python'ın
+`bool <: int` sayısal davranışı korunarak toplama gibi integer lowering'leri tag
+guard tekrarına gerek kalmadan çalışır. Yanlış annotation girdisi normal generic
+semantiğe döner; karar [ADR 0143](adr/0143-three-way-immediate-union-jit.md)
+içindedir.
+
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve
