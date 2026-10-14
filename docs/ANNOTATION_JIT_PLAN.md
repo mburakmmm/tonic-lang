@@ -251,6 +251,14 @@ taşınır. Exact int, string ve yeniden bağlanmış builtin durumları annotat
 zorlayıcı kontrole çevirmeden generic Python yoluna döner. Karar
 [ADR 0148](adr/0148-bool-float-union-jit.md) içindedir.
 
+Optional biçim `bool | float | None` de aynı guarded lattice zincirine katıldı.
+None identity testi non-None kenarını `bool | float`a indirir; exact builtin
+`isinstance(..., float/bool)` bundan sonra bool 0/1 ve F64 native state'lerini
+seçer. Giriş, arbitrary-PC resume ve guarded direct-call sonucu üç üyeyi exact
+olarak doğrular. Exact int/string annotation uyuşmazlığı ile builtin rebinding
+generic Python semantiğine exact PC'de döner. Karar
+[ADR 0149](adr/0149-optional-bool-float-union-jit.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş
