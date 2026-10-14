@@ -267,6 +267,14 @@ direct-call sonucu üç representation'ı exact guard eder. String gibi union d�
 değerler ve builtin rebinding generic Python yürütmesine döner. Karar
 [ADR 0150](adr/0150-three-way-numeric-union-jit.md) içindedir.
 
+Temel scalar birleşim ailesinin üst sınırı `int | bool | float | None` ile
+tamamlandı. Exact giriş/resume guard'ı dört representation'ı kabul eder; None
+identity non-None kenarında `int | bool | float` üretir ve mevcut exact
+float/bool/int testleri bunu native alt lattice'lere böler. Guarded direct-call
+sonucu aynı fact'i caller'a taşır. Union dışı değer ve builtin rebinding exact
+PC'de generic Python semantiğine döner. Karar
+[ADR 0151](adr/0151-optional-full-numeric-union-jit.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

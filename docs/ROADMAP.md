@@ -419,6 +419,11 @@ sonra alınır.
         float→`Float/IntOrBool`, bool→`Bool/IntOrFloat` ve Python `bool <: int`
         uyumlu int→`IntOrBool/Float` edge'leri; guarded call-result propagation
         ve advisory fallback.
+      - [x] Canonical `int | bool | float | None` tam scalar union: dört exact
+        representation için giriş/resume guard'ı, None identity sonrasında üç
+        yönlü numeric fact, guarded builtin type-test daraltmaları, direct-call
+        result propagation ve advisory fallback. Böylece temel
+        `int/bool/float/None` union kombinasyon ailesi tamamlandı.
       - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
         control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
         integer aritmetiği ve üye olmayan değerde advisory generic fallback.
