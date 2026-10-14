@@ -221,6 +221,16 @@ ve gerçek sonuç union dışındaysa guard aynı successor PC'de deopt eder ve 
 normal Python değeriyle generic devam eder.
 Karar [ADR 0145](adr/0145-optional-float-union-jit.md) içindedir.
 
+Karma numeric union'ın ilk dilimi `int | float` için tamamlandı. Giriş ve
+arbitrary-PC resume guard'ı ya immediate small-int tag'i ya exact Tonic float
+handle'ı kabul eder. Exact builtin `isinstance(value, float)` true edge'i F64,
+false edge'i i64; `isinstance(value, int)` ise tersini üretir. Her dal kendi
+native arithmetic ve dönüş yolunu kullanır. Guarded direct-call sonucu da aynı
+union fact'ini caller'a taşıyabilir; union dışı gerçek sonuç successor PC'de
+generic yola döner. Float ve int bilgisinin tek register'da tekrar birleştiği
+akışlar açık materialization eklenene kadar mevcut güvenlik reddini korur.
+Karar [ADR 0146](adr/0146-int-float-union-jit.md) içindedir.
+
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve

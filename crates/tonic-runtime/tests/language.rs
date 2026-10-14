@@ -3579,6 +3579,46 @@ fn annotation_jit_propagates_guarded_optional_float_results() {
 }
 
 #[test]
+fn annotation_jit_refines_int_float_union_into_native_branches() {
+    let source = concat!(
+        "def normalize(value:int|float)->int|float:\n",
+        "    if isinstance(value,float):\n        return value+1.5\n",
+        "    return value+1\n",
+        "def normalize_int_test(value:int|float)->int|float:\n",
+        "    if isinstance(value,int):\n        return value+10\n",
+        "    return value+0.5\n",
+        "def preserve(value:int|float)->int|float:\n    return value\n",
+        "def normalize_result(value:int|float)->int|float:\n",
+        "    selected=preserve(value)\n",
+        "    if isinstance(selected,float):\n        return selected+2.5\n",
+        "    return selected+2\n",
+        "print(normalize(4),normalize(2.0))\n",
+        "print(normalize_int_test(4),normalize_int_test(2.0))\n",
+        "print(normalize_result(4),normalize_result(2.0))\n",
+        "print(normalize(True))\n",
+        "try:\n    print(normalize('advisory'))\n",
+        "except TypeError as error:\n    print(type(error).__name__)\n",
+        "isinstance=lambda value,kind:False\n",
+        "print(normalize(2.0))",
+    );
+    let program = compile(source, "annotation-jit-int-float-union").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"5 3.5\n14 2.5\n6 4.5\n2\nTypeError\n3.0\n");
+    assert!(vm.stats.jit_annotation_compiled >= 3, "{:?}", vm.stats);
+    assert_eq!(vm.stats.jit_typed_type_test_sites, 3);
+    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 3);
+    assert!(vm.stats.jit_annotation_guard_misses >= 2);
+    assert!(vm.stats.jit_side_exits >= 4);
+    assert!(vm.stats.jit_resumes >= 4);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

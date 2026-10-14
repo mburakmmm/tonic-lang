@@ -394,6 +394,11 @@ sonra alınır.
         unboxing, arbitrary-PC slot reconstruction, native F64 arithmetic/return,
         guarded direct-call result propagation, unsafe float→boxed-union merge
         reddi ve yanlış girdi/sonuçta advisory fallback.
+      - [x] Canonical `int | float` karma representation imzası: immediate-int
+        veya exact heap-float giriş/resume guard'ı, builtin-identity guarded
+        `isinstance(..., int/float)` ile i64/F64 edge ayrımı, dal başına native
+        arithmetic/return, guarded direct-call result propagation ve union dışı
+        değerde advisory fallback.
       - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
         control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
         integer aritmetiği ve üye olmayan değerde advisory generic fallback.
@@ -532,9 +537,10 @@ sonra alınır.
       propagation ve mutation/rebinding fallback'i.
     - [x] Side-effect-free exact global leaf için `bool`/`None` ve immediate
       union result özeti; ayrıca side-exit/resume üzerinden heap-backed
-      `float | None` result guard'ı. Caller'da optional narrowing, int-bool/F64
-      arithmetic, callee annotation mutation invalidation'ı ve uygun immediate
-      gövdelerde first-call direct inline.
+      `float | None` ile karma `int | float` result guard'ı. Caller'da optional/
+      numeric-union narrowing, int-bool/F64 arithmetic, callee annotation
+      mutation invalidation'ı ve uygun immediate gövdelerde first-call direct
+      inline.
     - [x] Exact global class owner'lı plain function/`staticmethod` için ilk
       annotated class edge: allocation-free method load, static binding guard'ı,
       callee plan invalidation'ı ve class mutation fallback'i.

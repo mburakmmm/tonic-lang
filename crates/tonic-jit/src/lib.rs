@@ -351,6 +351,9 @@ pub enum ScalarType {
     /// A canonical `float | None` annotation. The boxed float remains a
     /// precise root until a refined non-None edge unboxes it into F64 state.
     FloatOrNone,
+    /// A canonical `int | float` annotation. The logical value remains boxed
+    /// until an exact builtin type test selects the i64 or F64 representation.
+    IntOrFloat,
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
@@ -526,6 +529,7 @@ enum ScalarFact {
     IntOrNone,
     BoolOrNone,
     FloatOrNone,
+    IntOrFloat,
     IntOrBool,
     IntOrBoolOrNone,
     F64Buffer { rank: u32, writable: bool },
@@ -542,6 +546,7 @@ impl ScalarFact {
             ScalarType::IntOrNone => Self::IntOrNone,
             ScalarType::BoolOrNone => Self::BoolOrNone,
             ScalarType::FloatOrNone => Self::FloatOrNone,
+            ScalarType::IntOrFloat => Self::IntOrFloat,
             ScalarType::IntOrBool => Self::IntOrBool,
             ScalarType::IntOrBoolOrNone => Self::IntOrBoolOrNone,
             ScalarType::F64Buffer { rank, writable } => Self::F64Buffer { rank, writable },
@@ -561,6 +566,9 @@ impl ScalarFact {
             }
             ScalarType::FloatOrNone => {
                 matches!(self, Self::Float | Self::None | Self::FloatOrNone)
+            }
+            ScalarType::IntOrFloat => {
+                matches!(self, Self::Int | Self::Float | Self::IntOrFloat)
             }
             ScalarType::IntOrBool => matches!(self, Self::Int | Self::Bool | Self::IntOrBool),
             ScalarType::IntOrBoolOrNone => matches!(
@@ -595,6 +603,11 @@ impl ScalarFact {
             && matches!(incoming, Self::Float | Self::None | Self::FloatOrNone)
         {
             return Self::FloatOrNone;
+        }
+        if matches!(self, Self::Int | Self::Float | Self::IntOrFloat)
+            && matches!(incoming, Self::Int | Self::Float | Self::IntOrFloat)
+        {
+            return Self::IntOrFloat;
         }
         if matches!(self, Self::Int | Self::Bool | Self::IntOrBool)
             && matches!(incoming, Self::Int | Self::Bool | Self::IntOrBool)
@@ -783,6 +796,8 @@ fn refine_guarded_type_test_branch(
             (ScalarFact::IntOrBool, ScalarFact::None)
         }
         (TypeTestKind::Float, ScalarFact::FloatOrNone) => (ScalarFact::Float, ScalarFact::None),
+        (TypeTestKind::Float, ScalarFact::IntOrFloat) => (ScalarFact::Float, ScalarFact::Int),
+        (TypeTestKind::Int, ScalarFact::IntOrFloat) => (ScalarFact::Int, ScalarFact::Float),
         _ => return None,
     };
     let mut aliases = vec![value_register];
@@ -1454,19 +1469,24 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             analyze_typed_scalar_execution(code, signature, direct_calls, call_results, type_tests)
         })
         .transpose()?;
-    let has_optional_float = typed_signature.is_some_and(|signature| {
+    let has_guarded_float_union = typed_signature.is_some_and(|signature| {
         signature
             .parameters
             .iter()
             .chain(std::iter::once(&signature.result))
-            .any(|kind| *kind == ScalarType::FloatOrNone)
-    }) || call_results
-        .iter()
-        .any(|summary| summary.result == ScalarType::FloatOrNone)
-        || direct_calls
-            .iter()
-            .any(|call| call.result == Some(ScalarType::FloatOrNone));
-    let float_analysis = if has_optional_float && exact_f64_buffer_registers.is_empty() {
+            .any(|kind| matches!(kind, ScalarType::FloatOrNone | ScalarType::IntOrFloat))
+    }) || call_results.iter().any(|summary| {
+        matches!(
+            summary.result,
+            ScalarType::FloatOrNone | ScalarType::IntOrFloat
+        )
+    }) || direct_calls.iter().any(|call| {
+        matches!(
+            call.result,
+            Some(ScalarType::FloatOrNone | ScalarType::IntOrFloat)
+        )
+    });
+    let float_analysis = if has_guarded_float_union && exact_f64_buffer_registers.is_empty() {
         typed_scalar_analysis
             .as_ref()
             .map(|analysis| analyze_typed_float_execution(code, analysis))
@@ -1568,7 +1588,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![None; code.registers as usize]);
-        let float_scratch = float_analysis.as_ref().map(|_| {
+        let float_scratch = (float_analysis.is_some() || has_guarded_float_union).then(|| {
             builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3))
         });
         let buffer_slots = exact_f64_buffer_parameters
@@ -3192,7 +3212,18 @@ fn validate_guarded_call_results(
     call_results: &[GuardedCallResult],
 ) -> Result<(), Error> {
     for (index, summary) in call_results.iter().enumerate() {
-        if matches!(summary.result, ScalarType::Dynamic | ScalarType::Float) {
+        if !matches!(
+            summary.result,
+            ScalarType::Int
+                | ScalarType::Bool
+                | ScalarType::None
+                | ScalarType::IntOrNone
+                | ScalarType::BoolOrNone
+                | ScalarType::FloatOrNone
+                | ScalarType::IntOrFloat
+                | ScalarType::IntOrBool
+                | ScalarType::IntOrBoolOrNone
+        ) {
             return Err(Error::Backend(format!(
                 "guarded call result at bytecode PC {} must use a supported scalar union",
                 summary.pc
@@ -4302,6 +4333,7 @@ fn analyze_typed_scalar_execution(
                     | ScalarFact::IntOrNone
                     | ScalarFact::BoolOrNone
                     | ScalarFact::FloatOrNone
+                    | ScalarFact::IntOrFloat
                     | ScalarFact::IntOrBoolOrNone
                     | ScalarFact::F64Buffer { .. } => ScalarFact::Unknown,
                 };
@@ -4772,6 +4804,7 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
         | ScalarFact::FloatOrNone
+        | ScalarFact::IntOrFloat
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached integer lowering")
@@ -5037,6 +5070,7 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::IntOrNone
         | ScalarFact::BoolOrNone
         | ScalarFact::FloatOrNone
+        | ScalarFact::IntOrFloat
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached truth lowering")
@@ -5334,6 +5368,7 @@ fn emit_typed_scalar_entry_guards(
             ScalarFact::IntOrNone,
             ScalarFact::BoolOrNone,
             ScalarFact::FloatOrNone,
+            ScalarFact::IntOrFloat,
             ScalarFact::IntOrBool,
             ScalarFact::IntOrBoolOrNone,
         ] {
@@ -5394,6 +5429,23 @@ fn emit_typed_scalar_entry_guards(
                     );
                     inspect_registers = checked_registers;
                     builder.ins().bor(float, none)
+                }
+                ScalarFact::IntOrFloat => {
+                    let integer = exact_int(builder, raw);
+                    let (checked_registers, float) = emit_exact_float_check(
+                        builder,
+                        inspect_registers,
+                        raw,
+                        start_pc,
+                        float_scratch.expect("int-float union guard scratch slot"),
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                        pointer_type,
+                    );
+                    inspect_registers = checked_registers;
+                    builder.ins().bor(integer, float)
                 }
                 ScalarFact::IntOrBool => {
                     let integer = exact_int(builder, raw);
@@ -7134,6 +7186,154 @@ mod tests {
     }
 
     #[test]
+    fn typed_int_float_union_refines_to_distinct_native_representations() {
+        struct FloatRuntime {
+            boxed: Vec<f64>,
+        }
+        impl Runtime for FloatRuntime {
+            fn binary(
+                &mut self,
+                _op: RuntimeOp,
+                _left: u64,
+                _right: u64,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("refined int-float test has no generic binary call")
+            }
+
+            fn load_global(
+                &mut self,
+                _symbol: u32,
+                _registers: &[u64],
+            ) -> Result<u64, RuntimeFailure> {
+                unreachable!("refined int-float test resumes after global loads")
+            }
+
+            fn unbox_float(
+                &mut self,
+                value: u64,
+                _registers: &[u64],
+            ) -> Result<Option<u64>, RuntimeFailure> {
+                Ok((value == 0x100).then_some(2.0_f64.to_bits()))
+            }
+
+            fn box_float(&mut self, bits: u64, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                let handle = 0x200 + self.boxed.len() as u64 * 8;
+                self.boxed.push(f64::from_bits(bits));
+                Ok(handle)
+            }
+
+            fn poll(&mut self, _registers: &[u64]) -> Result<u64, RuntimeFailure> {
+                Ok(0)
+            }
+        }
+
+        let program = function(
+            "def normalize(value):\n    if isinstance(value,float):\n        return value+1.5\n    return value+1",
+        );
+        let code = &program.program().code[1];
+        let call_pc = code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("isinstance call");
+        let call = code.instructions[call_pc];
+        let site = &code.calls[call.c as usize];
+        let resume_pc = call_pc + 1;
+        let callee = 0x1234;
+        let type_object = 0x5678;
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrFloat],
+            result: ScalarType::IntOrFloat,
+        };
+        let type_tests = [GuardedTypeTest {
+            pc: call_pc,
+            callee,
+            type_object,
+            kind: TypeTestKind::Float,
+        }];
+        let constants = code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, _)| MaterializedConstant {
+                pc,
+                value: 0x800 + pc as u64 * 8,
+            })
+            .collect::<Vec<_>>();
+        let analysis =
+            analyze_typed_scalar_execution(code, &signature, &[], &[], &type_tests).unwrap();
+        let compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+            code,
+            &[],
+            &constants,
+            &[],
+            Some(&signature),
+            &[],
+            &type_tests,
+        )
+        .unwrap();
+        assert!(compiled.metadata().typed_return_proven);
+        assert_eq!(compiled.metadata().typed_type_test_sites, 1);
+        assert!(compiled
+            .deopt_maps()
+            .iter()
+            .any(|map| !map.unboxed_float_registers.is_empty()));
+
+        let resume_state = analysis.before[resume_pc]
+            .as_ref()
+            .expect("reachable isinstance successor");
+        let mut runtime = FloatRuntime { boxed: Vec::new() };
+        for (input, condition, expected_int, expected_float) in [
+            (encode_i64(4), VALUE_FALSE as u64, Some(encode_i64(5)), None),
+            (0x100, VALUE_TRUE as u64, None, Some(3.5)),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+            for (register, fact) in resume_state.iter().copied().enumerate() {
+                registers[register] = match fact {
+                    ScalarFact::IntOrFloat => input,
+                    ScalarFact::Bool => condition,
+                    _ => VALUE_UNBOUND,
+                };
+            }
+            registers[call.b as usize] = callee;
+            registers[(site.first + 1) as usize] = type_object;
+            registers[call.a as usize] = condition;
+            let Outcome::Returned { value, .. } = compiled
+                .run_from(&mut registers, resume_pc, &mut runtime)
+                .unwrap()
+            else {
+                panic!("refined int-float union unexpectedly deoptimized");
+            };
+            if let Some(expected) = expected_int {
+                assert_eq!(value, expected);
+            }
+            if let Some(expected) = expected_float {
+                assert_eq!(runtime.boxed.last().copied(), Some(expected));
+            }
+        }
+
+        let mut invalid = vec![VALUE_UNBOUND; compiled.metadata().root_count];
+        for (register, fact) in resume_state.iter().copied().enumerate() {
+            invalid[register] = match fact {
+                ScalarFact::IntOrFloat => 0x998,
+                ScalarFact::Bool => VALUE_FALSE as u64,
+                _ => VALUE_UNBOUND,
+            };
+        }
+        invalid[call.b as usize] = callee;
+        invalid[(site.first + 1) as usize] = type_object;
+        invalid[call.a as usize] = VALUE_FALSE as u64;
+        assert_eq!(
+            compiled
+                .run_from(&mut invalid, resume_pc, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: resume_pc }
+        );
+    }
+
+    #[test]
     fn typed_three_way_immediate_union_refines_to_integer_like_non_none() {
         let program = function(
             "def normalize(value):\n    if value is None:\n        return 0\n    return value+1",
@@ -7226,9 +7426,10 @@ mod tests {
                 ScalarFact::FloatOrNone => VALUE_NONE,
                 ScalarFact::IntOrBool => VALUE_TRUE as u64,
                 ScalarFact::IntOrBoolOrNone => VALUE_NONE,
-                ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {
-                    VALUE_UNBOUND
-                }
+                ScalarFact::Unknown
+                | ScalarFact::Float
+                | ScalarFact::IntOrFloat
+                | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
         loop_registers[add.b as usize] = VALUE_NONE;
@@ -7317,9 +7518,10 @@ mod tests {
                 ScalarFact::FloatOrNone => VALUE_NONE,
                 ScalarFact::IntOrBool => VALUE_TRUE as u64,
                 ScalarFact::IntOrBoolOrNone => VALUE_TRUE as u64,
-                ScalarFact::Unknown | ScalarFact::Float | ScalarFact::F64Buffer { .. } => {
-                    VALUE_UNBOUND
-                }
+                ScalarFact::Unknown
+                | ScalarFact::Float
+                | ScalarFact::IntOrFloat
+                | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
         registers[0] = VALUE_TRUE as u64;
@@ -7451,6 +7653,21 @@ mod tests {
             &[GuardedCallResult {
                 pc: call_pc,
                 result: ScalarType::Float,
+            }],
+        )
+        .is_err());
+        assert!(compile_with_execution_profile_types_and_call_results(
+            code,
+            &[],
+            &[],
+            &[],
+            Some(&signature),
+            &[GuardedCallResult {
+                pc: call_pc,
+                result: ScalarType::F64Buffer {
+                    rank: 1,
+                    writable: false,
+                },
             }],
         )
         .is_err());

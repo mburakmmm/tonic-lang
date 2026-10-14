@@ -693,6 +693,32 @@ def normalize_lied_float(flag:bool)->float|None:
 print(normalize_float_result(False),normalize_float_result(True))
 print(normalize_lied_float(True))
 ''',
+'''def int_float_union(value:int|float)->int|float:
+    if isinstance(value,float):
+        return value+1.5
+    return value+1
+def int_float_union_int_test(value:int|float)->int|float:
+    if isinstance(value,int):
+        return value+10
+    return value+0.5
+def preserve_int_float(value:int|float)->int|float:
+    return value
+def normalize_int_float_result(value:int|float)->int|float:
+    selected=preserve_int_float(value)
+    if isinstance(selected,float):
+        return selected+2.5
+    return selected+2
+print(int_float_union(4),int_float_union(2.0))
+print(int_float_union_int_test(4),int_float_union_int_test(2.0))
+print(normalize_int_float_result(4),normalize_int_float_result(2.0))
+print(int_float_union(True))
+try:
+    print(int_float_union("advisory"))
+except TypeError as error:
+    print(type(error).__name__)
+isinstance=lambda value,kind:False
+print(int_float_union(2.0))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),
