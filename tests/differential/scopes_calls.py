@@ -719,6 +719,24 @@ except TypeError as error:
 isinstance=lambda value,kind:False
 print(int_float_union(2.0))
 ''',
+'''def preserve_optional_numeric(value:int|float|None)->int|float|None:
+    return value
+def normalize_optional_numeric(value:int|float|None)->int|float:
+    selected=preserve_optional_numeric(value)
+    if selected is None:
+        return 0
+    if isinstance(selected,float):
+        return selected+1.5
+    return selected+1
+print(normalize_optional_numeric(None),normalize_optional_numeric(4),normalize_optional_numeric(2.0))
+print(normalize_optional_numeric(True))
+try:
+    print(normalize_optional_numeric("advisory"))
+except TypeError as error:
+    print(type(error).__name__)
+isinstance=lambda value,kind:False
+print(normalize_optional_numeric(2.0))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

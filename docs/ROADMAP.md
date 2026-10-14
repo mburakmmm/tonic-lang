@@ -399,6 +399,12 @@ sonra alınır.
         `isinstance(..., int/float)` ile i64/F64 edge ayrımı, dal başına native
         arithmetic/return, guarded direct-call result propagation ve union dışı
         değerde advisory fallback.
+      - [x] Canonical `int | float | None` optional karma numeric imzası:
+        immediate-int/exact heap-float/None giriş ve arbitrary-PC guard'ı,
+        `is None` sonrasında `int | float` daraltması, ardından exact builtin
+        `isinstance(..., int/float)` ile i64/F64 dalı, guarded direct-call sonuç
+        propagation'ı, yanlış annotation girdisi ve builtin rebinding'de exact-PC
+        advisory fallback.
       - [x] Canonical `int | bool` imzası: iki immediate tag için giriş guard'ı,
         control-flow union join'i, Python `bool <: int` 0/1 decode'u, native
         integer aritmetiği ve üye olmayan değerde advisory generic fallback.
@@ -472,6 +478,26 @@ sonra alınır.
       linker annotation/type-parameter symbol remapping'i de doğrulandı.
     - [x] Compile-rejection tanısı: unsupported bytecode, profitability, code
       budget ve guard-instability için deterministic kayıt ve CLI açıklaması.
+  - [ ] Cython-benzeri annotation hızlı-yolu tamamlanma kapısı. Python'da geçerli
+    kalan normal annotation'lı kod desteklenen subset içinde hotness beklemeden
+    doğrudan typed native tier'a girecek; aynı kaynak Tonic'te kısmi statik
+    davranış kazanırken annotation'sız veya kanıtlanamayan bölgeler dinamik
+    bytecode doğruluk yolunu koruyacak.
+    - [x] Scalar first-call/import-time yönlendirme, `@tonic.compile`,
+      `tonic.warmup`, exact giriş/result guard'ı, annotation dependency
+      invalidation'ı ve sorgulanabilir rejection metadata'sı.
+    - [ ] Local variable annotation'ları, closure/cell akışı, bütün union
+      narrowing biçimleri ve function-wide typed SSA üzerinden kesintisiz
+      unboxed bölgeler; Python `int` overflow'unda bigint materialization/deopt.
+    - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
+      field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
+    - [ ] Homogeneous container/iterator specialization, alias/escape analizi,
+      scalar replacement ve gereken sınırda doğru `Value` materialization.
+    - [ ] Açık Tonic strict scalar/packed-layout türleri, doğrulanmış AOT cache,
+      `inspect/explain` karar yüzeyi ve advisory/strict kip eşdeğerlik matrisi.
+    - [ ] Bütün Python coverage ve roadmap kapıları kapandıktan sonra CPython ve
+      Cython karşılaştırmalı compile-latency, throughput, allocation, peak-memory,
+      code-size ve profiler tabanlı bottleneck kabul raporu.
   - [ ] Unboxed `i64`/`f64`/`bool` register ve çağrı ABI'si; Python `int` için
     overflow'da bigint deopt'u, IEEE float sınırları, exact exception PC'si,
     safepoint stack-map ve interpreter state rekonstrüksiyonu.

@@ -231,6 +231,26 @@ generic yola döner. Float ve int bilgisinin tek register'da tekrar birleştiği
 akışlar açık materialization eklenene kadar mevcut güvenlik reddini korur.
 Karar [ADR 0146](adr/0146-int-float-union-jit.md) içindedir.
 
+Optional karma numeric union'ın ilk tam branch zinciri `int | float | None`
+için tamamlandı. Giriş ve arbitrary-PC resume guard'ı üç representation'ı da
+ayırt eder. `is None` non-None kenarında fact'i `int | float`a daraltır; exact
+builtin `isinstance(..., float/int)` bunu i64 ve F64 native dallarına böler.
+Guarded direct-call sonucu aynı lattice fact'iyle caller'a taşınır. Yanlış
+annotation girdisi veya sonucu generic Python değerini korur; `isinstance` ya da
+type global'i yeniden bağlanırsa successor PC'de deopt edilir. Float ve integer
+akışının ayrılmadan kullanıldığı noktalar güvenli materialization eklenene kadar
+native kabul edilmez. Karar
+[ADR 0147](adr/0147-optional-int-float-union-jit.md) içindedir.
+
+Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
+örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
+annotated field/shape, homogeneous container ve alias/escape analizi ile geniş
+native bölgeler kurulacaktır. Standart Python annotation'ları advisory kalır;
+sabit genişlik ve layout garantileri yalnız açık Tonic strict türleriyle gelir.
+Son kabul, tüm dil coverage kapıları kapandıktan sonra aynı kaynakların CPython,
+Cython ve Tonic üzerindeki compile latency, throughput, allocation, peak memory
+ve code-size ölçümlerini içerir.
+
 TypePlan temeli tek başına her plan için typed native entry seçmez.
 `tuple[T, ...]`, Python `Ellipsis` singleton'ı üzerinden ayrı
 `VariadicTuple(T)` planına dönüşür ve

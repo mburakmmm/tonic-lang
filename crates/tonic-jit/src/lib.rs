@@ -354,6 +354,9 @@ pub enum ScalarType {
     /// A canonical `int | float` annotation. The logical value remains boxed
     /// until an exact builtin type test selects the i64 or F64 representation.
     IntOrFloat,
+    /// A canonical `int | float | None` annotation. Identity refinement first
+    /// removes `None`; an exact type test can then select i64 or F64 state.
+    IntOrFloatOrNone,
     /// A canonical `int | bool` annotation. Both members have immediate
     /// representations and share Python's integer arithmetic semantics.
     IntOrBool,
@@ -530,6 +533,7 @@ enum ScalarFact {
     BoolOrNone,
     FloatOrNone,
     IntOrFloat,
+    IntOrFloatOrNone,
     IntOrBool,
     IntOrBoolOrNone,
     F64Buffer { rank: u32, writable: bool },
@@ -547,6 +551,7 @@ impl ScalarFact {
             ScalarType::BoolOrNone => Self::BoolOrNone,
             ScalarType::FloatOrNone => Self::FloatOrNone,
             ScalarType::IntOrFloat => Self::IntOrFloat,
+            ScalarType::IntOrFloatOrNone => Self::IntOrFloatOrNone,
             ScalarType::IntOrBool => Self::IntOrBool,
             ScalarType::IntOrBoolOrNone => Self::IntOrBoolOrNone,
             ScalarType::F64Buffer { rank, writable } => Self::F64Buffer { rank, writable },
@@ -570,6 +575,16 @@ impl ScalarFact {
             ScalarType::IntOrFloat => {
                 matches!(self, Self::Int | Self::Float | Self::IntOrFloat)
             }
+            ScalarType::IntOrFloatOrNone => matches!(
+                self,
+                Self::Int
+                    | Self::Float
+                    | Self::None
+                    | Self::IntOrNone
+                    | Self::FloatOrNone
+                    | Self::IntOrFloat
+                    | Self::IntOrFloatOrNone
+            ),
             ScalarType::IntOrBool => matches!(self, Self::Int | Self::Bool | Self::IntOrBool),
             ScalarType::IntOrBoolOrNone => matches!(
                 self,
@@ -608,6 +623,27 @@ impl ScalarFact {
             && matches!(incoming, Self::Int | Self::Float | Self::IntOrFloat)
         {
             return Self::IntOrFloat;
+        }
+        if matches!(
+            self,
+            Self::Int
+                | Self::Float
+                | Self::None
+                | Self::IntOrNone
+                | Self::FloatOrNone
+                | Self::IntOrFloat
+                | Self::IntOrFloatOrNone
+        ) && matches!(
+            incoming,
+            Self::Int
+                | Self::Float
+                | Self::None
+                | Self::IntOrNone
+                | Self::FloatOrNone
+                | Self::IntOrFloat
+                | Self::IntOrFloatOrNone
+        ) {
+            return Self::IntOrFloatOrNone;
         }
         if matches!(self, Self::Int | Self::Bool | Self::IntOrBool)
             && matches!(incoming, Self::Int | Self::Bool | Self::IntOrBool)
@@ -699,12 +735,14 @@ fn refine_optional_identity_branch(
             fact @ (ScalarFact::IntOrNone
             | ScalarFact::BoolOrNone
             | ScalarFact::FloatOrNone
+            | ScalarFact::IntOrFloatOrNone
             | ScalarFact::IntOrBoolOrNone),
         ) => (comparison.c, fact),
         (
             fact @ (ScalarFact::IntOrNone
             | ScalarFact::BoolOrNone
             | ScalarFact::FloatOrNone
+            | ScalarFact::IntOrFloatOrNone
             | ScalarFact::IntOrBoolOrNone),
             ScalarFact::None,
         ) => (comparison.b, fact),
@@ -714,6 +752,7 @@ fn refine_optional_identity_branch(
         ScalarFact::IntOrNone => ScalarFact::Int,
         ScalarFact::BoolOrNone => ScalarFact::Bool,
         ScalarFact::FloatOrNone => ScalarFact::Float,
+        ScalarFact::IntOrFloatOrNone => ScalarFact::IntOrFloat,
         ScalarFact::IntOrBoolOrNone => ScalarFact::IntOrBool,
         _ => unreachable!(),
     };
@@ -798,6 +837,12 @@ fn refine_guarded_type_test_branch(
         (TypeTestKind::Float, ScalarFact::FloatOrNone) => (ScalarFact::Float, ScalarFact::None),
         (TypeTestKind::Float, ScalarFact::IntOrFloat) => (ScalarFact::Float, ScalarFact::Int),
         (TypeTestKind::Int, ScalarFact::IntOrFloat) => (ScalarFact::Int, ScalarFact::Float),
+        (TypeTestKind::Float, ScalarFact::IntOrFloatOrNone) => {
+            (ScalarFact::Float, ScalarFact::IntOrNone)
+        }
+        (TypeTestKind::Int, ScalarFact::IntOrFloatOrNone) => {
+            (ScalarFact::Int, ScalarFact::FloatOrNone)
+        }
         _ => return None,
     };
     let mut aliases = vec![value_register];
@@ -1474,16 +1519,21 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             .parameters
             .iter()
             .chain(std::iter::once(&signature.result))
-            .any(|kind| matches!(kind, ScalarType::FloatOrNone | ScalarType::IntOrFloat))
+            .any(|kind| {
+                matches!(
+                    kind,
+                    ScalarType::FloatOrNone | ScalarType::IntOrFloat | ScalarType::IntOrFloatOrNone
+                )
+            })
     }) || call_results.iter().any(|summary| {
         matches!(
             summary.result,
-            ScalarType::FloatOrNone | ScalarType::IntOrFloat
+            ScalarType::FloatOrNone | ScalarType::IntOrFloat | ScalarType::IntOrFloatOrNone
         )
     }) || direct_calls.iter().any(|call| {
         matches!(
             call.result,
-            Some(ScalarType::FloatOrNone | ScalarType::IntOrFloat)
+            Some(ScalarType::FloatOrNone | ScalarType::IntOrFloat | ScalarType::IntOrFloatOrNone)
         )
     });
     let float_analysis = if has_guarded_float_union && exact_f64_buffer_registers.is_empty() {
@@ -3221,6 +3271,7 @@ fn validate_guarded_call_results(
                 | ScalarType::BoolOrNone
                 | ScalarType::FloatOrNone
                 | ScalarType::IntOrFloat
+                | ScalarType::IntOrFloatOrNone
                 | ScalarType::IntOrBool
                 | ScalarType::IntOrBoolOrNone
         ) {
@@ -4334,6 +4385,7 @@ fn analyze_typed_scalar_execution(
                     | ScalarFact::BoolOrNone
                     | ScalarFact::FloatOrNone
                     | ScalarFact::IntOrFloat
+                    | ScalarFact::IntOrFloatOrNone
                     | ScalarFact::IntOrBoolOrNone
                     | ScalarFact::F64Buffer { .. } => ScalarFact::Unknown,
                 };
@@ -4805,6 +4857,7 @@ fn decode_known_integer(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Sca
         | ScalarFact::BoolOrNone
         | ScalarFact::FloatOrNone
         | ScalarFact::IntOrFloat
+        | ScalarFact::IntOrFloatOrNone
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached integer lowering")
@@ -5071,6 +5124,7 @@ fn known_integer_truth(builder: &mut FunctionBuilder<'_>, raw: Value, fact: Scal
         | ScalarFact::BoolOrNone
         | ScalarFact::FloatOrNone
         | ScalarFact::IntOrFloat
+        | ScalarFact::IntOrFloatOrNone
         | ScalarFact::IntOrBoolOrNone
         | ScalarFact::F64Buffer { .. } => {
             unreachable!("non-integer scalar reached truth lowering")
@@ -5369,6 +5423,7 @@ fn emit_typed_scalar_entry_guards(
             ScalarFact::BoolOrNone,
             ScalarFact::FloatOrNone,
             ScalarFact::IntOrFloat,
+            ScalarFact::IntOrFloatOrNone,
             ScalarFact::IntOrBool,
             ScalarFact::IntOrBoolOrNone,
         ] {
@@ -5446,6 +5501,25 @@ fn emit_typed_scalar_entry_guards(
                     );
                     inspect_registers = checked_registers;
                     builder.ins().bor(integer, float)
+                }
+                ScalarFact::IntOrFloatOrNone => {
+                    let integer = exact_int(builder, raw);
+                    let none = builder.ins().icmp_imm(IntCC::Equal, raw, VALUE_NONE as i64);
+                    let (checked_registers, float) = emit_exact_float_check(
+                        builder,
+                        inspect_registers,
+                        raw,
+                        start_pc,
+                        float_scratch.expect("optional int-float union guard scratch slot"),
+                        runtime_signature,
+                        runtime_helper,
+                        runtime_context,
+                        root_count,
+                        pointer_type,
+                    );
+                    inspect_registers = checked_registers;
+                    let numeric = builder.ins().bor(integer, float);
+                    builder.ins().bor(numeric, none)
                 }
                 ScalarFact::IntOrBool => {
                     let integer = exact_int(builder, raw);
@@ -7331,6 +7405,109 @@ mod tests {
                 .unwrap(),
             Outcome::Deopt { pc: resume_pc }
         );
+
+        let optional_program = function(
+            "def normalize(value):\n    if value is None:\n        return 0\n    if isinstance(value,float):\n        return value+1.5\n    return value+1",
+        );
+        let optional_code = &optional_program.program().code[1];
+        let optional_call_pc = optional_code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("optional union isinstance call");
+        let optional_call = optional_code.instructions[optional_call_pc];
+        let optional_site = &optional_code.calls[optional_call.c as usize];
+        let optional_type_tests = [GuardedTypeTest {
+            pc: optional_call_pc,
+            callee,
+            type_object,
+            kind: TypeTestKind::Float,
+        }];
+        let optional_constants = optional_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, _)| MaterializedConstant {
+                pc,
+                value: 0xa00 + pc as u64 * 8,
+            })
+            .collect::<Vec<_>>();
+        let optional_signature = TypedSignature {
+            parameters: vec![ScalarType::IntOrFloatOrNone],
+            result: ScalarType::IntOrFloat,
+        };
+        let optional_analysis = analyze_typed_scalar_execution(
+            optional_code,
+            &optional_signature,
+            &[],
+            &[],
+            &optional_type_tests,
+        )
+        .unwrap();
+        let optional_compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+            optional_code,
+            &[],
+            &optional_constants,
+            &[],
+            Some(&optional_signature),
+            &[],
+            &optional_type_tests,
+        )
+        .unwrap();
+        assert!(optional_compiled.metadata().typed_return_proven);
+
+        let mut none_registers = vec![VALUE_UNBOUND; optional_compiled.metadata().root_count];
+        none_registers[0] = VALUE_NONE;
+        let Outcome::Returned { value, .. } = optional_compiled
+            .run_with_runtime(&mut none_registers, &mut runtime)
+            .unwrap()
+        else {
+            panic!("optional mixed union None path unexpectedly deoptimized");
+        };
+        assert_eq!(value, encode_i64(0));
+
+        let optional_resume = optional_call_pc + 1;
+        let optional_state = optional_analysis.before[optional_resume]
+            .as_ref()
+            .expect("reachable optional isinstance successor");
+        for (input, condition, expected_int, expected_float) in [
+            (encode_i64(4), VALUE_FALSE as u64, Some(encode_i64(5)), None),
+            (0x100, VALUE_TRUE as u64, None, Some(3.5)),
+        ] {
+            let mut registers = vec![VALUE_UNBOUND; optional_compiled.metadata().root_count];
+            for (register, fact) in optional_state.iter().copied().enumerate() {
+                registers[register] = match fact {
+                    ScalarFact::IntOrFloat => input,
+                    ScalarFact::Bool => condition,
+                    _ => VALUE_UNBOUND,
+                };
+            }
+            registers[optional_call.b as usize] = callee;
+            registers[(optional_site.first + 1) as usize] = type_object;
+            registers[optional_call.a as usize] = condition;
+            let Outcome::Returned { value, .. } = optional_compiled
+                .run_from(&mut registers, optional_resume, &mut runtime)
+                .unwrap()
+            else {
+                panic!("optional mixed numeric branch unexpectedly deoptimized");
+            };
+            if let Some(expected) = expected_int {
+                assert_eq!(value, expected);
+            }
+            if let Some(expected) = expected_float {
+                assert_eq!(runtime.boxed.last().copied(), Some(expected));
+            }
+        }
+
+        let mut wrong = vec![VALUE_UNBOUND; optional_compiled.metadata().root_count];
+        wrong[0] = 0x998;
+        assert_eq!(
+            optional_compiled
+                .run_with_runtime(&mut wrong, &mut runtime)
+                .unwrap(),
+            Outcome::Deopt { pc: 0 }
+        );
     }
 
     #[test]
@@ -7429,6 +7606,7 @@ mod tests {
                 ScalarFact::Unknown
                 | ScalarFact::Float
                 | ScalarFact::IntOrFloat
+                | ScalarFact::IntOrFloatOrNone
                 | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
@@ -7521,6 +7699,7 @@ mod tests {
                 ScalarFact::Unknown
                 | ScalarFact::Float
                 | ScalarFact::IntOrFloat
+                | ScalarFact::IntOrFloatOrNone
                 | ScalarFact::F64Buffer { .. } => VALUE_UNBOUND,
             };
         }
