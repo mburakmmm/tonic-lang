@@ -674,6 +674,25 @@ except TypeError as error:
 isinstance=lambda value,kind:False
 print(optional_float_type_test(2.0))
 ''',
+'''def maybe_float(flag:bool)->float|None:
+    if flag:
+        return 2.0
+    return None
+def normalize_float_result(flag:bool)->float:
+    selected=maybe_float(flag)
+    if selected is None:
+        return 0.5
+    return selected+1.5
+def lied_float(flag:bool)->float|None:
+    return "advisory"
+def normalize_lied_float(flag:bool)->float|None:
+    selected=lied_float(flag)
+    if selected is None:
+        return None
+    return selected
+print(normalize_float_result(False),normalize_float_result(True))
+print(normalize_lied_float(True))
+''',
 ]
 ERRORS = [
 ('result=[x async for x in source]', 'SyntaxError'),

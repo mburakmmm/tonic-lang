@@ -1460,7 +1460,12 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             .iter()
             .chain(std::iter::once(&signature.result))
             .any(|kind| *kind == ScalarType::FloatOrNone)
-    });
+    }) || call_results
+        .iter()
+        .any(|summary| summary.result == ScalarType::FloatOrNone)
+        || direct_calls
+            .iter()
+            .any(|call| call.result == Some(ScalarType::FloatOrNone));
     let float_analysis = if has_optional_float && exact_f64_buffer_registers.is_empty() {
         typed_scalar_analysis
             .as_ref()
@@ -3189,7 +3194,7 @@ fn validate_guarded_call_results(
     for (index, summary) in call_results.iter().enumerate() {
         if matches!(summary.result, ScalarType::Dynamic | ScalarType::Float) {
             return Err(Error::Backend(format!(
-                "guarded call result at bytecode PC {} must use an immediate scalar type",
+                "guarded call result at bytecode PC {} must use a supported scalar union",
                 summary.pc
             )));
         }
@@ -7031,6 +7036,101 @@ mod tests {
             .deopt_maps()
             .iter()
             .any(|map| !map.unboxed_float_registers.is_empty()));
+
+        let call_result_program = function(
+            "def normalize(flag):\n    selected=maybe(flag)\n    if selected is None:\n        return 0.5\n    return selected+1.5",
+        );
+        let call_result_code = &call_result_program.program().code[1];
+        let call_result_pc = call_result_code
+            .instructions
+            .iter()
+            .position(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Call))
+            .expect("guarded optional-float call");
+        let call_result_instruction = call_result_code.instructions[call_result_pc];
+        let call_result_constants = call_result_code
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instruction)| Op::try_from(instruction.opcode) == Ok(Op::Const))
+            .map(|(pc, _)| MaterializedConstant {
+                pc,
+                value: 0xa00 + pc as u64 * 8,
+            })
+            .collect::<Vec<_>>();
+        let call_result_signature = TypedSignature {
+            parameters: vec![ScalarType::Bool],
+            result: ScalarType::Float,
+        };
+        let call_results = [GuardedCallResult {
+            pc: call_result_pc,
+            result: ScalarType::FloatOrNone,
+        }];
+        let call_result_analysis = analyze_typed_scalar_execution(
+            call_result_code,
+            &call_result_signature,
+            &[],
+            &call_results,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            call_result_analysis.before[call_result_pc + 1]
+                .as_ref()
+                .unwrap()[call_result_instruction.a as usize],
+            ScalarFact::FloatOrNone
+        );
+        let resume_state = call_result_analysis.before[call_result_pc + 1]
+            .as_ref()
+            .unwrap();
+        let call_result_compiled = compile_with_execution_profile_types_and_call_results(
+            call_result_code,
+            &[],
+            &call_result_constants,
+            &[],
+            Some(&call_result_signature),
+            &call_results,
+        )
+        .unwrap();
+        assert!(call_result_compiled.metadata().typed_return_proven);
+        assert_eq!(call_result_compiled.metadata().typed_call_result_sites, 1);
+        assert!(call_result_compiled
+            .deopt_maps()
+            .iter()
+            .any(|map| !map.unboxed_float_registers.is_empty()));
+
+        for (result, expected) in [(0x100, 3.5), (VALUE_NONE, 0.5)] {
+            let mut call_registers =
+                vec![VALUE_UNBOUND; call_result_compiled.metadata().root_count];
+            for (register, fact) in resume_state.iter().copied().enumerate() {
+                if fact == ScalarFact::Bool {
+                    call_registers[register] = VALUE_TRUE as u64;
+                }
+            }
+            call_registers[call_result_instruction.a as usize] = result;
+            let outcome = call_result_compiled
+                .run_from(&mut call_registers, call_result_pc + 1, &mut runtime)
+                .unwrap();
+            if !matches!(outcome, Outcome::Returned { .. }) {
+                panic!("guarded optional-float result unexpectedly produced {outcome:?}");
+            };
+            assert_eq!(runtime.boxed.last().copied(), Some(expected));
+        }
+
+        let mut invalid_result = vec![VALUE_UNBOUND; call_result_compiled.metadata().root_count];
+        for (register, fact) in resume_state.iter().copied().enumerate() {
+            if fact == ScalarFact::Bool {
+                invalid_result[register] = VALUE_TRUE as u64;
+            }
+        }
+        invalid_result[call_result_instruction.a as usize] = 0x999;
+        assert_eq!(
+            call_result_compiled
+                .run_from(&mut invalid_result, call_result_pc + 1, &mut runtime,)
+                .unwrap(),
+            Outcome::Deopt {
+                pc: call_result_pc + 1
+            }
+        );
     }
 
     #[test]

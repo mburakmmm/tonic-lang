@@ -3547,6 +3547,38 @@ fn annotation_jit_unboxes_optional_float_after_none_refinement() {
 }
 
 #[test]
+fn annotation_jit_propagates_guarded_optional_float_results() {
+    let source = concat!(
+        "def maybe(flag:bool)->float|None:\n",
+        "    if flag:\n        return 2.0\n    return None\n",
+        "def normalize(flag:bool)->float:\n",
+        "    selected=maybe(flag)\n",
+        "    if selected is None:\n        return 0.5\n",
+        "    return selected+1.5\n",
+        "def lied(flag:bool)->float|None:\n    return 'advisory'\n",
+        "def normalize_lie(flag:bool)->float|None:\n",
+        "    selected=lied(flag)\n",
+        "    if selected is None:\n        return None\n",
+        "    return selected\n",
+        "print(normalize(False),normalize(True))\n",
+        "print(normalize_lie(True))",
+    );
+    let program = compile(source, "annotation-jit-optional-float-results").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"0.5 3.5\nadvisory\n");
+    assert!(vm.stats.jit_annotation_compiled >= 2, "{:?}", vm.stats);
+    assert!(vm.stats.jit_typed_call_result_sites >= 2, "{:?}", vm.stats);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 1);
+    assert!(vm.stats.jit_annotation_guard_misses >= 1);
+    assert!(vm.stats.jit_side_exits >= 3);
+    assert!(vm.stats.jit_resumes >= 2);
+}
+
+#[test]
 fn annotation_jit_optional_refinement_does_not_follow_stale_move_aliases() {
     let source = concat!(
         "def unsafe(value:int|None,other:int|None)->int:\n",

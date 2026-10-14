@@ -32,6 +32,13 @@ the exact float type-object logical handles; rebinding either dependency causes
 an exact successor-PC deoptimization before the type-test result influences
 native control flow.
 
+An annotated direct callee may also export `FloatOrNone` as a guarded result
+summary without being inlined. The call executes through the generic VM
+boundary, and native successor-PC re-entry validates the materialized result as
+`None` or an exact Tonic float. Only a later refined float edge unboxes it. A
+lying return annotation therefore deoptimizes at the successor before native
+arithmetic or control flow consumes the result.
+
 The typed-float analysis accepts only operations whose materialization state is
 explicit. A control-flow edge that would lose exact F64 state by merging back
 into a boxed union is rejected until edge materialization exists. Generic
@@ -41,9 +48,9 @@ semantics remain authoritative in that case.
 
 Canonical optional-float functions can compile on their first valid call and
 run identity- or builtin-type-test-refined arithmetic without per-operation
-boxing. Values outside the annotation take the ordinary advisory fallback.
-Deopt maps identify every live unboxed register, and persistent metadata
-contains logical values only.
+boxing. The same fact can cross guarded direct-call boundaries. Values outside
+the annotation take the ordinary advisory fallback. Deopt maps identify every
+live unboxed register, and persistent metadata contains logical values only.
 
 This is the first heap-backed union lowering. Mixed `int | float`, nested
 container unions, and user-class shape unions remain roadmap work, but they can

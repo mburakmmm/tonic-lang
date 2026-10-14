@@ -214,6 +214,11 @@ kenarlarına ayırır. Resume girişi callee ve type-object logical handle'ları
 guard ettikten sonra true edge mevcut F64 materialization yolunu kullanır;
 `isinstance` veya `float` yeniden bağlanırsa successor PC'de generic yürütmeye
 döner.
+Annotated direct callee'nin `float | None` sonucu da generic CALL side-exit'inden
+sonra successor PC'de exact union guard'ından geçer. `None` logical value olarak
+kalır; float dalı branch edge'de F64 slota alınır. Callee annotation'ı yanlışsa
+ve gerçek sonuç union dışındaysa guard aynı successor PC'de deopt eder ve caller
+normal Python değeriyle generic devam eder.
 Karar [ADR 0145](adr/0145-optional-float-union-jit.md) içindedir.
 
 TypePlan temeli tek başına her plan için typed native entry seçmez.

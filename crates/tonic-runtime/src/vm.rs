@@ -9504,11 +9504,11 @@ impl Vm {
                 AnnotationScalar::None => Some(tonic_jit::ScalarType::None),
                 AnnotationScalar::IntOrNone => Some(tonic_jit::ScalarType::IntOrNone),
                 AnnotationScalar::BoolOrNone => Some(tonic_jit::ScalarType::BoolOrNone),
+                AnnotationScalar::FloatOrNone => Some(tonic_jit::ScalarType::FloatOrNone),
                 AnnotationScalar::IntOrBool => Some(tonic_jit::ScalarType::IntOrBool),
                 AnnotationScalar::IntOrBoolOrNone => Some(tonic_jit::ScalarType::IntOrBoolOrNone),
                 AnnotationScalar::Dynamic
                 | AnnotationScalar::Float
-                | AnnotationScalar::FloatOrNone
                 | AnnotationScalar::Buffer(_)
                 | AnnotationScalar::Class { .. } => None,
             };
