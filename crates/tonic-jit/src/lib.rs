@@ -310,8 +310,8 @@ pub struct Metadata {
     pub typed_bool_guard_elisions: usize,
     /// Every reachable RETURN is proven to match the typed signature result.
     pub typed_return_proven: bool,
-    /// Direct-call results imported from guarded annotation summaries.
-    pub typed_call_result_sites: usize,
+    /// Direct-call and generic-boundary results imported from guarded summaries.
+    pub typed_result_sites: usize,
     /// Exact builtin `isinstance` sites that refine an immediate union after a
     /// guarded generic-call resume.
     pub typed_type_test_sites: usize,
@@ -456,12 +456,12 @@ pub struct DirectCall<'a> {
     pub result: Option<ScalarType>,
 }
 
-/// A call result supplied by an embedding runtime after the call itself takes
-/// the ordinary side-exit path. Generated code guards this fact when execution
-/// resumes at the following bytecode PC, so an advisory annotation can never
-/// turn into an unchecked runtime type assertion.
+/// A result supplied by an embedding runtime for an operation that takes the
+/// ordinary side-exit path. Generated code guards this fact when execution
+/// resumes at the following bytecode PC, so advisory metadata can never become
+/// an unchecked runtime type assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GuardedCallResult {
+pub struct GuardedResult {
     pub pc: usize,
     pub result: ScalarType,
 }
@@ -1523,16 +1523,16 @@ pub fn typed_return_is_proven(
     code: &CodeObject,
     signature: &TypedSignature,
 ) -> Result<bool, Error> {
-    typed_return_is_proven_with_call_results(code, signature, &[])
+    typed_return_is_proven_with_results(code, signature, &[])
 }
 
-/// Proves typed returns while importing results from calls that always execute
-/// through the generic VM boundary. Each imported result is guarded on native
-/// re-entry at the exact successor PC.
-pub fn typed_return_is_proven_with_call_results(
+/// Proves typed returns while importing results from operations that execute
+/// through the generic VM boundary. Each result is guarded on native re-entry
+/// at the exact successor PC.
+pub fn typed_return_is_proven_with_results(
     code: &CodeObject,
     signature: &TypedSignature,
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
 ) -> Result<bool, Error> {
     validate_structural_safety(code)?;
     if signature.parameters.len() != code.params as usize {
@@ -1544,8 +1544,8 @@ pub fn typed_return_is_proven_with_call_results(
     if signature.result == ScalarType::Dynamic {
         return Ok(false);
     }
-    validate_guarded_call_results(code, &[], call_results)?;
-    Ok(analyze_typed_scalar_execution(code, signature, &[], call_results, &[])?.return_proven)
+    validate_guarded_results(code, &[], guarded_results)?;
+    Ok(analyze_typed_scalar_execution(code, signature, &[], guarded_results, &[])?.return_proven)
 }
 
 pub fn compile_with_execution_profile_and_types(
@@ -1555,7 +1555,7 @@ pub fn compile_with_execution_profile_and_types(
     exact_float_parameters: &[u16],
     typed_signature: Option<&TypedSignature>,
 ) -> Result<CompiledFunction, Error> {
-    compile_with_execution_profile_types_and_call_results(
+    compile_with_execution_profile_types_and_results(
         code,
         direct_calls,
         materialized_constants,
@@ -1565,38 +1565,38 @@ pub fn compile_with_execution_profile_and_types(
     )
 }
 
-pub fn compile_with_execution_profile_types_and_call_results(
+pub fn compile_with_execution_profile_types_and_results(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
     exact_float_parameters: &[u16],
     typed_signature: Option<&TypedSignature>,
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
 ) -> Result<CompiledFunction, Error> {
-    compile_with_execution_profile_types_call_results_and_type_tests(
+    compile_with_execution_profile_types_results_and_type_tests(
         code,
         direct_calls,
         materialized_constants,
         exact_float_parameters,
         typed_signature,
-        call_results,
+        guarded_results,
         &[],
     )
 }
 
-pub fn compile_with_execution_profile_types_call_results_and_type_tests(
+pub fn compile_with_execution_profile_types_results_and_type_tests(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
     exact_float_parameters: &[u16],
     typed_signature: Option<&TypedSignature>,
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
     type_tests: &[GuardedTypeTest],
 ) -> Result<CompiledFunction, Error> {
     validate_structural_safety(code)?;
-    if typed_signature.is_none() && (!call_results.is_empty() || !type_tests.is_empty()) {
+    if typed_signature.is_none() && (!guarded_results.is_empty() || !type_tests.is_empty()) {
         return Err(Error::Backend(
-            "guarded call facts require a typed signature".into(),
+            "guarded result facts require a typed signature".into(),
         ));
     }
     for direct in direct_calls {
@@ -1656,15 +1656,26 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
         })
         .unwrap_or_default();
     validate_direct_calls(code, direct_calls)?;
-    validate_guarded_call_results(code, direct_calls, call_results)?;
-    validate_guarded_type_tests(code, direct_calls, call_results, type_tests)?;
+    validate_guarded_results(code, direct_calls, guarded_results)?;
+    validate_guarded_type_tests(code, direct_calls, guarded_results, type_tests)?;
     validate_materialized_constants(code, materialized_constants)?;
     let exact_f64_buffer_registers = exact_f64_buffer_parameters
         .iter()
         .map(|(register, _, _)| *register)
         .collect::<Vec<_>>();
-    let base_float_analysis =
+    let mut base_float_analysis =
         analyze_float_execution(code, exact_float_parameters, &exact_f64_buffer_registers)?;
+    if let Some(analysis) = &mut base_float_analysis {
+        for result in guarded_results {
+            if code
+                .instructions
+                .get(result.pc)
+                .is_some_and(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Item))
+            {
+                analysis.buffer_load_source[result.pc] = None;
+            }
+        }
+    }
     let buffer_bounds_proofs = typed_signature
         .zip(base_float_analysis.as_ref())
         .map_or_else(Vec::new, |(signature, analysis)| {
@@ -1679,7 +1690,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
         code,
         direct_calls,
         materialized_constants,
-        call_results,
+        guarded_results,
         &buffer_tuple_items,
         base_float_analysis
             .as_ref()
@@ -1688,7 +1699,13 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
     )?;
     let typed_scalar_analysis = typed_signature
         .map(|signature| {
-            analyze_typed_scalar_execution(code, signature, direct_calls, call_results, type_tests)
+            analyze_typed_scalar_execution(
+                code,
+                signature,
+                direct_calls,
+                guarded_results,
+                type_tests,
+            )
         })
         .transpose()?;
     let has_guarded_float_union = typed_signature.is_some_and(|signature| {
@@ -1709,7 +1726,7 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                         | ScalarType::IntOrBoolOrFloatOrNone
                 )
             })
-    }) || call_results.iter().any(|summary| {
+    }) || guarded_results.iter().any(|summary| {
         matches!(
             summary.result,
             ScalarType::Float
@@ -2589,6 +2606,10 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                     }
                 }
                 Op::Item => {
+                    if guarded_results.iter().any(|summary| summary.pc == pc) {
+                        side_exit(&mut builder, registers, pc);
+                        continue;
+                    }
                     let source = float_analysis
                         .as_ref()
                         .and_then(|analysis| analysis.buffer_load_source[pc]);
@@ -2733,7 +2754,9 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
                     }
                 }
                 Op::Attr => {
-                    if let Some(call) = direct_calls
+                    if guarded_results.iter().any(|summary| summary.pc == pc) {
+                        side_exit(&mut builder, registers, pc);
+                    } else if let Some(call) = direct_calls
                         .iter()
                         .find(|call| call.method_attr_pc == Some(pc))
                     {
@@ -2946,11 +2969,11 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             typed_return_proven: typed_scalar_analysis
                 .as_ref()
                 .is_some_and(|analysis| analysis.return_proven),
-            typed_call_result_sites: direct_calls
+            typed_result_sites: direct_calls
                 .iter()
                 .filter(|call| call.result.is_some())
                 .count()
-                + call_results.len(),
+                + guarded_results.len(),
             typed_type_test_sites: type_tests.len(),
             f64_buffer_parameters: exact_f64_buffer_parameters.len(),
             f64_buffer_item_sites: float_analysis.as_ref().map_or(0, |analysis| {
@@ -3456,12 +3479,12 @@ fn validate_direct_calls(code: &CodeObject, direct_calls: &[DirectCall<'_>]) -> 
     Ok(())
 }
 
-fn validate_guarded_call_results(
+fn validate_guarded_results(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
 ) -> Result<(), Error> {
-    for (index, summary) in call_results.iter().enumerate() {
+    for (index, summary) in guarded_results.iter().enumerate() {
         if !matches!(
             summary.result,
             ScalarType::Int
@@ -3481,34 +3504,40 @@ fn validate_guarded_call_results(
                 | ScalarType::IntOrBoolOrNone
         ) {
             return Err(Error::Backend(format!(
-                "guarded call result at bytecode PC {} must use a supported scalar union",
+                "guarded result at bytecode PC {} must use a supported scalar union",
                 summary.pc
             )));
         }
-        if call_results[..index]
+        if guarded_results[..index]
             .iter()
             .any(|previous| previous.pc == summary.pc)
         {
             return Err(Error::Backend(format!(
-                "duplicate guarded call result at bytecode PC {}",
+                "duplicate guarded result at bytecode PC {}",
                 summary.pc
             )));
         }
         let Some(instruction) = code.instructions.get(summary.pc) else {
             return Err(Error::Backend(format!(
-                "guarded call result PC {} is outside the caller",
+                "guarded result PC {} is outside the code object",
                 summary.pc
             )));
         };
-        if Op::try_from(instruction.opcode) != Ok(Op::Call) {
+        if !matches!(
+            Op::try_from(instruction.opcode),
+            Ok(Op::Call | Op::Attr | Op::Item)
+        ) {
             return Err(Error::Backend(format!(
-                "guarded call result PC {} is not an ordinary CALL",
+                "guarded result PC {} is not a resumable value producer",
                 summary.pc
             )));
         }
-        if direct_calls.iter().any(|direct| direct.pc == summary.pc) {
+        if direct_calls
+            .iter()
+            .any(|direct| direct.pc == summary.pc || direct.method_attr_pc == Some(summary.pc))
+        {
             return Err(Error::Backend(format!(
-                "guarded and direct call results overlap at bytecode PC {}",
+                "guarded result overlaps direct lowering at bytecode PC {}",
                 summary.pc
             )));
         }
@@ -3519,7 +3548,7 @@ fn validate_guarded_call_results(
 fn validate_guarded_type_tests(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
     type_tests: &[GuardedTypeTest],
 ) -> Result<(), Error> {
     for (index, test) in type_tests.iter().enumerate() {
@@ -3553,7 +3582,7 @@ fn validate_guarded_type_tests(
             || test.callee == VALUE_UNBOUND
             || test.type_object == VALUE_UNBOUND
             || direct_calls.iter().any(|direct| direct.pc == test.pc)
-            || call_results.iter().any(|result| result.pc == test.pc)
+            || guarded_results.iter().any(|result| result.pc == test.pc)
         {
             return Err(unsupported(
                 test.pc,
@@ -4506,7 +4535,7 @@ fn analyze_typed_scalar_execution(
     code: &CodeObject,
     signature: &TypedSignature,
     direct_calls: &[DirectCall<'_>],
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
     type_tests: &[GuardedTypeTest],
 ) -> Result<TypedScalarAnalysis, Error> {
     let mut before = vec![None; code.instructions.len()];
@@ -4615,31 +4644,39 @@ fn analyze_typed_scalar_execution(
                 after[instruction.a as usize] = ScalarFact::Unknown;
             }
             Op::Item => {
-                let native = match fact(instruction.b) {
-                    ScalarFact::F64Buffer { rank: 1, .. } => fact(instruction.c).is_integer_like(),
-                    ScalarFact::F64Buffer { rank, .. } if rank >= 2 => {
-                        buffer_index_tuple(code, pc, instruction.c, rank).is_some_and(
-                            |(_, indices)| {
-                                indices
-                                    .into_iter()
-                                    .all(|index| fact(index).is_integer_like())
-                            },
-                        )
-                    }
-                    _ => false,
-                };
-                after[instruction.a as usize] = if native {
-                    ScalarFact::Float
-                } else {
-                    ScalarFact::Unknown
-                };
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or_else(|| {
+                        let native = match fact(instruction.b) {
+                            ScalarFact::F64Buffer { rank: 1, .. } => {
+                                fact(instruction.c).is_integer_like()
+                            }
+                            ScalarFact::F64Buffer { rank, .. } if rank >= 2 => {
+                                buffer_index_tuple(code, pc, instruction.c, rank).is_some_and(
+                                    |(_, indices)| {
+                                        indices
+                                            .into_iter()
+                                            .all(|index| fact(index).is_integer_like())
+                                    },
+                                )
+                            }
+                            _ => false,
+                        };
+                        if native {
+                            ScalarFact::Float
+                        } else {
+                            ScalarFact::Unknown
+                        }
+                    });
             }
             Op::SetItem => {}
             Op::Call => {
                 after[instruction.a as usize] = if type_tests.iter().any(|test| test.pc == pc) {
                     ScalarFact::Bool
                 } else {
-                    call_results
+                    guarded_results
                         .iter()
                         .find(|summary| summary.pc == pc)
                         .map(|summary| summary.result)
@@ -4652,7 +4689,14 @@ fn analyze_typed_scalar_execution(
                         .map_or(ScalarFact::Unknown, ScalarFact::from_signature)
                 };
             }
-            Op::LoadGlobal | Op::Attr | Op::CallExpanded => {
+            Op::Attr => {
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or(ScalarFact::Unknown);
+            }
+            Op::LoadGlobal | Op::CallExpanded => {
                 after[instruction.a as usize] = ScalarFact::Unknown;
             }
             Op::BeginArgs
@@ -4813,7 +4857,7 @@ fn validate_supported(
     code: &CodeObject,
     direct_calls: &[DirectCall<'_>],
     materialized_constants: &[MaterializedConstant],
-    call_results: &[GuardedCallResult],
+    guarded_results: &[GuardedResult],
     buffer_tuple_items: &[BufferTupleItem],
     buffer_store_source: &[Option<u16>],
     typed_signature: Option<&TypedSignature>,
@@ -4916,6 +4960,7 @@ fn validate_supported(
             ));
         }
         if op == Op::Attr
+            && !guarded_results.iter().any(|summary| summary.pc == pc)
             && !direct_calls.iter().any(|call| {
                 call.method_attr_pc == Some(pc)
                     || (call.method_attr_pc.is_none()
@@ -4926,7 +4971,7 @@ fn validate_supported(
                                 && between.a != instruction.a
                         }))
             })
-            && !call_results.iter().any(|summary| {
+            && !guarded_results.iter().any(|summary| {
                 summary.pc > pc
                     && code.instructions[summary.pc].b == instruction.a
                     && code.instructions[pc + 1..summary.pc].iter().all(|between| {
@@ -7443,7 +7488,7 @@ mod tests {
             type_object: 0x5678,
             kind: TypeTestKind::Float,
         }];
-        let type_test_compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let type_test_compiled = compile_with_execution_profile_types_results_and_type_tests(
             type_test_code,
             &[],
             &type_test_constants,
@@ -7484,7 +7529,7 @@ mod tests {
             parameters: vec![ScalarType::Bool],
             result: ScalarType::Float,
         };
-        let call_results = [GuardedCallResult {
+        let guarded_results = [GuardedResult {
             pc: call_result_pc,
             result: ScalarType::FloatOrNone,
         }];
@@ -7492,7 +7537,7 @@ mod tests {
             call_result_code,
             &call_result_signature,
             &[],
-            &call_results,
+            &guarded_results,
             &[],
         )
         .unwrap();
@@ -7505,17 +7550,17 @@ mod tests {
         let resume_state = call_result_analysis.before[call_result_pc + 1]
             .as_ref()
             .unwrap();
-        let call_result_compiled = compile_with_execution_profile_types_and_call_results(
+        let call_result_compiled = compile_with_execution_profile_types_and_results(
             call_result_code,
             &[],
             &call_result_constants,
             &[],
             Some(&call_result_signature),
-            &call_results,
+            &guarded_results,
         )
         .unwrap();
         assert!(call_result_compiled.metadata().typed_return_proven);
-        assert_eq!(call_result_compiled.metadata().typed_call_result_sites, 1);
+        assert_eq!(call_result_compiled.metadata().typed_result_sites, 1);
         assert!(call_result_compiled
             .deopt_maps()
             .iter()
@@ -7635,7 +7680,7 @@ mod tests {
             .collect::<Vec<_>>();
         let analysis =
             analyze_typed_scalar_execution(code, &signature, &[], &[], &type_tests).unwrap();
-        let compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let compiled = compile_with_execution_profile_types_results_and_type_tests(
             code,
             &[],
             &constants,
@@ -7732,7 +7777,7 @@ mod tests {
             &optional_type_tests,
         )
         .unwrap();
-        let optional_compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let optional_compiled = compile_with_execution_profile_types_results_and_type_tests(
             optional_code,
             &[],
             &optional_constants,
@@ -7881,7 +7926,7 @@ mod tests {
             .collect::<Vec<_>>();
         let analysis =
             analyze_typed_scalar_execution(code, &signature, &[], &[], &type_tests).unwrap();
-        let compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let compiled = compile_with_execution_profile_types_results_and_type_tests(
             code,
             &[],
             &constants,
@@ -7988,7 +8033,7 @@ mod tests {
             &optional_type_tests,
         )
         .unwrap();
-        let optional_compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let optional_compiled = compile_with_execution_profile_types_results_and_type_tests(
             optional_code,
             &[],
             &optional_constants,
@@ -8211,7 +8256,7 @@ mod tests {
         }];
         let analysis =
             analyze_typed_scalar_execution(code, &signature, &[], &[], &type_tests).unwrap();
-        let compiled = compile_with_execution_profile_types_call_results_and_type_tests(
+        let compiled = compile_with_execution_profile_types_results_and_type_tests(
             code,
             &[],
             &[],
@@ -8287,7 +8332,7 @@ mod tests {
             ..type_tests[0]
         }];
         assert!(matches!(
-            compile_with_execution_profile_types_call_results_and_type_tests(
+            compile_with_execution_profile_types_results_and_type_tests(
                 code,
                 &[],
                 &[],
@@ -8336,7 +8381,7 @@ mod tests {
             Some(&signature),
         )
         .unwrap();
-        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert_eq!(compiled.metadata().typed_result_sites, 1);
         assert!(compiled.metadata().typed_return_proven);
 
         for (argument, expected) in [
@@ -8370,29 +8415,29 @@ mod tests {
             parameters: vec![ScalarType::Int],
             result: ScalarType::Int,
         };
-        let call_results = [GuardedCallResult {
+        let guarded_results = [GuardedResult {
             pc: call_pc,
             result: ScalarType::Int,
         }];
-        assert!(compile_with_execution_profile_types_and_call_results(
+        assert!(compile_with_execution_profile_types_and_results(
             code,
             &[],
             &[],
             &[],
             Some(&signature),
-            &[GuardedCallResult {
+            &[GuardedResult {
                 pc: call_pc,
                 result: ScalarType::Float,
             }],
         )
         .is_ok());
-        assert!(compile_with_execution_profile_types_and_call_results(
+        assert!(compile_with_execution_profile_types_and_results(
             code,
             &[],
             &[],
             &[],
             Some(&signature),
-            &[GuardedCallResult {
+            &[GuardedResult {
                 pc: call_pc,
                 result: ScalarType::F64Buffer {
                     rank: 1,
@@ -8401,17 +8446,17 @@ mod tests {
             }],
         )
         .is_err());
-        assert!(typed_return_is_proven_with_call_results(code, &signature, &call_results).unwrap());
-        let compiled = compile_with_execution_profile_types_and_call_results(
+        assert!(typed_return_is_proven_with_results(code, &signature, &guarded_results).unwrap());
+        let compiled = compile_with_execution_profile_types_and_results(
             code,
             &[],
             &[],
             &[],
             Some(&signature),
-            &call_results,
+            &guarded_results,
         )
         .unwrap();
-        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert_eq!(compiled.metadata().typed_result_sites, 1);
         assert!(compiled.metadata().typed_return_proven);
 
         let recursive_value = 0x1234_5678_u64;
@@ -9998,19 +10043,19 @@ mod tests {
             parameters: vec![ScalarType::Dynamic, ScalarType::Int],
             result: ScalarType::Int,
         };
-        let compiled = compile_with_execution_profile_types_and_call_results(
+        let compiled = compile_with_execution_profile_types_and_results(
             code,
             &[],
             &[],
             &[],
             Some(&signature),
-            &[GuardedCallResult {
+            &[GuardedResult {
                 pc: call_pc,
                 result: ScalarType::Int,
             }],
         )
         .unwrap();
-        assert_eq!(compiled.metadata().typed_call_result_sites, 1);
+        assert_eq!(compiled.metadata().typed_result_sites, 1);
         assert!(compiled.metadata().typed_return_proven);
 
         let mut registers = vec![VALUE_UNBOUND; compiled.metadata().root_count];

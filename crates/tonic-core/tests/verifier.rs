@@ -27,7 +27,7 @@ fn program() -> Program {
             cell_locals: vec![],
             free_vars: vec![],
             functions: vec![],
-            advisory_call_results: vec![],
+            advisory_results: vec![],
             exception_regions: vec![],
             instructions: vec![
                 Instr::new(Op::Const, 0, 0, 0),
@@ -557,7 +557,7 @@ fn closure_and_signature_metadata() {
 }
 
 #[test]
-fn advisory_call_result_metadata_is_verified() {
+fn advisory_result_metadata_is_verified() {
     let mut valid = program();
     valid.code[0].calls.push(CallSite {
         first: 0,
@@ -568,21 +568,26 @@ fn advisory_call_result_metadata_is_verified() {
         .instructions
         .insert(1, Instr::new(Op::Call, 0, 1, 0));
     valid.code[0].spans.insert(1, Span::default());
-    valid.code[0].advisory_call_results = vec![AdvisoryCallResult {
+    valid.code[0].advisory_results = vec![AdvisoryResult {
         pc: 1,
         result: AdvisoryScalar::Int,
     }];
     valid.clone().verify().unwrap();
+    for producer in [Instr::new(Op::Attr, 0, 1, 0), Instr::new(Op::Item, 0, 0, 1)] {
+        let mut variant = valid.clone();
+        variant.code[0].instructions[1] = producer;
+        variant.verify().unwrap();
+    }
 
-    let mut not_call = valid.clone();
-    not_call.code[0].advisory_call_results[0].pc = 0;
-    assert!(not_call.verify().is_err());
+    let mut not_producer = valid.clone();
+    not_producer.code[0].advisory_results[0].pc = 0;
+    assert!(not_producer.verify().is_err());
     let mut out_of_bounds = valid.clone();
-    out_of_bounds.code[0].advisory_call_results[0].pc = 3;
+    out_of_bounds.code[0].advisory_results[0].pc = 3;
     assert!(out_of_bounds.verify().is_err());
     let mut duplicate = valid;
-    let repeated = duplicate.code[0].advisory_call_results[0];
-    duplicate.code[0].advisory_call_results.push(repeated);
+    let repeated = duplicate.code[0].advisory_results[0];
+    duplicate.code[0].advisory_results.push(repeated);
     assert!(duplicate.verify().is_err());
 }
 

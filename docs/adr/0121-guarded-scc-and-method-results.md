@@ -20,7 +20,7 @@ semantics.
 ## Decision
 
 An exact annotated callee with supported immediate scalar parameters and result
-may produce a `GuardedCallResult` when its body cannot use the direct leaf path.
+may produce a `GuardedResult` when its body cannot use the direct leaf path.
 The ordinary VM executes the call. Cranelift validates the materialized result
 at the successor PC before typed arithmetic, branch or return logic consumes it.
 

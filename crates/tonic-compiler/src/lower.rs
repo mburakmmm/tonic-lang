@@ -190,7 +190,7 @@ fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeO
             .collect(),
         free_vars: scope.free.clone(),
         functions: Vec::new(),
-        advisory_call_results: Vec::new(),
+        advisory_results: Vec::new(),
         exception_regions: Vec::new(),
     })
 }
@@ -1235,7 +1235,7 @@ impl Lower<'_> {
                 if let Some(value) = value {
                     let first_pc = self.code.instructions.len();
                     let value = self.expr(value)?;
-                    let call_pc = self
+                    let producer_pc = self
                         .code
                         .instructions
                         .len()
@@ -1243,8 +1243,10 @@ impl Lower<'_> {
                         .filter(|pc| *pc >= first_pc)
                         .filter(|pc| {
                             let instruction = self.code.instructions[*pc];
-                            Op::try_from(instruction.opcode) == Ok(Op::Call)
-                                && instruction.a == value
+                            matches!(
+                                Op::try_from(instruction.opcode),
+                                Ok(Op::Call | Op::Attr | Op::Item)
+                            ) && instruction.a == value
                         });
                     self.target(target, value, s)?;
                     if !self.scope.module
@@ -1252,10 +1254,11 @@ impl Lower<'_> {
                         && *simple
                         && matches!(target, Target::Name(_))
                     {
-                        if let (Some(pc), Some(result)) =
-                            (call_pc, advisory_scalar(annotation, &self.program.symbols))
-                        {
-                            self.code.advisory_call_results.push(AdvisoryCallResult {
+                        if let (Some(pc), Some(result)) = (
+                            producer_pc,
+                            advisory_scalar(annotation, &self.program.symbols),
+                        ) {
+                            self.code.advisory_results.push(AdvisoryResult {
                                 pc: index(pc)?,
                                 result,
                             });

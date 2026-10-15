@@ -497,13 +497,15 @@ fn variable_annotations_are_owned_and_lowered_by_scope() {
 }
 
 #[test]
-fn local_call_annotations_become_guarded_advisory_metadata() {
+fn local_boundary_annotations_become_guarded_advisory_metadata() {
     let source = concat!(
         "def dynamic():\n    return 1\n",
         "def typed():\n",
         "    integer: int = dynamic()\n",
         "    optional: float | None = dynamic()\n",
         "    full: bool | float | int | None = dynamic()\n",
+        "    attribute: int = integer.real\n",
+        "    item: int = [1][0]\n",
         "    ignored: str = dynamic()\n",
         "    expression: int = dynamic() + 1\n",
         "    return integer\n",
@@ -516,7 +518,7 @@ fn local_call_annotations_become_guarded_advisory_metadata() {
         .find(|code| code.name.ends_with("typed"))
         .unwrap();
     assert_eq!(
-        code.advisory_call_results
+        code.advisory_results
             .iter()
             .map(|hint| hint.result)
             .collect::<Vec<_>>(),
@@ -524,11 +526,17 @@ fn local_call_annotations_become_guarded_advisory_metadata() {
             AdvisoryScalar::Int,
             AdvisoryScalar::FloatOrNone,
             AdvisoryScalar::IntOrBoolOrFloatOrNone,
+            AdvisoryScalar::Int,
+            AdvisoryScalar::Int,
         ]
     );
-    assert!(code.advisory_call_results.iter().all(|hint| {
-        Op::try_from(code.instructions[usize::from(hint.pc)].opcode) == Ok(Op::Call)
-    }));
+    assert_eq!(
+        code.advisory_results
+            .iter()
+            .map(|hint| Op::try_from(code.instructions[usize::from(hint.pc)].opcode).unwrap())
+            .collect::<Vec<_>>(),
+        [Op::Call, Op::Call, Op::Call, Op::Attr, Op::Item]
+    );
 }
 
 #[test]

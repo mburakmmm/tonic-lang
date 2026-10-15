@@ -605,6 +605,22 @@ def classification(value: int) -> bool:
     return local
 print(integer(41),floating(1.5),advisory(7),advisory(0),classification(3))
 ''',
+'''class Box:
+    def __init__(self, value):
+        self.value = value
+class Items:
+    def __init__(self, value):
+        self.value = value
+    def __getitem__(self, index):
+        return self.value
+    def read(self, index: int) -> int:
+        local: int = self[index]
+        return local
+def attribute(box: Box) -> int:
+    local: int = box.value
+    return local + 1
+print(attribute(Box(41)), Items(40).read(0), Items('item-mismatch').read(0))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():

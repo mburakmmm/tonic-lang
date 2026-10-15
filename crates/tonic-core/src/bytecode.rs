@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 34;
+pub const BYTECODE_VERSION: u16 = 35;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -323,11 +323,11 @@ pub enum AdvisoryScalar {
     IntOrBool,
     IntOrBoolOrNone,
 }
-/// A function-local annotation attached to an ordinary CALL result. The call
-/// still executes through the generic VM boundary; native continuation may use
-/// `result` only after guarding the value at `pc + 1`.
+/// A function-local annotation attached to a value-producing generic boundary.
+/// Native continuation may use `result` only after the interpreter materializes
+/// the value and the JIT guards it on re-entry at `pc + 1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AdvisoryCallResult {
+pub struct AdvisoryResult {
     pub pc: u16,
     pub result: AdvisoryScalar,
 }
@@ -361,7 +361,7 @@ pub struct CodeObject {
     pub cell_locals: Vec<u16>,
     pub free_vars: Vec<SymbolId>,
     pub functions: Vec<FunctionSite>,
-    pub advisory_call_results: Vec<AdvisoryCallResult>,
+    pub advisory_results: Vec<AdvisoryResult>,
     pub exception_regions: Vec<ExceptionRegion>,
 }
 #[derive(Clone, Debug)]
@@ -561,15 +561,20 @@ impl Program {
                     }
                 }
             }
-            let mut advisory_call_pcs = std::collections::HashSet::new();
-            for hint in &code.advisory_call_results {
-                if !advisory_call_pcs.insert(hint.pc)
+            let mut advisory_result_pcs = std::collections::HashSet::new();
+            for hint in &code.advisory_results {
+                if !advisory_result_pcs.insert(hint.pc)
                     || code
                         .instructions
                         .get(hint.pc as usize)
-                        .is_none_or(|instruction| Op::try_from(instruction.opcode) != Ok(Op::Call))
+                        .is_none_or(|instruction| {
+                            !matches!(
+                                Op::try_from(instruction.opcode),
+                                Ok(Op::Call | Op::Attr | Op::Item)
+                            )
+                        })
                 {
-                    return Err(bad("invalid advisory call result"));
+                    return Err(bad("invalid advisory result"));
                 }
             }
             for region in &code.exception_regions {

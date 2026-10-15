@@ -288,6 +288,15 @@ native resume reddedilir ve bytecode semantiği devam eder. Call dışı produce
 closure/cell ve genel definite-assignment/SSA inference sonraki dilimlerdir.
 Karar [ADR 0152](adr/0152-local-call-result-annotations.md) içindedir.
 
+İkinci local dilim bytecode v35 ile aynı güvenlik sınırını ordinary attribute ve
+item sonuçlarına taşır. Metadata artık `AdvisoryResult`, JIT girdisi
+`GuardedResult` adını kullanır; verifier yalnız `CALL/ATTR/ITEM` producer PC'lerini
+kabul eder. Runtime bu sitelerde competing direct lowering'i kaldırır, JIT
+generic side-exit'i zorlar ve typed fact'i yalnız successor-PC exact guard'dan
+sonra kullanır. Buffer item hint'i de native indexed-load sayılmaz; guard'lı
+generic sınır olarak ölçülür. Karar
+[ADR 0153](adr/0153-local-generic-producer-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

@@ -20,7 +20,7 @@ requiring a native recursive call ABI.
 
 The annotation planner recognizes exact-global self-recursive ordinary calls
 whose parameters and result use the supported immediate scalar plans. It emits
-a `GuardedCallResult` rather than a direct-inline plan. Cranelift side-exits at
+a `GuardedResult` rather than a direct-inline plan. Cranelift side-exits at
 the call as before. When the child finishes, arbitrary-PC native re-entry guards
 the call destination against the summarized result before any typed arithmetic
 or return consumes it.

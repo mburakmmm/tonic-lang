@@ -72,8 +72,8 @@ The current implementation includes:
   operations, and canonical exact/Literal annotation plans;
 - precise generational tracing GC, compaction, write barriers and remembered sets;
 - a tiered Cranelift JIT with loop OSR, safepoints, guards and PC-indexed deoptimization maps,
-  including guarded function-local scalar call-result hints and first-call
-  annotation-guided `int`, `float`, `bool`, `None`,
+  including guarded function-local scalar call/attribute/item-result hints and
+  first-call annotation-guided `int`, `float`, `bool`, `None`,
   `int | None`, `bool | None`, `float | None`, `int | bool`, `int | float`,
   `bool | float`, `int | bool | float`, `int | float | None`, and
   `bool | float | None`, and `int | bool | float | None` entries, plus
@@ -189,8 +189,8 @@ cargo run -p tonic-cli -- --jit -c $'def sum_to(n):\n total=0\n while n:\n  n-=1
 
 ## Validation
 
-The repository currently contains 483 Rust tests and a differential corpus of
-343 output cases plus 261 exception cases. The documented local matrix covers
+The repository currently contains 484 Rust tests and a differential corpus of
+344 output cases plus 261 exception cases. The documented local matrix covers
 debug/release, interpreter/JIT, and normal/allocation-stress GC execution. CI
 also gates the JIT on Linux x86-64 and macOS AArch64 and runs both fuzz targets
 under AddressSanitizer on each architecture.

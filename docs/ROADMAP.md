@@ -513,6 +513,11 @@ sonra alınır.
         PEP 604 birleşimleri, successor-PC exact guard, F64 unbox, yanlış hint'te
         semantic hata eklemeden interpreter fallback ve ayrı runtime sayacı.
         Call dışı producer, closure/cell ve function-wide local inference açık.
+      - [x] Generic producer genişlemesi: bytecode v35 `AdvisoryResult` ile
+        ordinary `CALL`, `ATTR` ve `ITEM`; ortak `GuardedResult`, direct-lowering
+        çakışma önleme, successor-PC exact guard ve buffer item'ın hint bulunan
+        site'ta zorunlu generic side-exit'i. Global yük/expanded call, closure/cell
+        ve genel function-wide inference açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

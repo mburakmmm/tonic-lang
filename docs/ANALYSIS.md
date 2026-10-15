@@ -506,6 +506,14 @@ hatası üretmeden interpreter'da devam eder. Annotation ifadesinin function
 scope'ta değerlendirilmemesi korunur. Ayrıntı
 [ADR 0152](adr/0152-local-call-result-annotations.md) dosyasındadır.
 
+Bytecode v35 bu sınırı ordinary `ATTR` ve `ITEM` üreticilerine genişletir ve
+call-özel metadata/JIT tipini `AdvisoryResult`/`GuardedResult` olarak geneller.
+Bu opkodlar generic VM'de gerçek değeri materialize ettikten sonra successor
+PC'den native koda döner; guard ancak bu noktada fact'i typed overlay'e taşır.
+Hint bulunan buffer item sitesi, mevcut native f64 load analiziyle yarışmaması
+için bilinçli olarak generic side-exit kullanır. Karar
+[ADR 0153](adr/0153-local-generic-producer-annotations.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

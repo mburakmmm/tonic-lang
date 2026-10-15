@@ -387,6 +387,39 @@ fn native_buffer_load_preserves_negative_and_out_of_bounds_index_semantics() {
 }
 
 #[test]
+fn local_annotation_guards_generic_buffer_item_result() {
+    let program = compile(
+        concat!(
+            "import fastmath\n",
+            "def load(values:fastmath.Buffer[float,1,False], index:int)->float:\n",
+            "    local: float = values[index]\n",
+            "    return local * 2.0\n",
+            "values=fastmath.array([1.5,2.5])\n",
+            "print(load(values,0))\n",
+            "try:\n",
+            "    load(values,2)\n",
+            "except IndexError:\n",
+            "    print('bounds')\n",
+        ),
+        "buffer-local-annotation-item",
+    )
+    .unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut output = Vec::new();
+    vm.run(&program, &mut output).unwrap();
+    assert_eq!(output, b"3.0\nbounds\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 1);
+    assert_eq!(vm.stats.jit_f64_buffer_item_sites, 0);
+    assert!(vm.stats.jit_side_exits >= 2);
+    assert!(vm.stats.jit_resumes >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn annotated_rank_two_buffer_tuple_index_loads_f64_in_native_code() {
     let program = compile(
         concat!(

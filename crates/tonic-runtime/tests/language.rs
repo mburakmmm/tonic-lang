@@ -3114,9 +3114,17 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
 }
 
 #[test]
-fn annotation_jit_guards_function_local_call_results() {
+fn annotation_jit_guards_function_local_boundary_results() {
     let source = concat!(
         "def opaque(value):\n    return value\n",
+        "class Box:\n",
+        "    def __init__(self,value):\n        self.value=value\n",
+        "class Items:\n",
+        "    def __init__(self,value):\n        self.value=value\n",
+        "    def __getitem__(self,index):\n        return self.value\n",
+        "    def read(self,index:int)->int:\n",
+        "        local: int = self[index]\n",
+        "        return local\n",
         "def integer(value:int)->int:\n",
         "    local: int = opaque(value)\n",
         "    return local + 1\n",
@@ -3129,7 +3137,11 @@ fn annotation_jit_guards_function_local_call_results() {
         "def classification(value:int)->bool:\n",
         "    local: bool = isinstance(value,int)\n",
         "    return local\n",
+        "def attribute(box:Box)->int:\n",
+        "    local: int = box.value\n",
+        "    return local + 1\n",
         "print(integer(41),floating(1.5),advisory(7),advisory(0),classification(3))\n",
+        "print(attribute(Box(41)),Items(40).read(0),Items('item-mismatch').read(0))\n",
     );
     let program = compile(source, "annotation-jit-local-call-result").unwrap();
     let mut vm = Vm::new().unwrap();
@@ -3137,13 +3149,13 @@ fn annotation_jit_guards_function_local_call_results() {
     vm.gc_interval = Some(1);
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
-    assert_eq!(out, b"42 3.0 7 mismatch True\n");
-    assert_eq!(vm.stats.jit_annotation_candidates, 4);
-    assert_eq!(vm.stats.jit_annotation_compiled, 4);
-    assert_eq!(vm.stats.jit_compiled, 4);
-    assert!(vm.stats.jit_typed_call_result_sites >= 4);
-    assert_eq!(vm.stats.jit_local_annotation_call_result_sites, 4);
-    assert!(vm.stats.jit_resumes >= 4);
+    assert_eq!(out, b"42 3.0 7 mismatch True\n42 40 item-mismatch\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 5);
+    assert_eq!(vm.stats.jit_annotation_compiled, 5);
+    assert_eq!(vm.stats.jit_compiled, 5);
+    assert!(vm.stats.jit_typed_result_sites >= 5);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 5);
+    assert!(vm.stats.jit_resumes >= 5);
     assert!(vm.stats.jit_deopts >= 1);
 }
 
@@ -3514,7 +3526,7 @@ fn annotation_jit_refines_three_way_immediate_union_and_call_results() {
     assert_eq!(vm.stats.jit_compiled, 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 2);
     assert!(vm.stats.jit_typed_int_guard_elisions >= 2);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
 }
 
@@ -3605,7 +3617,7 @@ fn annotation_jit_propagates_guarded_optional_float_results() {
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"0.5 3.5\nadvisory\n");
     assert!(vm.stats.jit_annotation_compiled >= 2, "{:?}", vm.stats);
-    assert!(vm.stats.jit_typed_call_result_sites >= 2, "{:?}", vm.stats);
+    assert!(vm.stats.jit_typed_result_sites >= 2, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_return_guards_elided >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
     assert!(vm.stats.jit_side_exits >= 3);
@@ -3644,7 +3656,7 @@ fn annotation_jit_refines_int_float_union_into_native_branches() {
     assert_eq!(out, b"5 3.5\n14 2.5\n6 4.5\n2\nTypeError\n3.0\n");
     assert!(vm.stats.jit_annotation_compiled >= 3, "{:?}", vm.stats);
     assert_eq!(vm.stats.jit_typed_type_test_sites, 3);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 3);
     assert!(vm.stats.jit_annotation_guard_misses >= 2);
     assert!(vm.stats.jit_side_exits >= 4);
@@ -3677,7 +3689,7 @@ fn annotation_jit_refines_optional_mixed_numeric_union_and_call_results() {
     assert_eq!(out, b"0 5 3.5\n2\nTypeError\n3.0\n");
     assert!(vm.stats.jit_annotation_compiled >= 1, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_type_test_sites >= 1);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 2);
     assert!(vm.stats.jit_deopts >= 1);
@@ -3711,7 +3723,7 @@ fn annotation_jit_refines_bool_float_union_and_call_results() {
     assert_eq!(out, b"1 2 3.5\n10 11 2.5\n5\nTypeError\n3.0 1.5\n");
     assert!(vm.stats.jit_annotation_compiled >= 2, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_type_test_sites >= 2);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 2);
     assert!(vm.stats.jit_annotation_guard_misses >= 2);
     assert!(vm.stats.jit_deopts >= 2);
@@ -3742,7 +3754,7 @@ fn annotation_jit_refines_optional_bool_float_union_and_call_results() {
     assert_eq!(out, b"0 1 2 3.5\n2\nTypeError\n3.0\n");
     assert!(vm.stats.jit_annotation_compiled >= 1, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_type_test_sites >= 1);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 2);
     assert!(vm.stats.jit_deopts >= 1);
@@ -3783,7 +3795,7 @@ fn annotation_jit_refines_three_way_numeric_union_and_call_results() {
     );
     assert!(vm.stats.jit_annotation_compiled >= 3, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_type_test_sites >= 4);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 3);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
     assert!(vm.stats.jit_deopts >= 1);
@@ -3813,7 +3825,7 @@ fn annotation_jit_refines_optional_full_numeric_union_and_call_results() {
     assert_eq!(out, b"0 1 2 5 3.5\nTypeError\n3.0\n");
     assert!(vm.stats.jit_annotation_compiled >= 1, "{:?}", vm.stats);
     assert!(vm.stats.jit_typed_type_test_sites >= 1);
-    assert!(vm.stats.jit_typed_call_result_sites >= 1);
+    assert!(vm.stats.jit_typed_result_sites >= 1);
     assert!(vm.stats.jit_typed_return_guards_elided >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
     assert!(vm.stats.jit_deopts >= 1);
@@ -3906,7 +3918,7 @@ fn annotation_jit_propagates_guarded_direct_callee_results() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"41\n41\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert!(vm.stats.jit_direct_calls >= 1);
     assert!(vm.stats.jit_annotation_invalidations >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -3929,7 +3941,7 @@ fn annotation_jit_propagates_guarded_class_function_results() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"41\n41\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 1);
     assert!(vm.stats.jit_direct_calls >= 1);
     assert!(vm.stats.jit_annotation_invalidations >= 1);
@@ -3955,7 +3967,7 @@ fn annotation_jit_class_function_guard_observes_rebinding() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"41\n61\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 1);
     assert!(vm.stats.jit_deopts >= 1);
 }
@@ -3974,7 +3986,7 @@ fn annotation_jit_guards_unproven_class_function_result() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"2\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 0);
     assert_eq!(vm.stats.jit_direct_calls, 0);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -3998,7 +4010,7 @@ fn annotation_jit_propagates_global_instance_method_result() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"22\n31\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 1);
     assert!(vm.stats.jit_direct_calls >= 1);
     assert!(vm.stats.jit_deopts >= 1);
@@ -4022,7 +4034,7 @@ fn annotation_jit_propagates_classmethod_result_without_cls_annotation() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"41\n41\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 1);
     assert!(vm.stats.jit_direct_calls >= 1);
     assert!(vm.stats.jit_annotation_invalidations >= 1);
@@ -4054,7 +4066,7 @@ fn annotation_jit_guards_annotated_instance_parameter_and_shape_changes() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"22\n31\n41\n51\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 1);
     assert!(vm.stats.jit_direct_calls >= 1);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -4085,7 +4097,7 @@ fn annotation_jit_propagates_guarded_immediate_union_results() {
     assert_eq!(out, b"0 5\n2 5\n0\n");
     assert_eq!(vm.stats.jit_annotation_compiled, 3);
     assert_eq!(vm.stats.jit_compiled, 3);
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 2);
+    assert_eq!(vm.stats.jit_typed_result_sites, 2);
     assert!(vm.stats.jit_direct_calls >= 4);
     assert!(vm.stats.jit_annotation_invalidations >= 1);
     assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
@@ -4113,7 +4125,7 @@ fn annotation_jit_guards_self_recursive_call_results() {
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"21\nTrue\n6\n");
     assert_eq!(vm.stats.jit_annotation_compiled, 2);
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 2);
+    assert_eq!(vm.stats.jit_typed_result_sites, 2);
     assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
     assert!(vm.stats.jit_side_exits >= 8);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -4141,7 +4153,7 @@ fn annotation_jit_guards_mutual_recursive_call_results() {
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"True False\nFalse\n");
     assert_eq!(vm.stats.jit_annotation_compiled, 4);
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 4);
+    assert_eq!(vm.stats.jit_typed_result_sites, 4);
     assert_eq!(vm.stats.jit_typed_return_guards_elided, 2);
     assert!(vm.stats.jit_side_exits >= 20);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
@@ -4170,7 +4182,7 @@ fn annotation_jit_guards_non_inline_method_results() {
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"7 4\n7\n");
     assert_eq!(vm.stats.jit_annotation_compiled, 1);
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_typed_return_guards_elided, 1);
     assert_eq!(vm.stats.jit_direct_method_sites, 0);
     assert!(vm.stats.jit_side_exits >= 4);
@@ -4191,7 +4203,7 @@ fn annotation_jit_guards_unproven_direct_callee_result() {
     let mut out = Vec::new();
     vm.run(&program, &mut out).unwrap();
     assert_eq!(out, b"2\n");
-    assert_eq!(vm.stats.jit_typed_call_result_sites, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
     assert_eq!(vm.stats.jit_direct_calls, 0);
     assert!(vm.stats.jit_annotation_guard_misses >= 1);
 }

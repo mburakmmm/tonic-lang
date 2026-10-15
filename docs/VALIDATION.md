@@ -41,10 +41,10 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/aggregate_comparison.py`
 
 Test dağılımı: CLI 10, compiler/parser 32, core verifier 21, Cranelift JIT 39, runtime unit 30,
-direct bytecode VM 4, buffer 14, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
+direct bytecode VM 4, buffer 15, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
 native handles 5, language/runtime 171, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 483 test.
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 484 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -1045,9 +1045,17 @@ kanıtlar.
 Function-local advisory call-result dilimi bytecode v34 verifier testiyle bozuk,
 out-of-range ve duplicate metadata'yı reddeder. Compiler testi `int`,
 `float | None` ve tam scalar union hint'lerini yalnız doğrudan ordinary-call
-initializer için üretir; desteklenmeyen `str` ve call dışı expression metadata
-oluşturmaz. Runtime testi exact int ve float sonuçlarını successor-PC resume ile
+initializer için üretir; desteklenmeyen `str` ve producer sonrasında arithmetic
+bulunan expression metadata oluşturmaz. Runtime testi exact int ve float
+sonuçlarını successor-PC resume ile
 native data-flow'a taşır, allocation-stress GC altında çalışır ve yalan local
 `int` hint'inde string sonucu TypeError eklemeden interpreter dönüşü olarak
-korur. Ayrı `jit_local_annotation_call_result_sites` sayacı kullanılan sınırları
+korur. Ayrı `jit_local_annotation_result_sites` sayacı kullanılan sınırları
 gözlenebilir yapar.
+
+Bytecode v35 generic producer dilimi verifier'da `CALL`, `ATTR` ve `ITEM`
+PC'lerini kabul eder; diğer opkod, duplicate ve out-of-range metadata'yı reddeder.
+Runtime attribute testinde doğru int sonucu native toplama akışına taşınır.
+Buffer integration testi annotated item'ı generic side-exit'te materialize eder,
+float guard sonrası native çarpıma devam eder, out-of-bounds `IndexError`'ını
+korur ve site'ın native buffer load metriğine yanlış yazılmadığını doğrular.
