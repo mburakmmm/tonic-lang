@@ -122,6 +122,7 @@ pub struct Stats {
     pub jit_typed_bool_guard_elisions: u64,
     pub jit_typed_return_guards_elided: u64,
     pub jit_typed_call_result_sites: u64,
+    pub jit_local_annotation_call_result_sites: u64,
     pub jit_typed_type_test_sites: u64,
     pub jit_f64_buffer_parameters: u64,
     pub jit_f64_buffer_item_sites: u64,
@@ -321,6 +322,44 @@ enum AnnotationScalar {
         type_id: u32,
         version: u64,
     },
+}
+
+fn advisory_scalar_to_jit(kind: tonic_core::bytecode::AdvisoryScalar) -> tonic_jit::ScalarType {
+    use tonic_core::bytecode::AdvisoryScalar as Source;
+    match kind {
+        Source::Int => tonic_jit::ScalarType::Int,
+        Source::Float => tonic_jit::ScalarType::Float,
+        Source::Bool => tonic_jit::ScalarType::Bool,
+        Source::None => tonic_jit::ScalarType::None,
+        Source::IntOrNone => tonic_jit::ScalarType::IntOrNone,
+        Source::BoolOrNone => tonic_jit::ScalarType::BoolOrNone,
+        Source::FloatOrNone => tonic_jit::ScalarType::FloatOrNone,
+        Source::IntOrFloat => tonic_jit::ScalarType::IntOrFloat,
+        Source::IntOrFloatOrNone => tonic_jit::ScalarType::IntOrFloatOrNone,
+        Source::BoolOrFloat => tonic_jit::ScalarType::BoolOrFloat,
+        Source::BoolOrFloatOrNone => tonic_jit::ScalarType::BoolOrFloatOrNone,
+        Source::IntOrBoolOrFloat => tonic_jit::ScalarType::IntOrBoolOrFloat,
+        Source::IntOrBoolOrFloatOrNone => tonic_jit::ScalarType::IntOrBoolOrFloatOrNone,
+        Source::IntOrBool => tonic_jit::ScalarType::IntOrBool,
+        Source::IntOrBoolOrNone => tonic_jit::ScalarType::IntOrBoolOrNone,
+    }
+}
+
+fn add_advisory_call_results(
+    code: &tonic_core::bytecode::CodeObject,
+    direct_calls: &mut Vec<tonic_jit::DirectCall<'_>>,
+    results: &mut Vec<tonic_jit::GuardedCallResult>,
+) {
+    for hint in &code.advisory_call_results {
+        let pc = usize::from(hint.pc);
+        let result = advisory_scalar_to_jit(hint.result);
+        direct_calls.retain(|call| call.pc != pc);
+        if let Some(existing) = results.iter_mut().find(|existing| existing.pc == pc) {
+            existing.result = result;
+        } else {
+            results.push(tonic_jit::GuardedCallResult { pc, result });
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -10379,9 +10418,19 @@ impl Vm {
         mut annotation: AnnotationJitGuard,
         budget_limit: usize,
     ) -> bool {
-        let (direct_calls, dependencies, guarded_call_results) =
+        let (mut direct_calls, dependencies, mut guarded_call_results) =
             self.jit_annotation_direct_calls(program, code_id, None, &annotation);
-        let guarded_type_tests = self.jit_annotation_type_tests(program, code_id);
+        add_advisory_call_results(
+            &program.code[code_id],
+            &mut direct_calls,
+            &mut guarded_call_results,
+        );
+        let mut guarded_type_tests = self.jit_annotation_type_tests(program, code_id);
+        guarded_type_tests.retain(|test| {
+            !guarded_call_results
+                .iter()
+                .any(|result| result.pc == test.pc)
+        });
         annotation.callees = dependencies;
         let exact_float_parameters = annotation
             .parameters
@@ -10491,6 +10540,8 @@ impl Vm {
                 self.stats.jit_typed_return_guards_elided +=
                     u64::from(metadata.typed_return_proven);
                 self.stats.jit_typed_call_result_sites += metadata.typed_call_result_sites as u64;
+                self.stats.jit_local_annotation_call_result_sites +=
+                    program.code[code_id].advisory_call_results.len() as u64;
                 self.stats.jit_typed_type_test_sites += metadata.typed_type_test_sites as u64;
                 self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
                 self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;
@@ -10706,7 +10757,17 @@ impl Vm {
                 }
                 annotation.callees = dependencies;
                 guarded_call_results = annotation_results;
+                add_advisory_call_results(
+                    &program.code[code_id],
+                    &mut direct_calls,
+                    &mut guarded_call_results,
+                );
                 guarded_type_tests = self.jit_annotation_type_tests(program, code_id);
+                guarded_type_tests.retain(|test| {
+                    !guarded_call_results
+                        .iter()
+                        .any(|result| result.pc == test.pc)
+                });
             }
             let exact_float_parameters = annotation.as_ref().map_or_else(
                 || {
@@ -10838,6 +10899,8 @@ impl Vm {
                         u64::from(annotation.is_some() && metadata.typed_return_proven);
                     self.stats.jit_typed_call_result_sites +=
                         metadata.typed_call_result_sites as u64;
+                    self.stats.jit_local_annotation_call_result_sites +=
+                        program.code[code_id].advisory_call_results.len() as u64;
                     self.stats.jit_typed_type_test_sites += metadata.typed_type_test_sites as u64;
                     self.stats.jit_f64_buffer_parameters += metadata.f64_buffer_parameters as u64;
                     self.stats.jit_f64_buffer_item_sites += metadata.f64_buffer_item_sites as u64;

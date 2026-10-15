@@ -1699,7 +1699,8 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
             .any(|kind| {
                 matches!(
                     kind,
-                    ScalarType::FloatOrNone
+                    ScalarType::Float
+                        | ScalarType::FloatOrNone
                         | ScalarType::IntOrFloat
                         | ScalarType::IntOrFloatOrNone
                         | ScalarType::BoolOrFloat
@@ -1711,7 +1712,8 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
     }) || call_results.iter().any(|summary| {
         matches!(
             summary.result,
-            ScalarType::FloatOrNone
+            ScalarType::Float
+                | ScalarType::FloatOrNone
                 | ScalarType::IntOrFloat
                 | ScalarType::IntOrFloatOrNone
                 | ScalarType::BoolOrFloat
@@ -1723,7 +1725,8 @@ pub fn compile_with_execution_profile_types_call_results_and_type_tests(
         matches!(
             call.result,
             Some(
-                ScalarType::FloatOrNone
+                ScalarType::Float
+                    | ScalarType::FloatOrNone
                     | ScalarType::IntOrFloat
                     | ScalarType::IntOrFloatOrNone
                     | ScalarType::BoolOrFloat
@@ -3462,6 +3465,7 @@ fn validate_guarded_call_results(
         if !matches!(
             summary.result,
             ScalarType::Int
+                | ScalarType::Float
                 | ScalarType::Bool
                 | ScalarType::None
                 | ScalarType::IntOrNone
@@ -8381,7 +8385,7 @@ mod tests {
                 result: ScalarType::Float,
             }],
         )
-        .is_err());
+        .is_ok());
         assert!(compile_with_execution_profile_types_and_call_results(
             code,
             &[],

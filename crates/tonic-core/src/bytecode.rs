@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 33;
+pub const BYTECODE_VERSION: u16 = 34;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -302,6 +302,35 @@ pub struct ExceptionRegion {
     pub target: u16,
     pub exception: u16,
 }
+/// A scalar fact carried by source-level advisory metadata. These values never
+/// enforce a guest-language type; consumers must guard the materialized value
+/// and fall back to ordinary bytecode semantics on a mismatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdvisoryScalar {
+    Int,
+    Float,
+    Bool,
+    None,
+    IntOrNone,
+    BoolOrNone,
+    FloatOrNone,
+    IntOrFloat,
+    IntOrFloatOrNone,
+    BoolOrFloat,
+    BoolOrFloatOrNone,
+    IntOrBoolOrFloat,
+    IntOrBoolOrFloatOrNone,
+    IntOrBool,
+    IntOrBoolOrNone,
+}
+/// A function-local annotation attached to an ordinary CALL result. The call
+/// still executes through the generic VM boundary; native continuation may use
+/// `result` only after guarding the value at `pc + 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdvisoryCallResult {
+    pub pc: u16,
+    pub result: AdvisoryScalar,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     pub positional: u16,
@@ -332,6 +361,7 @@ pub struct CodeObject {
     pub cell_locals: Vec<u16>,
     pub free_vars: Vec<SymbolId>,
     pub functions: Vec<FunctionSite>,
+    pub advisory_call_results: Vec<AdvisoryCallResult>,
     pub exception_regions: Vec<ExceptionRegion>,
 }
 #[derive(Clone, Debug)]
@@ -529,6 +559,17 @@ impl Program {
                     if *capture as usize >= cell_count {
                         return Err(bad("closure capture out of bounds"));
                     }
+                }
+            }
+            let mut advisory_call_pcs = std::collections::HashSet::new();
+            for hint in &code.advisory_call_results {
+                if !advisory_call_pcs.insert(hint.pc)
+                    || code
+                        .instructions
+                        .get(hint.pc as usize)
+                        .is_none_or(|instruction| Op::try_from(instruction.opcode) != Ok(Op::Call))
+                {
+                    return Err(bad("invalid advisory call result"));
                 }
             }
             for region in &code.exception_regions {

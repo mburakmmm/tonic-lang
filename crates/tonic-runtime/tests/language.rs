@@ -3114,6 +3114,40 @@ fn annotation_jit_compiles_numeric_leaf_on_first_call() {
 }
 
 #[test]
+fn annotation_jit_guards_function_local_call_results() {
+    let source = concat!(
+        "def opaque(value):\n    return value\n",
+        "def integer(value:int)->int:\n",
+        "    local: int = opaque(value)\n",
+        "    return local + 1\n",
+        "def floating(value:float)->float:\n",
+        "    local: float = opaque(value)\n",
+        "    return local * 2.0\n",
+        "def advisory(value:int)->int:\n",
+        "    local: int = opaque('mismatch' if value == 0 else value)\n",
+        "    return local\n",
+        "def classification(value:int)->bool:\n",
+        "    local: bool = isinstance(value,int)\n",
+        "    return local\n",
+        "print(integer(41),floating(1.5),advisory(7),advisory(0),classification(3))\n",
+    );
+    let program = compile(source, "annotation-jit-local-call-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42 3.0 7 mismatch True\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 4);
+    assert_eq!(vm.stats.jit_annotation_compiled, 4);
+    assert_eq!(vm.stats.jit_compiled, 4);
+    assert!(vm.stats.jit_typed_call_result_sites >= 4);
+    assert_eq!(vm.stats.jit_local_annotation_call_result_sites, 4);
+    assert!(vm.stats.jit_resumes >= 4);
+    assert!(vm.stats.jit_deopts >= 1);
+}
+
+#[test]
 fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
     let source = concat!(
         "import tonic\n",

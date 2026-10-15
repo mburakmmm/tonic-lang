@@ -589,6 +589,22 @@ box={}
 box['item']: missing_name = 4
 print(box)
 ''',
+'''def opaque(value):
+    return value
+def integer(value: int) -> int:
+    local: int = opaque(value)
+    return local + 1
+def floating(value: float) -> float:
+    local: float = opaque(value)
+    return local * 2.0
+def advisory(value: int) -> int:
+    local: int = opaque('mismatch' if value == 0 else value)
+    return local
+def classification(value: int) -> bool:
+    local: bool = isinstance(value,int)
+    return local
+print(integer(41),floating(1.5),advisory(7),advisory(0),classification(3))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():

@@ -190,7 +190,55 @@ fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeO
             .collect(),
         free_vars: scope.free.clone(),
         functions: Vec::new(),
+        advisory_call_results: Vec::new(),
         exception_regions: Vec::new(),
+    })
+}
+
+fn advisory_scalar(annotation: &Expr, symbols: &[String]) -> Option<AdvisoryScalar> {
+    fn members(annotation: &Expr, symbols: &[String], mask: &mut u8) -> Option<()> {
+        match &annotation.kind {
+            ExprKind::Binary(left, BinaryOp::BitOr, right) => {
+                members(left, symbols, mask)?;
+                members(right, symbols, mask)
+            }
+            ExprKind::Constant(Constant::None) => {
+                *mask |= 1 << 3;
+                Some(())
+            }
+            ExprKind::Name(name) => {
+                *mask |= match symbols.get(name.0 as usize)?.as_str() {
+                    "int" => 1,
+                    "bool" => 1 << 1,
+                    "float" => 1 << 2,
+                    "NoneType" => 1 << 3,
+                    _ => return None,
+                };
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    let mut mask = 0;
+    members(annotation, symbols, &mut mask)?;
+    Some(match mask {
+        0b0001 => AdvisoryScalar::Int,
+        0b0010 => AdvisoryScalar::Bool,
+        0b0100 => AdvisoryScalar::Float,
+        0b1000 => AdvisoryScalar::None,
+        0b1001 => AdvisoryScalar::IntOrNone,
+        0b1010 => AdvisoryScalar::BoolOrNone,
+        0b1100 => AdvisoryScalar::FloatOrNone,
+        0b0101 => AdvisoryScalar::IntOrFloat,
+        0b1101 => AdvisoryScalar::IntOrFloatOrNone,
+        0b0110 => AdvisoryScalar::BoolOrFloat,
+        0b1110 => AdvisoryScalar::BoolOrFloatOrNone,
+        0b0111 => AdvisoryScalar::IntOrBoolOrFloat,
+        0b1111 => AdvisoryScalar::IntOrBoolOrFloatOrNone,
+        0b0011 => AdvisoryScalar::IntOrBool,
+        0b1011 => AdvisoryScalar::IntOrBoolOrNone,
+        _ => return None,
     })
 }
 
@@ -1185,8 +1233,34 @@ impl Lower<'_> {
                 simple,
             } => {
                 if let Some(value) = value {
+                    let first_pc = self.code.instructions.len();
                     let value = self.expr(value)?;
+                    let call_pc = self
+                        .code
+                        .instructions
+                        .len()
+                        .checked_sub(1)
+                        .filter(|pc| *pc >= first_pc)
+                        .filter(|pc| {
+                            let instruction = self.code.instructions[*pc];
+                            Op::try_from(instruction.opcode) == Ok(Op::Call)
+                                && instruction.a == value
+                        });
                     self.target(target, value, s)?;
+                    if !self.scope.module
+                        && !self.scope.class_body
+                        && *simple
+                        && matches!(target, Target::Name(_))
+                    {
+                        if let (Some(pc), Some(result)) =
+                            (call_pc, advisory_scalar(annotation, &self.program.symbols))
+                        {
+                            self.code.advisory_call_results.push(AdvisoryCallResult {
+                                pc: index(pc)?,
+                                result,
+                            });
+                        }
+                    }
                 } else {
                     match target {
                         Target::Name(_) => {}

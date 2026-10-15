@@ -27,6 +27,7 @@ fn program() -> Program {
             cell_locals: vec![],
             free_vars: vec![],
             functions: vec![],
+            advisory_call_results: vec![],
             exception_regions: vec![],
             instructions: vec![
                 Instr::new(Op::Const, 0, 0, 0),
@@ -553,6 +554,36 @@ fn closure_and_signature_metadata() {
     for p in variants {
         assert!(p.verify().is_err());
     }
+}
+
+#[test]
+fn advisory_call_result_metadata_is_verified() {
+    let mut valid = program();
+    valid.code[0].calls.push(CallSite {
+        first: 0,
+        count: 0,
+        keywords: vec![],
+    });
+    valid.code[0]
+        .instructions
+        .insert(1, Instr::new(Op::Call, 0, 1, 0));
+    valid.code[0].spans.insert(1, Span::default());
+    valid.code[0].advisory_call_results = vec![AdvisoryCallResult {
+        pc: 1,
+        result: AdvisoryScalar::Int,
+    }];
+    valid.clone().verify().unwrap();
+
+    let mut not_call = valid.clone();
+    not_call.code[0].advisory_call_results[0].pc = 0;
+    assert!(not_call.verify().is_err());
+    let mut out_of_bounds = valid.clone();
+    out_of_bounds.code[0].advisory_call_results[0].pc = 3;
+    assert!(out_of_bounds.verify().is_err());
+    let mut duplicate = valid;
+    let repeated = duplicate.code[0].advisory_call_results[0];
+    duplicate.code[0].advisory_call_results.push(repeated);
+    assert!(duplicate.verify().is_err());
 }
 
 #[test]

@@ -4,7 +4,7 @@ use tonic_core::{
         BinaryOp, CompareOp, ComprehensionKind, Constant, ExprKind, FormatConversion, PatternKind,
         StmtKind, Target, TypeParamKind,
     },
-    bytecode::Op,
+    bytecode::{AdvisoryScalar, Op},
 };
 #[test]
 fn spans_unicode_and_precedence() {
@@ -494,6 +494,41 @@ fn variable_annotations_are_owned_and_lowered_by_scope() {
             "SyntaxError"
         );
     }
+}
+
+#[test]
+fn local_call_annotations_become_guarded_advisory_metadata() {
+    let source = concat!(
+        "def dynamic():\n    return 1\n",
+        "def typed():\n",
+        "    integer: int = dynamic()\n",
+        "    optional: float | None = dynamic()\n",
+        "    full: bool | float | int | None = dynamic()\n",
+        "    ignored: str = dynamic()\n",
+        "    expression: int = dynamic() + 1\n",
+        "    return integer\n",
+    );
+    let program = compile(source, "local-call-annotations").unwrap();
+    let code = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("typed"))
+        .unwrap();
+    assert_eq!(
+        code.advisory_call_results
+            .iter()
+            .map(|hint| hint.result)
+            .collect::<Vec<_>>(),
+        [
+            AdvisoryScalar::Int,
+            AdvisoryScalar::FloatOrNone,
+            AdvisoryScalar::IntOrBoolOrFloatOrNone,
+        ]
+    );
+    assert!(code.advisory_call_results.iter().all(|hint| {
+        Op::try_from(code.instructions[usize::from(hint.pc)].opcode) == Ok(Op::Call)
+    }));
 }
 
 #[test]

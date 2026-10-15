@@ -237,6 +237,12 @@ fonksiyon varsayılan sekizinci girişte derlenir; sekiz guard kaybı site'ı ye
 interpreter'a indirir. Yedi instruction'dan küçük düz fonksiyonlar ölçülen bridge
 maliyeti nedeniyle adaptive interpreter'da kalır.
 
+Function-local `name: scalar = ordinary_call()` annotation'ları da bytecode v34
+metadata'sıyla advisory typed devamı besler. `int/bool/float/None` ve PEP 604
+birleşimleri çağrı dönüşünde exact guard edilir; eşleşen değer native local
+data-flow'a katılır, yanlış hint ise yeni bir type hatası üretmeden interpreter'a
+döner.
+
 **Kapsam:** Python 3.14 `__annotate__`/`annotationlib` deferred thunk yüzeyi
 Tonic 0.x dil sözleşmesinin bilinçli bir farkıdır. List/dict metotları, slice assignment,
 range/custom-object slicing, string repetition, geniş standart

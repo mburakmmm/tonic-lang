@@ -275,6 +275,19 @@ sonucu aynı fact'i caller'a taşır. Union dışı değer ve builtin rebinding 
 PC'de generic Python semantiğine döner. Karar
 [ADR 0151](adr/0151-optional-full-numeric-union-jit.md) içindedir.
 
+Function-local annotation yolunun ilk güvenli sınırı da uygulanmıştır.
+`name: scalar = ordinary_call()` biçiminde derleyici annotation ifadesini runtime'da
+değerlendirmeden bytecode v34 advisory call-result metadata'sına dönüştürür.
+Desteklenen syntactic plan `int`, `bool`, `float`, `None`/`NoneType` ve bunların
+canonical PEP 604 birleşimleridir. `CALL` yine normal VM side-exit'inde çalışır;
+caller JIT successor PC'den dönerken gerçek materialized sonucu guard eder ve
+ancak eşleşirse local `Move` ile devamındaki typed data-flow'a fact taşır. Exact
+float sonuç burada F64 slota unbox edilir. Hint yanlışsa veya isim kullanıcı
+tarafından başka bir değere bağlanmışsa annotation zorunlu kontrole dönüşmez;
+native resume reddedilir ve bytecode semantiği devam eder. Call dışı producer,
+closure/cell ve genel definite-assignment/SSA inference sonraki dilimlerdir.
+Karar [ADR 0152](adr/0152-local-call-result-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

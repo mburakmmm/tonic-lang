@@ -28,6 +28,7 @@ fn program(instructions: Vec<Instr>) -> Program {
             cell_locals: vec![],
             free_vars: vec![],
             functions: vec![],
+            advisory_call_results: vec![],
             exception_regions: vec![],
             spans: vec![Span::default(); instructions.len()],
             instructions,

@@ -497,6 +497,15 @@ ve key yan etkilerini Python sırasıyla bir kez çalıştırır. Cranelift yeni
 da opkod gerektirmeden doğrulanmış generic continuation'a düşer. Ayrıntılar
 [ADR 0084](adr/0084-variable-annotations.md) dosyasındadır.
 
+Function-local annotation artık yalnız lexical bilgi olarak kaybolmaz. Bytecode
+v34, exact ordinary-call initializer bulunan basit local ad için advisory scalar
+result metadata'sı taşır. JIT çağrıyı generic VM sınırında çalıştırdıktan sonra
+successor PC'de gerçek sonucu guard eder; eşleşen `int/bool/float/None` veya PEP
+604 birleşimi typed overlay'e girer, uyuşmayan değer ise yeni bir runtime type
+hatası üretmeden interpreter'da devam eder. Annotation ifadesinin function
+scope'ta değerlendirilmemesi korunur. Ayrıntı
+[ADR 0152](adr/0152-local-call-result-annotations.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

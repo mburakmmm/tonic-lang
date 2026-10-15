@@ -508,6 +508,11 @@ sonra alınır.
     - [ ] Local variable annotation'ları, closure/cell akışı, bütün union
       narrowing biçimleri ve function-wide typed SSA üzerinden kesintisiz
       unboxed bölgeler; Python `int` overflow'unda bigint materialization/deopt.
+      - [x] İlk local sınır: `name: scalar = ordinary_call()` için bytecode v34
+        advisory call-result metadata'sı; `int/bool/float/None` ve bütün canonical
+        PEP 604 birleşimleri, successor-PC exact guard, F64 unbox, yanlış hint'te
+        semantic hata eklemeden interpreter fallback ve ayrı runtime sayacı.
+        Call dışı producer, closure/cell ve function-wide local inference açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,
