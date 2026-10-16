@@ -3160,6 +3160,35 @@ fn annotation_jit_guards_function_local_boundary_results() {
 }
 
 #[test]
+fn annotation_jit_guards_function_local_global_results() {
+    let source = concat!(
+        "GLOBAL=41\n",
+        "def read_global(delta:int)->int:\n",
+        "    local: int = GLOBAL\n",
+        "    if delta:\n        return local + delta\n",
+        "    return local\n",
+        "print(read_global(1))\n",
+        "GLOBAL='global-mismatch'\n",
+        "print(read_global(0))\n",
+    );
+    let program = compile(source, "annotation-jit-local-global-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\nglobal-mismatch\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 1);
+    assert!(vm.stats.jit_side_exits >= 2);
+    assert!(vm.stats.jit_resumes >= 2);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
     let source = concat!(
         "import tonic\n",

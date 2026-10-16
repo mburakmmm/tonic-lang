@@ -514,6 +514,13 @@ Hint bulunan buffer item sitesi, mevcut native f64 load analiziyle yarışmamas�
 için bilinçli olarak generic side-exit kullanır. Karar
 [ADR 0153](adr/0153-local-generic-producer-annotations.md) dosyasındadır.
 
+Bytecode v36 annotated `LOAD_GLOBAL` sonucunu da aynı guarded producer modeline
+alır. Normal native global fast path bu site'ta kullanılmaz; VM güncel module
+slotunu materialize eder, JIT successor PC'de gerçek değeri guard eder. Böylece
+global rebinding stale bir typed fact üretmez ve yanlış hint Python davranışına
+yeni hata eklemez. Karar
+[ADR 0154](adr/0154-local-global-result-annotations.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

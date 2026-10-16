@@ -237,11 +237,12 @@ fonksiyon varsayılan sekizinci girişte derlenir; sekiz guard kaybı site'ı ye
 interpreter'a indirir. Yedi instruction'dan küçük düz fonksiyonlar ölçülen bridge
 maliyeti nedeniyle adaptive interpreter'da kalır.
 
-Function-local `name: scalar = producer` annotation'ları bytecode v35
+Function-local `name: scalar = producer` annotation'ları bytecode v36
 metadata'sıyla advisory typed devamı besler. İlk kapsam ordinary call, attribute
-ve item sonuçlarını içerir. `int/bool/float/None` ve PEP 604 birleşimleri generic
-sınırdan dönüşte exact guard edilir; eşleşen değer native local data-flow'a
-katılır, yanlış hint ise yeni bir type hatası üretmeden interpreter'a döner.
+item ve global-load sonuçlarını içerir. `int/bool/float/None` ve PEP 604
+birleşimleri generic sınırdan dönüşte exact guard edilir; eşleşen değer native
+local data-flow'a katılır, yanlış hint ise yeni bir type hatası üretmeden
+interpreter'a döner.
 
 **Kapsam:** Python 3.14 `__annotate__`/`annotationlib` deferred thunk yüzeyi
 Tonic 0.x dil sözleşmesinin bilinçli bir farkıdır. List/dict metotları, slice assignment,

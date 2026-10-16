@@ -499,6 +499,7 @@ fn variable_annotations_are_owned_and_lowered_by_scope() {
 #[test]
 fn local_boundary_annotations_become_guarded_advisory_metadata() {
     let source = concat!(
+        "GLOBAL = 1\n",
         "def dynamic():\n    return 1\n",
         "def typed():\n",
         "    integer: int = dynamic()\n",
@@ -506,6 +507,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
         "    full: bool | float | int | None = dynamic()\n",
         "    attribute: int = integer.real\n",
         "    item: int = [1][0]\n",
+        "    global_value: int = GLOBAL\n",
         "    ignored: str = dynamic()\n",
         "    expression: int = dynamic() + 1\n",
         "    return integer\n",
@@ -528,6 +530,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             AdvisoryScalar::IntOrBoolOrFloatOrNone,
             AdvisoryScalar::Int,
             AdvisoryScalar::Int,
+            AdvisoryScalar::Int,
         ]
     );
     assert_eq!(
@@ -535,7 +538,14 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             .iter()
             .map(|hint| Op::try_from(code.instructions[usize::from(hint.pc)].opcode).unwrap())
             .collect::<Vec<_>>(),
-        [Op::Call, Op::Call, Op::Call, Op::Attr, Op::Item]
+        [
+            Op::Call,
+            Op::Call,
+            Op::Call,
+            Op::Attr,
+            Op::Item,
+            Op::LoadGlobal,
+        ]
     );
 }
 

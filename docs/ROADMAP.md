@@ -518,6 +518,10 @@ sonra alınır.
         çakışma önleme, successor-PC exact guard ve buffer item'ın hint bulunan
         site'ta zorunlu generic side-exit'i. Global yük/expanded call, closure/cell
         ve genel function-wide inference açık.
+      - [x] Global producer sınırı: bytecode v36 annotated `LOAD_GLOBAL` sonucu
+        için zorunlu generic side-exit, arbitrary-PC resume, successor exact
+        guard, global rebinding sonrası advisory mismatch fallback ve stress-GC
+        doğrulaması. Expanded call, closure/cell ve genel SSA inference açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

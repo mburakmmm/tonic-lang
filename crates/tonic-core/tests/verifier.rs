@@ -573,7 +573,11 @@ fn advisory_result_metadata_is_verified() {
         result: AdvisoryScalar::Int,
     }];
     valid.clone().verify().unwrap();
-    for producer in [Instr::new(Op::Attr, 0, 1, 0), Instr::new(Op::Item, 0, 0, 1)] {
+    for producer in [
+        Instr::new(Op::LoadGlobal, 0, 0, 0),
+        Instr::new(Op::Attr, 0, 1, 0),
+        Instr::new(Op::Item, 0, 0, 1),
+    ] {
         let mut variant = valid.clone();
         variant.code[0].instructions[1] = producer;
         variant.verify().unwrap();

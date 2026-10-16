@@ -297,6 +297,13 @@ sonra kullanır. Buffer item hint'i de native indexed-load sayılmaz; guard'lı
 generic sınır olarak ölçülür. Karar
 [ADR 0153](adr/0153-local-generic-producer-annotations.md) içindedir.
 
+Üçüncü local dilim bytecode v36 ile `LOAD_GLOBAL` producer'ını ekler. Annotated
+global load sitesi native global helper yolunda kesintisiz ilerlemek yerine
+generic side-exit yapar; VM güncel binding'i yükledikten sonra arbitrary-PC JIT
+resume successor'da exact scalar guard uygular. Rebinding ile hint uyuşmazsa
+interpreter aynı değeri ve Python kontrol akışını sürdürür. Karar
+[ADR 0154](adr/0154-local-global-result-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

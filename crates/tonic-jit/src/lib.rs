@@ -1795,7 +1795,13 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
     let resumable = code.instructions.iter().any(|instruction| {
         matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::Call | Op::Attr | Op::BeginArgs | Op::CallExpanded | Op::Item | Op::SetItem)
+            Ok(Op::LoadGlobal
+                | Op::Call
+                | Op::Attr
+                | Op::BeginArgs
+                | Op::CallExpanded
+                | Op::Item
+                | Op::SetItem)
         )
     }) || backedges > 0;
     let started = std::time::Instant::now();
@@ -2080,6 +2086,10 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::LoadGlobal => {
+                    if guarded_results.iter().any(|summary| summary.pc == pc) {
+                        side_exit(&mut builder, registers, pc);
+                        continue;
+                    }
                     let direct = builder.create_block();
                     builder.append_block_param(direct, pointer_type);
                     let generic = builder.create_block();
@@ -3525,7 +3535,7 @@ fn validate_guarded_results(
         };
         if !matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::Call | Op::Attr | Op::Item)
+            Ok(Op::LoadGlobal | Op::Call | Op::Attr | Op::Item)
         ) {
             return Err(Error::Backend(format!(
                 "guarded result PC {} is not a resumable value producer",
@@ -4696,7 +4706,14 @@ fn analyze_typed_scalar_execution(
                     .map(|summary| ScalarFact::from_signature(summary.result))
                     .unwrap_or(ScalarFact::Unknown);
             }
-            Op::LoadGlobal | Op::CallExpanded => {
+            Op::LoadGlobal => {
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or(ScalarFact::Unknown);
+            }
+            Op::CallExpanded => {
                 after[instruction.a as usize] = ScalarFact::Unknown;
             }
             Op::BeginArgs

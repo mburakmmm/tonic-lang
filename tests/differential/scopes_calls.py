@@ -621,6 +621,16 @@ def attribute(box: Box) -> int:
     return local + 1
 print(attribute(Box(41)), Items(40).read(0), Items('item-mismatch').read(0))
 ''',
+'''GLOBAL = 41
+def read_global(delta: int) -> int:
+    local: int = GLOBAL
+    if delta:
+        return local + delta
+    return local
+print(read_global(1))
+GLOBAL = 'global-mismatch'
+print(read_global(0))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():
