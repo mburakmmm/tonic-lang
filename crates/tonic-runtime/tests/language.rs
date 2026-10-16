@@ -3254,6 +3254,34 @@ fn annotation_jit_guards_function_local_closure_cell_results() {
 }
 
 #[test]
+fn annotation_jit_guards_function_local_expression_store_results() {
+    let source = concat!(
+        "def opaque(value):\n    return value\n",
+        "def read_expression(value:int)->int:\n",
+        "    local: int = value if value else opaque('expression-mismatch')\n",
+        "    if value:\n        return local + 1\n",
+        "    return local\n",
+        "print(read_expression(41))\n",
+        "print(read_expression(0))\n",
+    );
+    let program = compile(source, "annotation-jit-local-expression-store-result").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\nexpression-mismatch\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 1);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 1);
+    assert!(vm.stats.jit_side_exits >= 2);
+    assert!(vm.stats.jit_resumes >= 2);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
     let source = concat!(
         "import tonic\n",

@@ -539,6 +539,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             AdvisoryScalar::Int,
             AdvisoryScalar::Int,
             AdvisoryScalar::Int,
+            AdvisoryScalar::Int,
         ]
     );
     assert_eq!(
@@ -554,6 +555,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             Op::Item,
             Op::LoadGlobal,
             Op::CallExpanded,
+            Op::Move,
         ]
     );
     let nested = program

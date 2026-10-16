@@ -531,6 +531,11 @@ sonra alınır.
         cell root/write barrier, successor exact guard ve escaping closure'da
         `nonlocal` mutation sonrası advisory fallback. Genel cell SSA/definite
         assignment ve kesintisiz native cell erişimi açık.
+      - [x] Genel local-expression store sınırı: bytecode v39 guarded `MOVE` ile
+        conditional/çok adımlı annotated RHS'nin yan etkilerden sonra
+        materialize edilmesi, successor exact guard, typed local fact ve yanlış
+        hint'te advisory fallback. Definite-assignment, loop phi/join ve genel
+        function-wide SSA inference açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

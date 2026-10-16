@@ -659,6 +659,16 @@ print(read_cell(1))
 update_cell('cell-mismatch')
 print(read_cell(0))
 ''',
+'''def opaque_expression(value):
+    return value
+def read_expression(value: int) -> int:
+    local: int = value if value else opaque_expression('expression-mismatch')
+    if value:
+        return local + 1
+    return local
+print(read_expression(41))
+print(read_expression(0))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():

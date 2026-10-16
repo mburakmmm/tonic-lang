@@ -575,6 +575,7 @@ fn advisory_result_metadata_is_verified() {
     valid.clone().verify().unwrap();
     for producer in [
         Instr::new(Op::LoadGlobal, 0, 0, 0),
+        Instr::new(Op::Move, 0, 1, 0),
         Instr::new(Op::Attr, 0, 1, 0),
         Instr::new(Op::Item, 0, 0, 1),
     ] {

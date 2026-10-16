@@ -319,6 +319,14 @@ typed local akışa girer; escaping closure'ın `nonlocal` mutation'ı uyuşmazl
 üretirse generic Python değeri korunur. Karar
 [ADR 0156](adr/0156-local-closure-cell-result-annotations.md) içindedir.
 
+Altıncı local dilim bytecode v39 ile tek bir destekli producer opcode'unda
+bitmeyen annotated RHS için local `MOVE` store sınırını ekler. RHS normal
+bytecode/JIT semantiğiyle ve bütün yan etkileriyle önce hesaplanır. Guarded store
+exact PC'de VM'e çıkar; kopya tamamlandıktan sonra successor guard hedef local'ın
+gerçek değerini typed fact'e çevirir. Conditional/multi-step expression sonucu
+uyuşmazsa aynı materialized değerle generic yürütme sürer. Karar
+[ADR 0157](adr/0157-local-expression-store-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

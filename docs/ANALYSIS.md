@@ -536,6 +536,14 @@ PC'de exact guard edilir; `nonlocal` mutation yanlış hint üretirse generic ak
 dönülür. Karar [ADR 0156](adr/0156-local-closure-cell-result-annotations.md)
 dosyasındadır.
 
+Bytecode v39 tek producer opcode'una indirgenemeyen annotated RHS sonuçları için
+local `MOVE` store sınırını guarded result olarak kullanır. RHS bütün Python
+yan etkileriyle önce hesaplanır; JIT store PC'sinde VM'e çıkar, hedef local'a
+normal kopyayı yaptırır ve successor'da gerçek değeri guard eder. Conditional ve
+çok adımlı ifadeler böylece yanlış hint'i zorunlu type check yapmadan typed
+data-flow'a katılabilir. Karar
+[ADR 0157](adr/0157-local-expression-store-annotations.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

@@ -1805,6 +1805,10 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
                 | Op::Item
                 | Op::SetItem)
         )
+    }) || guarded_results.iter().any(|summary| {
+        code.instructions
+            .get(summary.pc)
+            .is_some_and(|instruction| Op::try_from(instruction.opcode) == Ok(Op::Move))
     }) || backedges > 0;
     let started = std::time::Instant::now();
     let builder = JITBuilder::with_flags(
@@ -2067,6 +2071,10 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
                     fallthrough(&mut builder, &blocks, pc, registers);
                 }
                 Op::Move => {
+                    if guarded_results.iter().any(|summary| summary.pc == pc) {
+                        side_exit(&mut builder, registers, pc);
+                        continue;
+                    }
                     if float_state.is_some_and(|state| state[instruction.b as usize]) {
                         let value = builder.ins().stack_load(
                             types::F64,
@@ -3540,7 +3548,13 @@ fn validate_guarded_results(
         };
         if !matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::LoadGlobal | Op::LoadCell | Op::Call | Op::CallExpanded | Op::Attr | Op::Item)
+            Ok(Op::LoadGlobal
+                | Op::LoadCell
+                | Op::Move
+                | Op::Call
+                | Op::CallExpanded
+                | Op::Attr
+                | Op::Item)
         ) {
             return Err(Error::Backend(format!(
                 "guarded result PC {} is not a resumable value producer",
@@ -4588,7 +4602,13 @@ fn analyze_typed_scalar_execution(
                     | Constant::Bytes(_) => ScalarFact::Unknown,
                 };
             }
-            Op::Move => after[instruction.a as usize] = fact(instruction.b),
+            Op::Move => {
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or_else(|| fact(instruction.b));
+            }
             Op::Add | Op::InplaceAdd | Op::Sub | Op::Mul | Op::FloorDiv | Op::Mod => {
                 let left = fact(instruction.b);
                 let right = fact(instruction.c);

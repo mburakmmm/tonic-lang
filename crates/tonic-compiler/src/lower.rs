@@ -1259,8 +1259,15 @@ impl Lower<'_> {
                         && *simple
                         && matches!(target, Target::Name(_))
                     {
+                        let boundary_pc = producer_pc.or_else(|| {
+                            self.code.instructions.len().checked_sub(1).filter(|pc| {
+                                let instruction = self.code.instructions[*pc];
+                                Op::try_from(instruction.opcode) == Ok(Op::Move)
+                                    && instruction.b == value
+                            })
+                        });
                         if let (Some(pc), Some(result)) = (
-                            producer_pc,
+                            boundary_pc,
                             advisory_scalar(annotation, &self.program.symbols),
                         ) {
                             self.code.advisory_results.push(AdvisoryResult {
