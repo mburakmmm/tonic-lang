@@ -508,6 +508,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
         "    attribute: int = integer.real\n",
         "    item: int = [1][0]\n",
         "    global_value: int = GLOBAL\n",
+        "    expanded: int = dynamic(*[1])\n",
         "    ignored: str = dynamic()\n",
         "    expression: int = dynamic() + 1\n",
         "    return integer\n",
@@ -531,6 +532,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             AdvisoryScalar::Int,
             AdvisoryScalar::Int,
             AdvisoryScalar::Int,
+            AdvisoryScalar::Int,
         ]
     );
     assert_eq!(
@@ -545,6 +547,7 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             Op::Attr,
             Op::Item,
             Op::LoadGlobal,
+            Op::CallExpanded,
         ]
     );
 }

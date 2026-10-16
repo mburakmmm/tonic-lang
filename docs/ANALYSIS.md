@@ -521,6 +521,13 @@ global rebinding stale bir typed fact üretmez ve yanlış hint Python davranı�
 yeni hata eklemez. Karar
 [ADR 0154](adr/0154-local-global-result-annotations.md) dosyasındadır.
 
+Bytecode v37 `CALL_EXPANDED` sonucunu da guarded producer olarak kabul eder.
+Native yürütme expanded argument segmentinin `BEGIN_ARGS` sınırında VM'e çıkar;
+mevcut Python-compatible `*args/**kwargs` expansion ve binder yolu çağrıyı
+tamamladıktan sonra successor PC exact result guard'ı typed akışı yeniden açar.
+Yanlış result hint'i yine yeni bir runtime type zorlaması yaratmaz. Karar
+[ADR 0155](adr/0155-local-expanded-call-result-annotations.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

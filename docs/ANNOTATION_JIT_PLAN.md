@@ -304,6 +304,13 @@ resume successor'da exact scalar guard uygular. Rebinding ile hint uyuşmazsa
 interpreter aynı değeri ve Python kontrol akışını sürdürür. Karar
 [ADR 0154](adr/0154-local-global-result-annotations.md) içindedir.
 
+Dördüncü local dilim bytecode v37 ile `CALL_EXPANDED` producer'ını ekler. Guarded
+site'ın direct expanded-call profili kaldırılır; native yol `BEGIN_ARGS` PC'sinde
+VM'e çıkar ve aynı argument-stack derinliği işaretiyle bütün `*args/**kwargs`
+hazırlığını, binder'ı ve çağrıyı mevcut generic semantikle tamamlar. Callee
+döndüğünde successor PC exact result guard'ı typed local akışı yeniden açar.
+Karar [ADR 0155](adr/0155-local-expanded-call-result-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

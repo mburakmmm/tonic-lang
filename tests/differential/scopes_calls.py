@@ -631,6 +631,18 @@ print(read_global(1))
 GLOBAL = 'global-mismatch'
 print(read_global(0))
 ''',
+'''def opaque(value):
+    return value
+ARGS = [41]
+def read_expanded(delta: int) -> int:
+    local: int = opaque(*ARGS)
+    if delta:
+        return local + delta
+    return local
+print(read_expanded(1))
+ARGS = ['expanded-mismatch']
+print(read_expanded(0))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():

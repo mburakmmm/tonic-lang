@@ -521,7 +521,12 @@ sonra alınır.
       - [x] Global producer sınırı: bytecode v36 annotated `LOAD_GLOBAL` sonucu
         için zorunlu generic side-exit, arbitrary-PC resume, successor exact
         guard, global rebinding sonrası advisory mismatch fallback ve stress-GC
-        doğrulaması. Expanded call, closure/cell ve genel SSA inference açık.
+        doğrulaması. Closure/cell ve genel SSA inference açık.
+      - [x] Expanded-call producer sınırı: bytecode v37 annotated
+        `CALL_EXPANDED` sonucu için `BEGIN_ARGS` generic side-exit'i, aynı
+        argument-stack derinliğinde VM expansion/binding/call, successor exact
+        guard ve yanlış hint/stress-GC doğrulaması. Closure/cell ve genel SSA
+        inference açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

@@ -1245,7 +1245,11 @@ impl Lower<'_> {
                             let instruction = self.code.instructions[*pc];
                             matches!(
                                 Op::try_from(instruction.opcode),
-                                Ok(Op::LoadGlobal | Op::Call | Op::Attr | Op::Item)
+                                Ok(Op::LoadGlobal
+                                    | Op::Call
+                                    | Op::CallExpanded
+                                    | Op::Attr
+                                    | Op::Item)
                             ) && instruction.a == value
                         });
                     self.target(target, value, s)?;

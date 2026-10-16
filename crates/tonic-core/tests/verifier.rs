@@ -582,6 +582,14 @@ fn advisory_result_metadata_is_verified() {
         variant.code[0].instructions[1] = producer;
         variant.verify().unwrap();
     }
+    let mut expanded = valid.clone();
+    expanded.code[0].instructions[1] = Instr::new(Op::BeginArgs, 0, 0, 0);
+    expanded.code[0]
+        .instructions
+        .insert(2, Instr::new(Op::CallExpanded, 0, 1, 0));
+    expanded.code[0].spans.insert(2, Span::default());
+    expanded.code[0].advisory_results[0].pc = 2;
+    expanded.verify().unwrap();
 
     let mut not_producer = valid.clone();
     not_producer.code[0].advisory_results[0].pc = 0;

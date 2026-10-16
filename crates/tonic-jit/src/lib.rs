@@ -3535,7 +3535,7 @@ fn validate_guarded_results(
         };
         if !matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::LoadGlobal | Op::Call | Op::Attr | Op::Item)
+            Ok(Op::LoadGlobal | Op::Call | Op::CallExpanded | Op::Attr | Op::Item)
         ) {
             return Err(Error::Backend(format!(
                 "guarded result PC {} is not a resumable value producer",
@@ -4714,7 +4714,11 @@ fn analyze_typed_scalar_execution(
                     .unwrap_or(ScalarFact::Unknown);
             }
             Op::CallExpanded => {
-                after[instruction.a as usize] = ScalarFact::Unknown;
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or(ScalarFact::Unknown);
             }
             Op::BeginArgs
             | Op::ArgPos
