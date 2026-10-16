@@ -1796,6 +1796,8 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
         matches!(
             Op::try_from(instruction.opcode),
             Ok(Op::LoadGlobal
+                | Op::LoadCell
+                | Op::StoreCell
                 | Op::Call
                 | Op::Attr
                 | Op::BeginArgs
@@ -2346,6 +2348,9 @@ pub fn compile_with_execution_profile_types_results_and_type_tests(
                     let encoded = encode_int(&mut builder, result);
                     store(&mut builder, registers, instruction.a, encoded);
                     fallthrough(&mut builder, &blocks, pc, registers);
+                }
+                Op::LoadCell | Op::StoreCell => {
+                    side_exit(&mut builder, registers, pc);
                 }
                 Op::Div => {
                     let left = load(&mut builder, registers, instruction.b);
@@ -3535,7 +3540,7 @@ fn validate_guarded_results(
         };
         if !matches!(
             Op::try_from(instruction.opcode),
-            Ok(Op::LoadGlobal | Op::Call | Op::CallExpanded | Op::Attr | Op::Item)
+            Ok(Op::LoadGlobal | Op::LoadCell | Op::Call | Op::CallExpanded | Op::Attr | Op::Item)
         ) {
             return Err(Error::Backend(format!(
                 "guarded result PC {} is not a resumable value producer",
@@ -4537,7 +4542,8 @@ fn instruction_writes_a(instruction: tonic_core::bytecode::Instr) -> bool {
             | Op::ArgPos
             | Op::ArgStar
             | Op::ArgNamed
-            | Op::ArgMapping)
+            | Op::ArgMapping
+            | Op::StoreCell)
     )
 }
 
@@ -4713,6 +4719,14 @@ fn analyze_typed_scalar_execution(
                     .map(|summary| ScalarFact::from_signature(summary.result))
                     .unwrap_or(ScalarFact::Unknown);
             }
+            Op::LoadCell => {
+                after[instruction.a as usize] = guarded_results
+                    .iter()
+                    .find(|summary| summary.pc == pc)
+                    .map(|summary| ScalarFact::from_signature(summary.result))
+                    .unwrap_or(ScalarFact::Unknown);
+            }
+            Op::StoreCell => {}
             Op::CallExpanded => {
                 after[instruction.a as usize] = guarded_results
                     .iter()
@@ -4883,16 +4897,11 @@ fn validate_supported(
     buffer_store_source: &[Option<u16>],
     typed_signature: Option<&TypedSignature>,
 ) -> Result<(), Error> {
-    if code.class_body
-        || code.generator
-        || code.coroutine
-        || !code.cell_locals.is_empty()
-        || !code.free_vars.is_empty()
-    {
+    if code.class_body || code.generator || code.coroutine {
         return Err(unsupported(
             0,
             None,
-            "class bodies and closures require runtime state",
+            "class bodies and suspended functions require runtime state",
         ));
     }
     for (pc, instruction) in code.instructions.iter().enumerate() {
@@ -4911,6 +4920,8 @@ fn validate_supported(
             Op::Const
                 | Op::Move
                 | Op::LoadGlobal
+                | Op::LoadCell
+                | Op::StoreCell
                 | Op::Add
                 | Op::InplaceAdd
                 | Op::Sub

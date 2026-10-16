@@ -582,6 +582,15 @@ fn advisory_result_metadata_is_verified() {
         variant.code[0].instructions[1] = producer;
         variant.verify().unwrap();
     }
+    let mut cell = valid.clone();
+    let mut cell_code = cell.code[0].clone();
+    cell_code.name = "cell".into();
+    cell_code.locals = vec![SymbolId(0)];
+    cell_code.cell_locals = vec![0];
+    cell_code.instructions[1] = Instr::new(Op::LoadCell, 0, 0, 0);
+    cell.code.push(cell_code);
+    cell.modules[0].code_count = 2;
+    cell.verify().unwrap();
     let mut expanded = valid.clone();
     expanded.code[0].instructions[1] = Instr::new(Op::BeginArgs, 0, 0, 0);
     expanded.code[0]

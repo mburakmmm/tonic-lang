@@ -3,7 +3,7 @@ use crate::{
     diagnostic::{Diagnostic, Result, Span},
 };
 
-pub const BYTECODE_VERSION: u16 = 37;
+pub const BYTECODE_VERSION: u16 = 38;
 /// Explicit wire opcode numbers. Never serialize Rust enum layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -571,6 +571,7 @@ impl Program {
                             !matches!(
                                 Op::try_from(instruction.opcode),
                                 Ok(Op::LoadGlobal
+                                    | Op::LoadCell
                                     | Op::Call
                                     | Op::CallExpanded
                                     | Op::Attr

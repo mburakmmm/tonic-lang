@@ -311,6 +311,14 @@ hazırlığını, binder'ı ve çağrıyı mevcut generic semantikle tamamlar. C
 döndüğünde successor PC exact result guard'ı typed local akışı yeniden açar.
 Karar [ADR 0155](adr/0155-local-expanded-call-result-annotations.md) içindedir.
 
+Beşinci local dilim bytecode v38 ile `LOAD_CELL` producer'ını ekler. JIT cell
+handle/layout bilgisini ABI'ye taşımaz; `LOAD_CELL/STORE_CELL` exact PC'de VM'e
+side-exit eder. VM mevcut precise cell root, unbound hata ve write-barrier
+semantiğini uygular. Annotated load sonucu successor-PC exact guard'dan sonra
+typed local akışa girer; escaping closure'ın `nonlocal` mutation'ı uyuşmazlık
+üretirse generic Python değeri korunur. Karar
+[ADR 0156](adr/0156-local-closure-cell-result-annotations.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

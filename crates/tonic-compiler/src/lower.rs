@@ -1246,6 +1246,7 @@ impl Lower<'_> {
                             matches!(
                                 Op::try_from(instruction.opcode),
                                 Ok(Op::LoadGlobal
+                                    | Op::LoadCell
                                     | Op::Call
                                     | Op::CallExpanded
                                     | Op::Attr

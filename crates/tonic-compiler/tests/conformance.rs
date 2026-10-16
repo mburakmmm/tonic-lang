@@ -501,6 +501,12 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
     let source = concat!(
         "GLOBAL = 1\n",
         "def dynamic():\n    return 1\n",
+        "def make():\n",
+        "    captured = 1\n",
+        "    def nested():\n",
+        "        local: int = captured\n",
+        "        return local\n",
+        "    return nested\n",
         "def typed():\n",
         "    integer: int = dynamic()\n",
         "    optional: float | None = dynamic()\n",
@@ -549,6 +555,19 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
             Op::LoadGlobal,
             Op::CallExpanded,
         ]
+    );
+    let nested = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("nested"))
+        .expect("nested closure code");
+    assert_eq!(nested.free_vars.len(), 1);
+    assert_eq!(nested.advisory_results.len(), 1);
+    assert_eq!(
+        Op::try_from(nested.instructions[usize::from(nested.advisory_results[0].pc)].opcode)
+            .unwrap(),
+        Op::LoadCell
     );
 }
 

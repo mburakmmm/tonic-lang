@@ -525,8 +525,12 @@ sonra alınır.
       - [x] Expanded-call producer sınırı: bytecode v37 annotated
         `CALL_EXPANDED` sonucu için `BEGIN_ARGS` generic side-exit'i, aynı
         argument-stack derinliğinde VM expansion/binding/call, successor exact
-        guard ve yanlış hint/stress-GC doğrulaması. Closure/cell ve genel SSA
-        inference açık.
+        guard ve yanlış hint/stress-GC doğrulaması. Genel SSA inference açık.
+      - [x] Closure-cell producer sınırı: bytecode v38 annotated `LOAD_CELL`
+        sonucu; `LOAD_CELL/STORE_CELL` için exact-PC VM side-exit/resume, precise
+        cell root/write barrier, successor exact guard ve escaping closure'da
+        `nonlocal` mutation sonrası advisory fallback. Genel cell SSA/definite
+        assignment ve kesintisiz native cell erişimi açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

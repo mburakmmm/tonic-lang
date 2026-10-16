@@ -643,6 +643,22 @@ print(read_expanded(1))
 ARGS = ['expanded-mismatch']
 print(read_expanded(0))
 ''',
+'''def make_cell_reader():
+    captured = 41
+    def update(value):
+        nonlocal captured
+        captured = value
+    def read(delta: int) -> int:
+        local: int = captured
+        if delta:
+            return local + delta
+        return local
+    return read, update
+read_cell, update_cell = make_cell_reader()
+print(read_cell(1))
+update_cell('cell-mismatch')
+print(read_cell(0))
+''',
 '''def identity[T: int](value: T) -> T:
     return value
 def reveal[T]():

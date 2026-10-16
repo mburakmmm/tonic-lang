@@ -528,6 +528,14 @@ tamamladıktan sonra successor PC exact result guard'ı typed akışı yeniden a
 Yanlış result hint'i yine yeni bir runtime type zorlaması yaratmaz. Karar
 [ADR 0155](adr/0155-local-expanded-call-result-annotations.md) dosyasındadır.
 
+Bytecode v38 annotated `LOAD_CELL` sonucunu guarded producer modeline alır.
+Closure taşıyan fonksiyonlar artık sırf cell metadata'sı yüzünden JIT'ten
+reddedilmez; `LOAD_CELL/STORE_CELL` exact PC'de VM'e çıkar ve mevcut cell object,
+unbound-error, write-barrier ve moving-GC yolu korunur. Annotated load successor
+PC'de exact guard edilir; `nonlocal` mutation yanlış hint üretirse generic akışa
+dönülür. Karar [ADR 0156](adr/0156-local-closure-cell-result-annotations.md)
+dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,
