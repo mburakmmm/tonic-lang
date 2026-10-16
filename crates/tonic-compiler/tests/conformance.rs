@@ -574,6 +574,45 @@ fn local_boundary_annotations_become_guarded_advisory_metadata() {
 }
 
 #[test]
+fn local_annotations_guard_function_wide_branch_and_loop_stores() {
+    let source = concat!(
+        "def dynamic():\n    return 1\n",
+        "def propagated(flag):\n",
+        "    value = dynamic()\n",
+        "    value: int\n",
+        "    if flag:\n        value = dynamic()\n",
+        "    else:\n        value = 1\n",
+        "    while flag:\n        value = value + 1\n        flag = False\n",
+        "    return value\n",
+        "def conflicted():\n",
+        "    value: int\n",
+        "    value: str\n",
+        "    value = dynamic()\n",
+        "    return value\n",
+    );
+    let program = compile(source, "function-wide-local-annotations").unwrap();
+    let propagated = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("propagated"))
+        .expect("propagated function");
+    assert_eq!(propagated.advisory_results.len(), 4);
+    assert!(propagated.advisory_results.iter().all(|hint| {
+        hint.result == AdvisoryScalar::Int
+            && Op::try_from(propagated.instructions[usize::from(hint.pc)].opcode) == Ok(Op::Move)
+    }));
+
+    let conflicted = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("conflicted"))
+        .expect("conflicted function");
+    assert!(conflicted.advisory_results.is_empty());
+}
+
+#[test]
 fn type_parameters_and_aliases_are_owned_and_lowered() {
     let source = "def identity[T: int, *Ts, **P](value: T) -> T:\n    return value\nclass Box[T]:\n    item: T\ntype Pair[T] = (T, T)\n";
     let ast = parse(source, "type-parameters").unwrap();

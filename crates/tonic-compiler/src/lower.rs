@@ -57,6 +57,11 @@ fn build(
     let id = index(program.code.len())?;
     let next = index(scope.locals.len())?;
     let code = code_object(name, params, &scope)?;
+    let local_advisories = if scope.module || scope.class_body {
+        Vec::new()
+    } else {
+        advisory_local_annotations(body, &program.symbols)
+    };
     // Reserve identity before recursively compiling functions.
     program.code.push(code.clone());
     let mut lower = Lower {
@@ -70,6 +75,7 @@ fn build(
         finally_bypasses: Vec::new(),
         with_bypasses: Vec::new(),
         type_bindings: Vec::new(),
+        local_advisories,
     };
     if lower.scope.class_body {
         let span = body
@@ -141,6 +147,76 @@ fn has_simple_annotation(body: &[Stmt]) -> bool {
         StmtKind::Match { cases, .. } => cases.iter().any(|case| has_simple_annotation(&case.body)),
         _ => false,
     })
+}
+
+fn advisory_local_annotations(
+    body: &[Stmt],
+    symbols: &[String],
+) -> Vec<(SymbolId, AdvisoryScalar)> {
+    fn collect(
+        body: &[Stmt],
+        symbols: &[String],
+        annotations: &mut Vec<(SymbolId, Option<AdvisoryScalar>)>,
+    ) {
+        for statement in body {
+            match &statement.kind {
+                StmtKind::AnnAssign {
+                    target: Target::Name(name),
+                    annotation,
+                    simple: true,
+                    ..
+                } => {
+                    let candidate = advisory_scalar(annotation, symbols);
+                    if let Some((_, existing)) = annotations
+                        .iter_mut()
+                        .find(|(candidate, _)| candidate == name)
+                    {
+                        if *existing != candidate {
+                            *existing = None;
+                        }
+                    } else {
+                        annotations.push((*name, candidate));
+                    }
+                }
+                StmtKind::If(_, body, otherwise)
+                | StmtKind::While(_, body, otherwise)
+                | StmtKind::For(_, _, body, otherwise)
+                | StmtKind::AsyncFor(_, _, body, otherwise) => {
+                    collect(body, symbols, annotations);
+                    collect(otherwise, symbols, annotations);
+                }
+                StmtKind::Try {
+                    body,
+                    handlers,
+                    otherwise,
+                    finalbody,
+                } => {
+                    collect(body, symbols, annotations);
+                    for handler in handlers {
+                        collect(&handler.body, symbols, annotations);
+                    }
+                    collect(otherwise, symbols, annotations);
+                    collect(finalbody, symbols, annotations);
+                }
+                StmtKind::With { body, .. } | StmtKind::AsyncWith { body, .. } => {
+                    collect(body, symbols, annotations);
+                }
+                StmtKind::Match { cases, .. } => {
+                    for case in cases {
+                        collect(&case.body, symbols, annotations);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut annotations = Vec::new();
+    collect(body, symbols, &mut annotations);
+    annotations
+        .into_iter()
+        .filter_map(|(name, annotation)| annotation.map(|annotation| (name, annotation)))
+        .collect()
 }
 
 fn code_object(name: String, params: &Parameters, scope: &Scope) -> Result<CodeObject> {
@@ -279,6 +355,7 @@ fn build_comprehension(
         finally_bypasses: Vec::new(),
         with_bypasses: Vec::new(),
         type_bindings: Vec::new(),
+        local_advisories: Vec::new(),
     };
     let span = comprehension.element.span;
     if comprehension.kind != ComprehensionKind::Generator {
@@ -346,6 +423,7 @@ struct Lower<'a> {
     finally_bypasses: Vec<Vec<FinallyBypass>>,
     with_bypasses: Vec<Vec<FinallyBypass>>,
     type_bindings: Vec<(SymbolId, u16)>,
+    local_advisories: Vec<(SymbolId, AdvisoryScalar)>,
 }
 impl Lower<'_> {
     fn lower_type_params(&mut self, params: &[TypeParam]) -> Result<Vec<u16>> {
@@ -539,7 +617,7 @@ impl Lower<'_> {
         }
         Ok(r)
     }
-    fn store(&mut self, n: SymbolId, r: u16, s: Span) -> Result<()> {
+    fn store_with_advisory(&mut self, n: SymbolId, r: u16, s: Span, advisory: bool) -> Result<()> {
         if self.scope.globals.contains(&n) {
             self.emit(Op::StoreGlobal, r, n.0, 0, s)?;
             return Ok(());
@@ -554,11 +632,26 @@ impl Lower<'_> {
         if let Some(cell) = self.scope.cell(n) {
             self.emit(Op::StoreCell, r, cell, 0, s)?;
         } else if let Some(local) = self.scope.local(n) {
-            self.emit(Op::Move, local, r, 0, s)?;
+            let pc = self.emit(Op::Move, local, r, 0, s)?;
+            if advisory {
+                if let Some((_, result)) = self
+                    .local_advisories
+                    .iter()
+                    .find(|(candidate, _)| *candidate == n)
+                {
+                    self.code.advisory_results.push(AdvisoryResult {
+                        pc: index(pc)?,
+                        result: *result,
+                    });
+                }
+            }
         } else {
             self.emit(Op::StoreGlobal, r, n.0, 0, s)?;
         }
         Ok(())
+    }
+    fn store(&mut self, n: SymbolId, r: u16, s: Span) -> Result<()> {
+        self.store_with_advisory(n, r, s, true)
     }
     fn clear(&mut self, n: SymbolId, s: Span) -> Result<()> {
         if self.scope.globals.contains(&n) {
@@ -823,13 +916,13 @@ impl Lower<'_> {
         self.patch(suppressed_done, done);
         Ok(())
     }
-    fn target(&mut self, t: &Target, r: u16, s: Span) -> Result<()> {
+    fn target_with_advisory(&mut self, t: &Target, r: u16, s: Span, advisory: bool) -> Result<()> {
         match t {
             Target::Attribute(owner, name) => {
                 let owner = self.expr(owner)?;
                 self.emit(Op::SetAttr, owner, r, name.0, s)?;
             }
-            Target::Name(n) => self.store(*n, r, s)?,
+            Target::Name(n) => self.store_with_advisory(*n, r, s, advisory)?,
             Target::Item(owner, key) => {
                 let owner = self.expr(owner)?;
                 let key = self.expr(key)?;
@@ -840,11 +933,14 @@ impl Lower<'_> {
                 let base = self.alloc(count)?;
                 self.emit(Op::Unpack, base, r, count, s)?;
                 for (i, t) in ts.iter().enumerate() {
-                    self.target(t, base + i as u16, s)?;
+                    self.target_with_advisory(t, base + i as u16, s, advisory)?;
                 }
             }
         }
         Ok(())
+    }
+    fn target(&mut self, t: &Target, r: u16, s: Span) -> Result<()> {
+        self.target_with_advisory(t, r, s, true)
     }
     fn lower_pattern(
         &mut self,
@@ -1253,7 +1349,7 @@ impl Lower<'_> {
                                     | Op::Item)
                             ) && instruction.a == value
                         });
-                    self.target(target, value, s)?;
+                    self.target_with_advisory(target, value, s, false)?;
                     if !self.scope.module
                         && !self.scope.class_body
                         && *simple

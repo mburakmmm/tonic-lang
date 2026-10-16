@@ -534,8 +534,15 @@ sonra alınır.
       - [x] Genel local-expression store sınırı: bytecode v39 guarded `MOVE` ile
         conditional/çok adımlı annotated RHS'nin yan etkilerden sonra
         materialize edilmesi, successor exact guard, typed local fact ve yanlış
-        hint'te advisory fallback. Definite-assignment, loop phi/join ve genel
-        function-wide SSA inference açık.
+        hint'te advisory fallback. Bu dilimde definite-assignment, loop phi/join
+        ve function-wide inference açık bırakıldı; ordinary local store bölümü
+        bytecode v40 diliminde kapatıldı.
+      - [x] Function-wide local store sınırı: bytecode v40 function-scope scalar
+        annotation planı; bare/initialized declaration, annotation'dan önce ve
+        sonra ordinary store, branch join ve loop backedge üzerinde guarded
+        `MOVE` fact'i. Çelişkili/unsupported local annotation fail-closed kalır;
+        yanlış değer materialize edilmiş generic Python akışında korunur. Native
+        cell-store SSA ve kesintisiz unboxed local/call ABI açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

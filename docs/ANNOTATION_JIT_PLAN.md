@@ -327,6 +327,15 @@ gerçek değerini typed fact'e çevirir. Conditional/multi-step expression sonuc
 uyuşmazsa aynı materialized değerle generic yürütme sürer. Karar
 [ADR 0157](adr/0157-local-expression-store-annotations.md) içindedir.
 
+Yedinci local dilim bytecode v40 ile basit scalar local annotation'ı function
+scope planına yükseltir. Bare veya initialized declaration aynı isme yapılan
+ordinary store'ları kaynak sırasından bağımsız olarak guarded `MOVE` sınırına
+çevirir. CFG fixed-point bu fact'leri branch join ve loop backedge boyunca taşır;
+uyuşmayan store materialize edilmiş Python değerini koruyarak generic akışa
+döner. Aynı isimde çelişkili veya unsupported annotation planı fail-closed
+kapatır; nested code scope'a sızmaz. Karar
+[ADR 0158](adr/0158-function-wide-local-annotation-stores.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

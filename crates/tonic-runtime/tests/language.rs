@@ -3282,6 +3282,40 @@ fn annotation_jit_guards_function_local_expression_store_results() {
 }
 
 #[test]
+fn annotation_jit_guards_function_wide_local_branch_and_loop_stores() {
+    let source = concat!(
+        "def opaque(value):\n    return value\n",
+        "def evolve(seed:int,count:int)->int:\n",
+        "    value: int\n",
+        "    if seed:\n        value = opaque(seed)\n",
+        "    else:\n        value = opaque('branch-mismatch')\n",
+        "    index = 0\n",
+        "    while index < count:\n",
+        "        value = opaque(value + 1)\n",
+        "        index += 1\n",
+        "    return value\n",
+        "print(evolve(40,2))\n",
+        "print(evolve(0,0))\n",
+    );
+    let program = compile(source, "annotation-jit-function-wide-local-stores").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\nbranch-mismatch\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 3);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 3);
+    assert!(vm.stats.jit_side_exits >= 5);
+    assert!(vm.stats.jit_resumes >= 5);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
     let source = concat!(
         "import tonic\n",

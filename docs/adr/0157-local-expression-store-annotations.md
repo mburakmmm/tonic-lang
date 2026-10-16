@@ -31,5 +31,6 @@ error.
 
 Conditional and multi-step annotated initializers can seed typed local regions
 without requiring a special producer opcode or trusting source spelling. This
-first implementation pays a side exit for the guarded store. General
-definite-assignment, loop-phi and graph-wide SSA inference remain future work.
+first implementation pays a side exit for the guarded store. Function-wide
+ordinary local-store propagation follows in bytecode v40; native cell-store,
+alias/escape and graph-wide SSA inference remain separate work.

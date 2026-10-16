@@ -7248,6 +7248,43 @@ mod tests {
     }
 
     #[test]
+    fn typed_scalar_overlay_proves_function_wide_guarded_local_joins() {
+        let program = function(
+            "def evolve(seed,flag):\n    value:int\n    if flag:\n        value=seed\n    else:\n        value=1\n    while flag:\n        value=value+1\n        flag=False\n    return value",
+        );
+        let code = &program.program().code[1];
+        let guarded_results = code
+            .advisory_results
+            .iter()
+            .map(|hint| GuardedResult {
+                pc: usize::from(hint.pc),
+                result: ScalarType::Int,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(guarded_results.len(), 3);
+        assert!(guarded_results
+            .iter()
+            .all(|result| { Op::try_from(code.instructions[result.pc].opcode) == Ok(Op::Move) }));
+
+        let signature = TypedSignature {
+            parameters: vec![ScalarType::Int, ScalarType::Bool],
+            result: ScalarType::Int,
+        };
+        let analysis =
+            analyze_typed_scalar_execution(code, &signature, &[], &guarded_results, &[]).unwrap();
+        assert!(analysis.return_proven);
+        assert!(typed_return_is_proven_with_results(code, &signature, &guarded_results).unwrap());
+        for (pc, instruction) in code.instructions.iter().enumerate() {
+            if Op::try_from(instruction.opcode) == Ok(Op::Return) && analysis.before[pc].is_some() {
+                assert_eq!(
+                    analysis.before[pc].as_ref().expect("reachable return")[instruction.a as usize],
+                    ScalarFact::Int
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typed_scalar_overlay_guards_none_and_proves_return() {
         let program = function("def identity(value):\n    return value");
         let code = &program.program().code[1];

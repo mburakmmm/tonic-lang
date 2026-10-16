@@ -589,6 +589,22 @@ box={}
 box['item']: missing_name = 4
 print(box)
 ''',
+'''def opaque_local(value):
+    return value
+def evolve_local(seed:int,count:int)->int:
+    value: int
+    if seed:
+        value=opaque_local(seed)
+    else:
+        value=opaque_local('branch-mismatch')
+    index=0
+    while index<count:
+        value=opaque_local(value+1)
+        index+=1
+    return value
+print(evolve_local(40,2))
+print(evolve_local(0,0))
+''',
 '''def opaque(value):
     return value
 def integer(value: int) -> int:

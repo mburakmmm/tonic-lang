@@ -544,6 +544,16 @@ normal kopyayı yaptırır ve successor'da gerçek değeri guard eder. Condition
 data-flow'a katılabilir. Karar
 [ADR 0157](adr/0157-local-expression-store-annotations.md) dosyasındadır.
 
+Bytecode v40 basit scalar local annotation'ları function-scope store planına
+yükseltir. Compiler nested function/class scope'larına girmeden bütün control
+flow gövdelerini tarar; tek ve tutarlı planı annotation'dan önceki ve sonraki
+ordinary local `MOVE` store'larına taşır. JIT exact store PC'sinde VM'e çıkar,
+successor'da materialize edilmiş hedefi guard eder ve mevcut worklist
+fixed-point analizi fact'i branch join ile loop backedge boyunca birleştirir.
+Çelişkili veya unsupported annotation aynı isim için propagation'ı kapatır.
+Yanlış değer korunur ve generic Python bytecode'u sürer. Karar
+[ADR 0158](adr/0158-function-wide-local-annotation-stores.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

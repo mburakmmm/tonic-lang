@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 32, core verifier 21, Cranelift JIT 39, runtime unit 30,
+Test dağılımı: CLI 10, compiler/parser 33, core verifier 21, Cranelift JIT 40, runtime unit 30,
 direct bytecode VM 4, buffer 15, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 175, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 488 test.
+native handles 5, language/runtime 176, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 491 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -356,7 +356,7 @@ function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
 deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
 `code-budget` kaydını ve limit açıklamasını doğrular.
 
-Differential corpus: 342 stdout vakası ve 261 exception türü vakası. Seed 42.
+Differential corpus: 349 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -1082,3 +1082,11 @@ dalında guarded `MOVE` successor'ından native integer arithmetic'e döndüğü
 diğer dal ordinary call ile string ürettiğinde annotation kaynaklı hata eklemeden
 aynı string'i döndürdüğünü ve stress-GC altında side-exit/resume/deopt
 sayaçlarını doğrular.
+
+Bytecode v40 function-wide local store testi bare scalar annotation'ın branch
+ve loop içindeki ordinary atamalara yayıldığını; doğru int store'ların CFG
+fixed-point üzerinden kanıtlı native dönüşe ulaştığını ve string mismatch'in yeni
+bir annotation hatası oluşturmadan generic sonuç olarak kaldığını doğrular.
+Compiler testi annotation'dan önceki store'u, branch/loop store'larını ve
+çelişkili annotation'da fail-closed metadata kararını; JIT unit testi erişilebilir
+dönüşte loop/join sonrası exact `Int` fact'ini kapsar.
