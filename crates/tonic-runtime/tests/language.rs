@@ -3316,6 +3316,41 @@ fn annotation_jit_guards_function_wide_local_branch_and_loop_stores() {
 }
 
 #[test]
+fn annotation_jit_propagates_local_annotations_into_captured_cell_loads() {
+    let source = concat!(
+        "def make():\n",
+        "    captured: int = 41\n",
+        "    def update(value):\n",
+        "        nonlocal captured\n",
+        "        captured = value\n",
+        "    def read(delta:int)->int:\n",
+        "        if delta:\n            return captured + delta\n",
+        "        return captured\n",
+        "    return read,update\n",
+        "read,update=make()\n",
+        "print(read(1))\n",
+        "update('captured-mismatch')\n",
+        "print(read(0))\n",
+    );
+    let program = compile(source, "annotation-jit-captured-local-plan").unwrap();
+    let mut vm = Vm::new().unwrap();
+    vm.execution_mode = ExecutionMode::Jit;
+    vm.gc_interval = Some(1);
+    let mut out = Vec::new();
+    vm.run(&program, &mut out).unwrap();
+    assert_eq!(out, b"42\ncaptured-mismatch\n");
+    assert_eq!(vm.stats.jit_annotation_candidates, 1);
+    assert_eq!(vm.stats.jit_annotation_compiled, 1);
+    assert_eq!(vm.stats.jit_typed_result_sites, 2);
+    assert_eq!(vm.stats.jit_local_annotation_result_sites, 2);
+    assert!(vm.stats.jit_side_exits >= 2);
+    assert!(vm.stats.jit_resumes >= 2);
+    assert!(vm.stats.jit_deopts >= 1);
+    assert!(vm.stats.jit_typed_return_guards_elided >= 1);
+    assert!(vm.stats.gc_collections > 0);
+}
+
+#[test]
 fn tonic_compile_decorator_requests_first_call_jit_without_changing_semantics() {
     let source = concat!(
         "import tonic\n",

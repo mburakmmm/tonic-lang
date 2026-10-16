@@ -613,6 +613,58 @@ fn local_annotations_guard_function_wide_branch_and_loop_stores() {
 }
 
 #[test]
+fn local_annotations_propagate_across_lexical_cell_captures() {
+    let source = concat!(
+        "def make():\n",
+        "    captured: int = 41\n",
+        "    def read(delta):\n",
+        "        if delta:\n            return captured + delta\n",
+        "        return captured\n",
+        "    return read\n",
+        "def conflicted():\n",
+        "    captured: int\n",
+        "    captured: str\n",
+        "    def read():\n        return captured\n",
+        "    return read\n",
+        "def forwarded():\n",
+        "    captured: int = 1\n",
+        "    def middle():\n        return lambda: captured\n",
+        "    return middle\n",
+    );
+    let program = compile(source, "captured-local-annotations").unwrap();
+    let read_functions = program
+        .program()
+        .code
+        .iter()
+        .filter(|code| code.name.ends_with("read"))
+        .collect::<Vec<_>>();
+    assert_eq!(read_functions.len(), 2);
+    assert_eq!(read_functions[0].free_vars.len(), 1);
+    assert_eq!(read_functions[0].advisory_results.len(), 2);
+    assert!(read_functions[0].advisory_results.iter().all(|hint| {
+        hint.result == AdvisoryScalar::Int
+            && Op::try_from(read_functions[0].instructions[usize::from(hint.pc)].opcode)
+                == Ok(Op::LoadCell)
+    }));
+    assert_eq!(read_functions[1].free_vars.len(), 1);
+    assert!(read_functions[1].advisory_results.is_empty());
+
+    let lambda = program
+        .program()
+        .code
+        .iter()
+        .find(|code| code.name.ends_with("<lambda>"))
+        .expect("forwarded lambda");
+    assert_eq!(lambda.free_vars.len(), 1);
+    assert_eq!(lambda.advisory_results.len(), 1);
+    assert_eq!(lambda.advisory_results[0].result, AdvisoryScalar::Int);
+    assert_eq!(
+        Op::try_from(lambda.instructions[usize::from(lambda.advisory_results[0].pc)].opcode),
+        Ok(Op::LoadCell)
+    );
+}
+
+#[test]
 fn type_parameters_and_aliases_are_owned_and_lowered() {
     let source = "def identity[T: int, *Ts, **P](value: T) -> T:\n    return value\nclass Box[T]:\n    item: T\ntype Pair[T] = (T, T)\n";
     let ast = parse(source, "type-parameters").unwrap();

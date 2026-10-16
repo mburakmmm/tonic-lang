@@ -554,6 +554,15 @@ fixed-point analizi fact'i branch join ile loop backedge boyunca birleştirir.
 Yanlış değer korunur ve generic Python bytecode'u sürer. Karar
 [ADR 0158](adr/0158-function-wide-local-annotation-stores.md) dosyasındadır.
 
+Bytecode v41 aynı local planı lexical capture graph'ına taşır. Child scope'un
+`free` set'i propagation sınırıdır; forwarding closure zincirleri desteklenir,
+class body ayrı kalır. Inherited plan taşıyan `LOAD_CELL` yine exact-PC VM
+side-exit kullanır ve yalnız materialize edilmiş register successor guard'ından
+sonra typed fact olur. Böylece raw cell adresi/JIT heap layout bağımlılığı
+oluşmaz; `STORE_CELL`, write barrier ve nonlocal mutation VM doğruluk yolunda
+kalır. Çelişkili source plan aynı producer metadata'sını fail-closed kaldırır.
+Karar [ADR 0159](adr/0159-captured-local-annotation-propagation.md) dosyasındadır.
+
 Python 3.12 type parameter ve `type` alias sözdizimi artık parser adapter'dan
 Tonic-owned `TypeParam`/`TypeAlias` düğümlerine geçer. Bytecode v31
 `TYPE_PARAM`/`TYPE_ALIAS`, doğrulanmış register metadata'sından managed TypeVar,

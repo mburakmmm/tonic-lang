@@ -336,6 +336,14 @@ döner. Aynı isimde çelişkili veya unsupported annotation planı fail-closed
 kapatır; nested code scope'a sızmaz. Karar
 [ADR 0158](adr/0158-function-wide-local-annotation-stores.md) içindedir.
 
+Sekizinci local dilim bytecode v41 ile owner function'daki tutarlı scalar local
+planını yalnız child scope'un lexical `free` kümesindeki isimlere aktarır. Nested
+function/lambda `LOAD_CELL` exact PC'de VM'e çıkar; unbound/root/GC semantiğiyle
+materialize edilen değer successor'da guard edilerek child typed data-flow'una
+girer. `STORE_CELL` VM heap mutation/write-barrier yolunda kalır ve nonlocal
+mismatch generic Python sonucunu korur. Karar
+[ADR 0159](adr/0159-captured-local-annotation-propagation.md) içindedir.
+
 Yol haritasındaki Cython-benzeri tamamlanma kapısı bu mekanizmayı scalar leaf
 örneklerinin ötesine taşır: local/closure inference, graph-wide typed calls,
 annotated field/shape, homogeneous container ve alias/escape analizi ile geniş

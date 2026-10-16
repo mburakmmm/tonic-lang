@@ -605,6 +605,21 @@ def evolve_local(seed:int,count:int)->int:
 print(evolve_local(40,2))
 print(evolve_local(0,0))
 ''',
+'''def make_captured_plan():
+    captured: int=41
+    def update(value):
+        nonlocal captured
+        captured=value
+    def read(delta:int)->int:
+        if delta:
+            return captured+delta
+        return captured
+    return read,update
+read_captured_plan,update_captured_plan=make_captured_plan()
+print(read_captured_plan(1))
+update_captured_plan('captured-mismatch')
+print(read_captured_plan(0))
+''',
 '''def opaque(value):
     return value
 def integer(value: int) -> int:

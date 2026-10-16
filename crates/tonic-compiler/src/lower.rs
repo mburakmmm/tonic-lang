@@ -39,6 +39,7 @@ pub fn compile(module: Module, name: &str, filename: &str) -> Result<Program> {
         &Parameters::default(),
         &module.body,
         scope,
+        Vec::new(),
     )?;
     program.modules[0].code_count = index(program.code.len())?;
     program.modules[0].globals = (0..program.symbols.len())
@@ -53,15 +54,27 @@ fn build(
     params: &Parameters,
     body: &[Stmt],
     scope: Scope,
+    inherited_advisories: Vec<(SymbolId, AdvisoryScalar)>,
 ) -> Result<u16> {
     let id = index(program.code.len())?;
     let next = index(scope.locals.len())?;
     let code = code_object(name, params, &scope)?;
-    let local_advisories = if scope.module || scope.class_body {
+    let mut local_advisories = if scope.module || scope.class_body {
         Vec::new()
     } else {
         advisory_local_annotations(body, &program.symbols)
     };
+    if !scope.module && !scope.class_body {
+        for advisory in inherited_advisories {
+            if scope.free.contains(&advisory.0)
+                && !local_advisories
+                    .iter()
+                    .any(|(candidate, _)| *candidate == advisory.0)
+            {
+                local_advisories.push(advisory);
+            }
+        }
+    }
     // Reserve identity before recursively compiling functions.
     program.code.push(code.clone());
     let mut lower = Lower {
@@ -426,6 +439,33 @@ struct Lower<'a> {
     local_advisories: Vec<(SymbolId, AdvisoryScalar)>,
 }
 impl Lower<'_> {
+    fn captured_advisories(&self, child: &Scope) -> Vec<(SymbolId, AdvisoryScalar)> {
+        self.local_advisories
+            .iter()
+            .copied()
+            .filter(|(name, _)| child.free.contains(name))
+            .collect()
+    }
+
+    fn record_advisory_result(&mut self, pc: usize, result: AdvisoryScalar) -> Result<()> {
+        let pc = index(pc)?;
+        if let Some(position) = self
+            .code
+            .advisory_results
+            .iter()
+            .position(|existing| existing.pc == pc)
+        {
+            if self.code.advisory_results[position].result != result {
+                self.code.advisory_results.remove(position);
+            }
+        } else {
+            self.code
+                .advisory_results
+                .push(AdvisoryResult { pc, result });
+        }
+        Ok(())
+    }
+
     fn lower_type_params(&mut self, params: &[TypeParam]) -> Result<Vec<u16>> {
         let mut values = Vec::with_capacity(params.len());
         for param in params {
@@ -609,7 +649,14 @@ impl Lower<'_> {
             return Ok(r);
         }
         if let Some(cell) = self.scope.cell(n) {
-            self.emit(Op::LoadCell, r, cell, 0, s)?;
+            let pc = self.emit(Op::LoadCell, r, cell, 0, s)?;
+            if let Some(result) = self
+                .local_advisories
+                .iter()
+                .find_map(|(candidate, result)| (*candidate == n).then_some(*result))
+            {
+                self.record_advisory_result(pc, result)?;
+            }
         } else if let Some(local) = self.scope.local(n) {
             self.emit(Op::Move, r, local, 0, s)?;
         } else {
@@ -634,15 +681,12 @@ impl Lower<'_> {
         } else if let Some(local) = self.scope.local(n) {
             let pc = self.emit(Op::Move, local, r, 0, s)?;
             if advisory {
-                if let Some((_, result)) = self
+                if let Some(result) = self
                     .local_advisories
                     .iter()
-                    .find(|(candidate, _)| *candidate == n)
+                    .find_map(|(candidate, result)| (*candidate == n).then_some(*result))
                 {
-                    self.code.advisory_results.push(AdvisoryResult {
-                        pc: index(pc)?,
-                        result: *result,
-                    });
+                    self.record_advisory_result(pc, result)?;
                 }
             }
         } else {
@@ -1366,10 +1410,7 @@ impl Lower<'_> {
                             boundary_pc,
                             advisory_scalar(annotation, &self.program.symbols),
                         ) {
-                            self.code.advisory_results.push(AdvisoryResult {
-                                pc: index(pc)?,
-                                result,
-                            });
+                            self.record_advisory_result(pc, result)?;
                         }
                     }
                 } else {
@@ -1490,13 +1531,21 @@ impl Lower<'_> {
                 let binding_mark = self.type_bindings.len();
                 let type_param_values = self.lower_type_params(type_params)?;
                 let child = self.scope.take_child(s.start);
+                let inherited_advisories = self.captured_advisories(&child);
                 let captures = child
                     .free
                     .iter()
                     .map(|n| self.scope.cell(*n).expect("class capture"))
                     .collect();
                 let label = self.qualified_name(label);
-                let id = build(self.program, label, &Parameters::default(), body, child)?;
+                let id = build(
+                    self.program,
+                    label,
+                    &Parameters::default(),
+                    body,
+                    child,
+                    inherited_advisories,
+                )?;
                 let site = index(self.code.functions.len())?;
                 self.code.functions.push(FunctionSite {
                     code: id,
@@ -1599,12 +1648,20 @@ impl Lower<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 let label = self.qualified_name(label);
                 let child = self.scope.take_child(s.start);
+                let inherited_advisories = self.captured_advisories(&child);
                 let captures = child
                     .free
                     .iter()
                     .map(|n| self.scope.cell(*n).expect("captured cell"))
                     .collect();
-                let id = build(self.program, label, params, body, child)?;
+                let id = build(
+                    self.program,
+                    label,
+                    params,
+                    body,
+                    child,
+                    inherited_advisories,
+                )?;
                 let site = index(self.code.functions.len())?;
                 let defaults = params
                     .defaults()
@@ -2037,6 +2094,7 @@ impl Lower<'_> {
             }
             ExprKind::Lambda { params, body } => {
                 let child = self.scope.take_child(s.start);
+                let inherited_advisories = self.captured_advisories(&child);
                 let captures = child
                     .free
                     .iter()
@@ -2052,6 +2110,7 @@ impl Lower<'_> {
                     params,
                     &[statement],
                     child,
+                    inherited_advisories,
                 )?;
                 let defaults = params
                     .defaults()

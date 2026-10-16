@@ -543,6 +543,11 @@ sonra alınır.
         `MOVE` fact'i. Çelişkili/unsupported local annotation fail-closed kalır;
         yanlış değer materialize edilmiş generic Python akışında korunur. Native
         cell-store SSA ve kesintisiz unboxed local/call ABI açık.
+      - [x] Captured local planı: bytecode v41 outer local scalar annotation'ını
+        lexical free-var/cell zincirinden nested function ve lambda'ya taşıyan
+        `LOAD_CELL` guard'ları; nonlocal mutation, unbound kontrolü, precise root
+        ve write barrier VM'de kalır. Yanlış cell değeri advisory fallback ile
+        korunur; native cell storage ve unboxed closure ABI açık.
     - [ ] Interprocedural direct-call graph, native recursion/SCC, annotated
       field/shape ve bounded monomorphization/inlining ile graph-wide code budget.
     - [ ] Homogeneous container/iterator specialization, alias/escape analizi,

@@ -40,11 +40,11 @@ kapısı yalnız bu işler yeşil olduktan sonra tamamlanmış sayılır.
 - `python3 benches/compare_python.py ... --output docs/benchmarks/python-comparison-stage8-runN`
 - `python3 benches/aggregate_comparison.py`
 
-Test dağılımı: CLI 10, compiler/parser 33, core verifier 21, Cranelift JIT 40, runtime unit 30,
+Test dağılımı: CLI 10, compiler/parser 34, core verifier 21, Cranelift JIT 40, runtime unit 30,
 direct bytecode VM 4, buffer 15, C ABI integration 18, foreign wrapper 6, lifecycle/callback 6,
 call binder/cache 12, closure 8, dict 8, GC integration 9, class integration 55,
-native handles 5, language/runtime 176, CPython bridge 15, HPy inventory/host unit 6,
-HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 491 test.
+native handles 5, language/runtime 177, CPython bridge 15, HPy inventory/host unit 6,
+HPy loader 6 ve HPy Universal entegrasyonu 8; toplam 493 test.
 
 Annotation typed-JIT testleri exact `int` ile mevcut unboxed F64 data-flow yolunu
 ilk çağrıda, varsayılan hotness/kârlılık eşiklerini beklemeden derler. Exact
@@ -356,7 +356,7 @@ function, `unsupported-bytecode` kategori kodu, bytecode PC, `Pow` opcode'u ve
 deterministic nedeni doğrular. Code-budget runtime testi aynı public accessor'ın
 `code-budget` kaydını ve limit açıklamasını doğrular.
 
-Differential corpus: 349 stdout vakası ve 261 exception türü vakası. Seed 42.
+Differential corpus: 350 stdout vakası ve 261 exception türü vakası. Seed 42.
 Sequence iterator fallback protokol diliminden sonra debug/release × interpreter/JIT ×
 default/`gc_every=1` matrisinin sekiz koşusu da Python 3.15.0 oracle'ıyla geçmiştir.
 Aritmetik sign/overflow/rounding sınırları, fibonacci/factorial, loop, scope,
@@ -1090,3 +1090,11 @@ bir annotation hatası oluşturmadan generic sonuç olarak kaldığını doğrul
 Compiler testi annotation'dan önceki store'u, branch/loop store'larını ve
 çelişkili annotation'da fail-closed metadata kararını; JIT unit testi erişilebilir
 dönüşte loop/join sonrası exact `Int` fact'ini kapsar.
+
+Bytecode v41 captured-local testi outer `captured: int` planının nested child'ın
+iki `LOAD_CELL` sitesine aktarıldığını ve typed return proof ürettiğini doğrular.
+Escaping `nonlocal` setter cell'e string yazdığında child aynı string'i yeni type
+hatası olmadan döndürür; exact-PC side-exit/resume/deopt ile every-allocation GC
+altında cell root ve write-barrier yolu korunur. Compiler testi lexical capture
+metadata'sını ve owner'daki çelişkili annotation'ın child planını kapatmasını
+ayrıca denetler.
